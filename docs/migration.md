@@ -3,6 +3,74 @@
 What changed for an existing HY-HARNESS workspace, oldest first. Nothing here
 rewrites your files; the actions are opt-in.
 
+## Codex adoption, C0–C5 (2026-11) / Codex 採用（C0〜C5）
+
+Codex 採用計画で既定や操作が変わった点と、他のツールからの移り方です。
+
+### 1. サンドボックスの既定が `workspace-write` に（CP-01）
+
+| 以前 | 今 |
+| :--- | :--- |
+| 既定は `unconfined`（制限なし） | 既定は **`workspace-write`**：ワークスペースの外には書けない。読み取りは `denyRead` 以外は従来どおり |
+
+- 従来の動作に戻すには、1 回だけなら `--unsafe-unconfined`、恒久的には設定の `"sandbox": { "legacyUnconfined": true }` を使います。
+- 秘密のフォルダを読ませないなら `"sandbox": { "denyRead": ["~/.ssh", "~/.aws"] }`。Low 整合性の閉じ込めトークンに対して Medium の NO_READ_UP ラベルで拒否します。ユーザー自身は読めます。
+- 書かせたくないサブフォルダは `"sandbox": { "readOnly": ["vendor"] }`。
+- 権限の組み合わせは `permissions` / `defaultPermissions` の名前付きプロファイルにまとめられます（`extends` 可）。
+- ワークスペースが `%TEMP%` の下にあると、環境によっては閉じ込めが使えません（`%LOCALAPPDATA%` に AppContainer の ACE があるため。ADR 0001 §5.2）。`hy doctor` が `sandbox` の行で知らせます。
+
+### 2. 承認
+
+- 承認ポリシーは `untrusted`（既定）/`on-request`/`on-failure`/`never` です。
+- GUI の承認カードは cwd・影響するパス・接続先の可能性を表示します。「今回だけ」「このセッション中」「常に」を選べます。「常に」はユーザーの `policy.star` に `prefix_rule` を追記しますが、`unconfined` と `low-integrity` のコマンドでは選べません。キーボードでは Y / S / A / N、どこからでも Alt+Y / S / A / N です。
+- 拒否理由はエージェントに届きます。
+
+### 3. Claude Code・DSH から取り込む（CP-31）
+
+```powershell
+hy import claude            # 計画と差分を表示（何も書かない）
+hy import claude --yes      # 書き込む
+hy import claude --only agents,mcp --yes
+hy import dsh --yes         # このワークスペースの DSH セッションをスレッドとして取り込む
+```
+
+GUI では `/import`（またはパレットの「Import from Claude Code / DSH」）から、チェックした種類だけを取り込めます。
+
+| 取り込み元 | 取り込み先 |
+| :--- | :--- |
+| `CLAUDE.md`（プロジェクト・`~/.claude`） | `AGENTS.md`（無ければ作成、あれば印付きの節を 1 回だけ追記） |
+| `.mcp.json`、`~/.claude.json` の `mcpServers` | 設定の `mcpServers`（既存の名前は上書きしない。`env` はそのままコピー） |
+| `.claude/settings*.json` の hooks | HY のフック（イベント名・ツール名を対応表で変換。対応の無いものは報告） |
+| `.claude/skills/<名前>/` | HY の skills |
+| `.claude/commands/*.md` | `prompts/*.md`（`$ARGUMENTS` は共通） |
+| `~/.claude/projects/<ws>/memory/*.md` | ワークスペースメモリ（上限に達したら失敗として報告） |
+| `~/.dsh/sessions/…/session.v4.jsonl.zstd` | このワークスペースのスレッド（ユーザー・アシスタント・ツールの往復、元の時刻） |
+
+資格情報（DSH の `.credentials.yaml`、Claude のログイン情報）は読みません。取り込みは冪等で、2 回目は全部 `skip` になります。
+
+### 4. CLI・GUI の新しい操作
+
+- コマンドは GUI と CLI で揃えました（`/help` が一覧）。`/usage /mcp /plugins /memories /hooks /doctor /config /rename /fork /archive /resume /rewind /find /raw /worktree /import` など。
+- Ctrl+K のパレットはコマンド・チャット・ファイル・設定を検索します。入力欄の `/` で補完、`@` でファイル・チャット・スキル（`@skill:名前`）を参照できます。
+- Esc Esc で任意のターンまで巻き戻せます（ファイルも会話も）。
+- ステータスライン・コードの配色・Vim モード・ショートカットは `ui-state.json` に保存され、再起動後も残ります。
+
+### 5. プロトコル・SDK
+
+旧 `hy serve --sdk`（WP-51 の `session.*` メソッド）は残していますが、新しいクライアントは hy-protocol/1 を使ってください（[protocol.md](protocol.md)）。違いは次のとおりです。
+
+| 旧（`hy serve --sdk`） | 新（hy-protocol/1） |
+| :--- | :--- |
+| `session.create` / `session.prompt` | `turn/start`（`threadId` で継続） |
+| `session/event` 通知 | `turn/event`（`threadId`・`tag` 付き） |
+| stdio のみ | stdio・名前付きパイプ（デーモン）・WebSocket |
+| `HarnessClient`（TS）/`Client`（Python） | `ProtocolClient` / `connectDaemon`（TS）、`ProtocolClient`（Python） |
+
+### 6. 配布
+
+- 署名と検証の手順は [release-signing.md](release-signing.md) を参照してください。winget/Scoop のマニフェストはリリースごとに生成します。
+- Node を入れずに CLI だけを使う場合の単一 exe（Node SEA）は任意の配布物です（[ADR 0003](adr/0003-single-binary.md)）。
+
 ## From 0.2.0 to 0.4.0 (the DSH-adoption milestones)
 
 Nothing is required; every new surface is opt-in or additive.

@@ -1,6 +1,6 @@
 # Codex 差分の導入計画（実装計画 v1）
 
-- **実装状況**: 2026-11-05 の時点で **C0〜C2 を完了**、C3 は CP-25/CP-26（JSON-RPC の thread/turn 制御・承認・API スキーマ）、C4 は CP-32（コマンドとパレット、ラウンド 55）、C5 は CP-37/38/39/42 を実装済み。C4 の CP-33〜36、C3 の WS/SDK、C5 の配布物は未着手。WP 単位の表は [implementation_status.md §7](implementation_status.md)、ラウンドごとの検証は [codex-adoption-progress.md](codex-adoption-progress.md)。
+- **実装状況**: 2026-11-06 の時点で、対象の WP（ネットワーク関連の CP-03/04 と SEC-02/03/04 を除く）を **C0〜C5 すべて実装済み**。この環境で確かめられないのは実証明書での署名と `winget validate`。WP 単位の表は [implementation_status.md §7](implementation_status.md)、ラウンドごとの検証は [codex-adoption-progress.md](codex-adoption-progress.md)（ラウンド 56・57 が C3〜C5）。
 - **前提**: [codex-gap-analysis.md](codex-gap-analysis.md) の 119 件（P0: 7、P1: 28、P2: 51、P3: 33）。
 - **日付**: 2026-11-05。**対象**: HY-HARNESS v0.4.0（Windows 10 first、TS 制御プレーン + Rust 実行デーモン）。
 - **原則**:
@@ -9,7 +9,8 @@
   3. **機能を足すより深さを上げる**。同じ名前の機能（Guardian、hooks、memories、approval）を Codex 水準の異常系・診断・予算まで作る。
   4. **境界はプロトコルに置く**。GUI・CLI・IDE・SDK は同じ app-server 相当の面を使う。
   5. **すべての作業パッケージに受け入れテストを付ける**。テストのない WP は完了にしない。
-- **ネットワークは後回し（2026-11-05 のユーザー指示）**: CP-03（閉じ込め・プロキシ）と CP-04（ネットワーク承認）、および SEC-02/03/04 は実装しない。C0 の残り（CP-01/02/05/06/07/08/44）を先に進め、ネットワークは個人利用段階の後に別計画とする。進捗は [codex-adoption-progress.md](codex-adoption-progress.md)。\n- **見積り**: 全 44 WP で約 **389 人日**、**今回の対象（ネットワーク以外）は約 363 人日**（後述 §8）。Codex が 2 年以上・大規模チームで作ったものを 1 人で追う前提なので、**「採る範囲」を絞った上での楽観値**である。
+- **ネットワークは後回し（2026-11-05 のユーザー指示）**: CP-03（閉じ込め・プロキシ）と CP-04（ネットワーク承認）、および SEC-02/03/04 は実装しない。C0 の残り（CP-01/02/05/06/07/08/44）を先に進め、ネットワークは個人利用段階の後に別計画とする。進捗は [codex-adoption-progress.md](codex-adoption-progress.md)。
+- **見積り**: 全 44 WP で約 **389 人日**、**今回の対象（ネットワーク以外）は約 363 人日**（後述 §8）。Codex が 2 年以上・大規模チームで作ったものを 1 人で追う前提なので、**「採る範囲」を絞った上での楽観値**である。
 
 ---
 

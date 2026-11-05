@@ -9,6 +9,10 @@
 //! The same path launches the `hy-ptc-worker` in an AppContainer
 //! (`PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`, no token, design §2 / ADR 0001 F)
 //! with a stdin pipe for its JSON-line bridge.
+//!
+//! CP-09: with `pty`, the child gets a pseudo console (ConPTY) instead of
+//! stdio handles, for programs that need a terminal. Its input and output are
+//! the pipes ConPTY reads and writes; stderr is merged into the output.
 
 use std::ffi::c_void;
 use std::os::windows::io::FromRawHandle as _;
@@ -21,15 +25,16 @@ use windows_sys::Win32::Security::{SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
+use windows_sys::Win32::System::Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON};
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, CreateProcessW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
-    WaitForSingleObject,
+    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 use crate::console;
@@ -45,6 +50,8 @@ pub struct SpawnRequest<'a> {
     /// Gives the child a stdin pipe (returned as `ConfinedChild::stdin`)
     /// instead of `NUL`.
     pub stdin_pipe: bool,
+    /// CP-09: run in a pseudo console of (columns, rows); `stdin_pipe` is implied.
+    pub pty: Option<(u16, u16)>,
     /// Job Object the process is created in (owned by the caller).
     pub job: HANDLE,
     pub command_line: &'a str,
@@ -58,6 +65,166 @@ pub struct ConfinedChild {
     pub stdin: Option<std::fs::File>,
     pub stdout: std::fs::File,
     pub stderr: std::fs::File,
+    /// CP-09: the pseudo console. Drop it after the process exits: the output
+    /// pipe reaches EOF only once the console is closed.
+    pub pty: Option<PseudoConsole>,
+}
+
+/// An open ConPTY; closed on drop.
+pub struct PseudoConsole(HPCON);
+
+// SAFETY: an HPCON is a plain handle usable from any thread.
+unsafe impl Send for PseudoConsole {}
+
+impl Drop for PseudoConsole {
+    fn drop(&mut self) {
+        // SAFETY: created by CreatePseudoConsole, closed once.
+        unsafe { ClosePseudoConsole(self.0) };
+    }
+}
+
+/// A pipe with no inheritable end (ConPTY duplicates what it needs).
+fn plain_pipe() -> Result<(OwnedHandle, OwnedHandle)> {
+    let mut r: HANDLE = std::ptr::null_mut();
+    let mut w: HANDLE = std::ptr::null_mut();
+    // SAFETY: valid out-pointers; default (non-inheritable) security.
+    check(
+        unsafe { CreatePipe(&mut r, &mut w, std::ptr::null(), 0) },
+        "CreatePipe",
+    )?;
+    Ok((
+        OwnedHandle::new(r, "CreatePipe")?,
+        OwnedHandle::new(w, "CreatePipe")?,
+    ))
+}
+
+/// CP-09: like `spawn`, but the child's console is a pseudo console.
+fn spawn_pty(req: &SpawnRequest<'_>, cols: u16, rows: u16) -> Result<ConfinedChild> {
+    let desktop = console::private_desktop()?;
+    // ConPTY reads in_r and writes out_w; we keep in_w and out_r.
+    let (in_r, in_w) = plain_pipe()?;
+    let (out_r, out_w) = plain_pipe()?;
+    let mut hpc: HPCON = 0;
+    let size = COORD {
+        X: cols.clamp(20, 500) as i16,
+        Y: rows.clamp(5, 200) as i16,
+    };
+    // SAFETY: valid pipe handles and out-pointer.
+    let hr = unsafe { CreatePseudoConsole(size, in_r.raw(), out_w.raw(), 0, &mut hpc) };
+    if hr < 0 {
+        return Err(SandboxError::Other(format!(
+            "CreatePseudoConsole failed: 0x{:08x}",
+            hr as u32
+        )));
+    }
+    let pty = PseudoConsole(hpc);
+    let mut attrs = AttrList::new(if req.app_container.is_some() { 4 } else { 3 })?;
+    let job = req.job;
+    attrs.set(
+        PROC_THREAD_ATTRIBUTE_JOB_LIST,
+        (&job as *const HANDLE).cast(),
+        std::mem::size_of::<HANDLE>(),
+    )?;
+    let mitigation = mitigation_policy();
+    attrs.set(
+        PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+        mitigation.as_ptr().cast(),
+        std::mem::size_of_val(&mitigation),
+    )?;
+    // The attribute's value is the HPCON itself, not a pointer to it.
+    attrs.set(
+        PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+        hpc as *const c_void,
+        std::mem::size_of::<HPCON>(),
+    )?;
+    let caps = req.app_container.map(|sid| SECURITY_CAPABILITIES {
+        AppContainerSid: sid.as_psid(),
+        Capabilities: std::ptr::null_mut(),
+        CapabilityCount: 0,
+        Reserved: 0,
+    });
+    if let Some(c) = &caps {
+        attrs.set(
+            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+            (c as *const SECURITY_CAPABILITIES).cast(),
+            std::mem::size_of::<SECURITY_CAPABILITIES>(),
+        )?;
+    }
+    // SAFETY: plain-old-data; filled below.
+    let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    // With null std handles: otherwise the child inherits this process's
+    // redirected stdio instead of attaching to the pseudo console.
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.lpDesktop = desktop.as_ptr().cast_mut();
+    si.lpAttributeList = attrs.ptr();
+    let env = env_block(req.env);
+    let mut cmd = wide(req.command_line);
+    let cwd = wide(req.cwd);
+    // SAFETY: plain-old-data output.
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+    // SAFETY: every buffer outlives the call; no handles are inherited.
+    let ok = unsafe {
+        match req.token {
+            Some(token) => CreateProcessAsUserW(
+                token,
+                std::ptr::null(),
+                cmd.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                flags,
+                env.as_ptr().cast(),
+                cwd.as_ptr(),
+                &si.StartupInfo,
+                &mut pi,
+            ),
+            None => CreateProcessW(
+                std::ptr::null(),
+                cmd.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                flags,
+                env.as_ptr().cast(),
+                cwd.as_ptr(),
+                &si.StartupInfo,
+                &mut pi,
+            ),
+        }
+    };
+    check(
+        ok,
+        if req.token.is_some() {
+            "CreateProcessAsUserW"
+        } else {
+            "CreateProcessW"
+        },
+    )?;
+    let process = OwnedHandle::new(pi.hProcess, "CreateProcess")?;
+    drop(OwnedHandle::new(pi.hThread, "CreateProcess")?);
+    // ConPTY holds its own duplicates of these ends.
+    drop((in_r, out_w));
+    // stderr is merged into the console output: an already-closed pipe reads EOF.
+    let (err_r, err_w) = plain_pipe()?;
+    drop(err_w);
+    // SAFETY: the Files take ownership of our ends.
+    let (stdin, stdout, stderr) = unsafe {
+        (
+            std::fs::File::from_raw_handle(in_w.into_raw()),
+            std::fs::File::from_raw_handle(out_r.into_raw()),
+            std::fs::File::from_raw_handle(err_r.into_raw()),
+        )
+    };
+    Ok(ConfinedChild {
+        process,
+        pid: pi.dwProcessId,
+        stdin: Some(stdin),
+        stdout,
+        stderr,
+        pty: Some(pty),
+    })
 }
 
 /// Quotes one argument for the MSVCRT/`CommandLineToArgvW` rules.
@@ -226,6 +393,9 @@ impl Drop for AttrList {
 }
 
 pub fn spawn(req: &SpawnRequest<'_>) -> Result<ConfinedChild> {
+    if let Some((cols, rows)) = req.pty {
+        return spawn_pty(req, cols, rows);
+    }
     console::ensure_hidden_console()?;
     // Confined children never share the user's interactive desktop.
     let desktop = console::private_desktop()?;
@@ -363,6 +533,7 @@ pub fn spawn(req: &SpawnRequest<'_>) -> Result<ConfinedChild> {
         stdin,
         stdout,
         stderr,
+        pty: None,
     })
 }
 

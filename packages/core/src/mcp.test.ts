@@ -4,7 +4,7 @@ import http from 'node:http'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fileURLToPath } from 'node:url'
-import { McpManager } from './mcp.js'
+import { McpManager, elicitationContent, setElicitationHandler } from './mcp.js'
 
 const server = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'tests', 'fixtures', 'mcp-echo-server.mjs')
 
@@ -130,4 +130,48 @@ test('CP-11: an HTTP MCP failure is reported, not fatal', async () => {
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
+})
+const promptsServer = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'tests', 'fixtures', 'mcp-prompts-server.mjs')
+
+test('CP-11: MCP prompts are listed and rendered', async () => {
+  const mcp = await McpManager.start({ p: { command: process.execPath, args: [promptsServer] } })
+  try {
+    const listed = await mcp.prompts()
+    assert.deepEqual(listed.errors, [])
+    assert.deepEqual(listed.prompts.map((p) => [p.server, p.name, p.arguments.map((a) => a.name)]), [
+      ['p', 'review', ['file']],
+      ['p', 'hello', []],
+    ])
+    const review = await mcp.getPrompt('p', 'review', { file: 'src/a.ts' })
+    assert.deepEqual(review, { description: 'Review a file', messages: [{ role: 'user', text: 'Please review src/a.ts' }] })
+    await assert.rejects(mcp.getPrompt('nope', 'x'), /not running/)
+  } finally {
+    mcp.close()
+  }
+})
+
+test('CP-11: elicitation goes to the registered handler; without one it is declined', async () => {
+  const mcp = await McpManager.start({ p: { command: process.execPath, args: [promptsServer] } })
+  try {
+    setElicitationHandler(undefined)
+    assert.equal((await mcp.call('p', 'ask', {})).text, 'user declined')
+    const asked: string[] = []
+    setElicitationHandler(async (request) => {
+      asked.push(`${request.server}: ${request.message}`)
+      return elicitationContent(request.requestedSchema, 'teal')
+    })
+    assert.equal((await mcp.call('p', 'ask', {})).text, 'colour: teal')
+    assert.deepEqual(asked, ['p: Which colour?'])
+  } finally {
+    setElicitationHandler(undefined)
+    mcp.close()
+  }
+})
+
+test('CP-11: free-text answers become typed elicitation content', () => {
+  assert.deepEqual(elicitationContent({ properties: { n: { type: 'number' } } }, ' 42 '), { action: 'accept', content: { n: 42 } })
+  assert.deepEqual(elicitationContent({ properties: { ok: { type: 'boolean' } } }, 'yes'), { action: 'accept', content: { ok: true } })
+  assert.deepEqual(elicitationContent({ properties: { a: {}, b: {} } }, '{"a":1,"b":"x"}'), { action: 'accept', content: { a: 1, b: 'x' } })
+  assert.deepEqual(elicitationContent({ properties: { a: {}, b: {} } }, 'not json'), { action: 'decline' })
+  assert.deepEqual(elicitationContent(undefined, '   '), { action: 'decline' })
 })

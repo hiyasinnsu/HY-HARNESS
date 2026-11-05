@@ -228,6 +228,24 @@ test('CP-10: tool_search loads a deferred tool, which then becomes callable', as
   }
 })
 
+test('CP-38: with the tool-search flag off, deferred tools are loaded from the start', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-tool-search-off-'))
+  try {
+    const tools = new ToolRuntime({} as never, dir, undefined, false, {
+      toolSearch: false,
+      memory: MemoryStore.forStateDir(path.join(dir, 'state')),
+    })
+    assert.ok(tools.activatedTools().has('memory'))
+    const saved = (await tools.execute('memory', { action: 'save', key: 'k', text: 'v' })) as { entries: number }
+    assert.equal(saved.entries, 1, 'callable without tool_search')
+    // The default keeps the deferral.
+    const lazy = new ToolRuntime({} as never, dir, undefined, false, { memory: MemoryStore.forStateDir(path.join(dir, 'state2')) })
+    assert.equal(lazy.activatedTools().has('memory'), false)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('CP-12: current_time, sleep and get_context_remaining', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-utility-'))
   try {

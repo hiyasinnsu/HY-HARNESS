@@ -15,6 +15,8 @@ import {
   LspManager,
   McpManager,
   MemoryStore,
+  elicitationContent,
+  setElicitationHandler,
   describeHooks,
   loadPlugins,
   READ_ONLY_TOOLS,
@@ -134,6 +136,7 @@ function usage(): void {
 
 Usage:
   hy run "<request>" [options]
+  hy version                              print the version
   hy web [options]                        local Web GUI (Electron uses the same server)
   hy chat [options]                       interactive session (/help inside)
   hy resume <run-id>|--last ["message"]   continue a run (interactive without a message)
@@ -500,6 +503,10 @@ async function chatLoop(p: Parsed, config: HarnessConfig, client: ExecRpcClient,
     return /^y(es)?$/i.test((answer ?? '').trim())
   }
   const answer = async (question: string) => (await reader.next(`\n[agent asks] ${question}\n> `)) ?? ''
+  // CP-11: an MCP server asking for input is answered at the prompt.
+  setElicitationHandler(async (request) =>
+    elicitationContent(request.requestedSchema, (await reader.next(`\n[MCP ${request.server} asks] ${request.message}\n> `)) ?? ''),
+  )
   let conv = Conversation.create(config, client, runId, json, ask, answer)
   const prompts = loadPrompts(config.workspaceRoot)
   console.error(`[hy] run: ${conv.runId}${conv.turns > 0 ? ` (resumed after ${conv.turns} turn(s))` : ''}. /help for commands.`)
@@ -1776,6 +1783,10 @@ async function main(): Promise<number> {
     return 0
   }
   switch (parsed.command) {
+    case 'version':
+    case '--version':
+      console.log(HARNESS_VERSION)
+      return 0
     case 'run':
       return run(parsed)
     case 'web':

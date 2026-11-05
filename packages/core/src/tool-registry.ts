@@ -106,7 +106,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       'Run a command; after foregroundWaitMs it becomes a job. root: workspace root ID (default main). Windows: PowerShell, not grep/head/find.',
     input: obj(
-      { command: str(), root: str(), cwd: str(), foregroundWaitMs: int(), hardTimeoutMs: int(), persistent: bool, stdinPipe: bool },
+      { command: str(), root: str(), cwd: str(), foregroundWaitMs: int(), hardTimeoutMs: int(), persistent: bool, stdinPipe: bool, tty: bool },
       ['command'],
     ),
     output: obj(
@@ -438,6 +438,32 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description: 'Read one MCP resource by server and uri.',
     input: obj({ server: str(), uri: str() }, ['server', 'uri']),
     output: obj({ uri: str(), mimeType: str(), text: str(), truncated: bool }, ['uri', 'text', 'truncated']),
+  },
+  {
+    name: 'list_mcp_prompts',
+    wire: true,
+    readOnly: true,
+    exposure: 'deferred',
+    requires: 'mcp',
+    description: 'List the prompt templates offered by the configured MCP servers.',
+    input: obj({}),
+    output: obj(
+      {
+        prompts: arr(obj({ server: str(), name: str(), description: str(), arguments: arr(obj({ name: str(), required: bool }, ['name'])) }, ['server', 'name', 'arguments'])),
+        errors: arr(str()),
+      },
+      ['prompts', 'errors'],
+    ),
+  },
+  {
+    name: 'get_mcp_prompt',
+    wire: true,
+    readOnly: true,
+    exposure: 'deferred',
+    requires: 'mcp',
+    description: 'Render one MCP prompt template (server, name, string arguments) into messages.',
+    input: obj({ server: str(), name: str(), arguments: obj({}) }, ['server', 'name']),
+    output: obj({ description: str(), messages: arr(obj({ role: str(), text: str() }, ['role', 'text'])) }, ['messages']),
   },  {
     name: 'request_permissions',
     wire: true,
@@ -449,7 +475,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'write_stdin',
     wire: true,
     readOnly: false,
-    description: 'Send input to a job started with shell { stdinPipe: true } and return its new output.',
+    description: 'Send input to a shell job started with stdinPipe or tty; returns its new output.',
     input: obj({ jobId: str(), chars: str(), timeoutMs: int() }, ['jobId', 'chars']),
     output: obj(
       {

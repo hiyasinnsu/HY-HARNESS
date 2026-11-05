@@ -86,7 +86,7 @@ export class McpClient implements McpTransport {
     const client = new McpClient(name, child, config.timeoutMs ?? 60_000)
     await client.request('initialize', {
       protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities: {},
+      capabilities: { elicitation: {} },
       clientInfo: { name: 'hy-harness', version: '0.1.0' },
     })
     client.notify('notifications/initialized')
@@ -107,8 +107,16 @@ export class McpClient implements McpTransport {
         continue // Servers may log to stdout by mistake; skip non-JSON lines.
       }
       if (msg.method !== undefined) {
-        // Server requests (sampling, roots, elicitation) are not supported.
-        if (msg.id !== undefined) this.send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'not supported by hy-harness' } })
+        // CP-11: elicitation asks the user (through the registered handler);
+        // other server requests (sampling, roots) are not supported.
+        if (msg.id !== undefined) {
+          const id = msg.id
+          if (msg.method === 'elicitation/create') {
+            void answerElicitation(this.name, (msg as { params?: unknown }).params).then((result) => this.send({ jsonrpc: '2.0', id, result }))
+          } else {
+            this.send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'not supported by hy-harness' } })
+          }
+        }
         continue
       }
       const p = typeof msg.id === 'number' ? this.pending.get(msg.id) : undefined
@@ -232,6 +240,64 @@ export class McpClient implements McpTransport {
 
 
 /** Shared surface of the stdio and HTTP clients (CP-11). */
+/** CP-11: an MCP server asking the user for input (`elicitation/create`). */
+export interface ElicitationRequest {
+  server: string
+  message: string
+  /** A flat JSON Schema object (`properties` of primitives). */
+  requestedSchema?: { properties?: Record<string, { type?: string; description?: string }>; required?: string[] }
+}
+
+export type ElicitationResult = { action: 'accept'; content: Record<string, unknown> } | { action: 'decline' } | { action: 'cancel' }
+
+let elicitationHandler: ((request: ElicitationRequest) => Promise<ElicitationResult>) | undefined
+
+/** Registers the UI that answers elicitations (CLI prompt, GUI question card). */
+export function setElicitationHandler(handler: ((request: ElicitationRequest) => Promise<ElicitationResult>) | undefined): void {
+  elicitationHandler = handler
+}
+
+async function answerElicitation(server: string, params: unknown): Promise<ElicitationResult> {
+  const p = (params ?? {}) as { message?: unknown; requestedSchema?: ElicitationRequest['requestedSchema'] }
+  if (!elicitationHandler) return { action: 'decline' }
+  try {
+    return await elicitationHandler({ server, message: String(p.message ?? ''), ...(p.requestedSchema ? { requestedSchema: p.requestedSchema } : {}) })
+  } catch {
+    return { action: 'cancel' }
+  }
+}
+
+/**
+ * A typed answer for an elicitation from a free-text reply: one field takes
+ * the reply (coerced to its type); several fields need a JSON object. An
+ * empty reply declines.
+ */
+export function elicitationContent(schema: ElicitationRequest['requestedSchema'], answer: string): ElicitationResult {
+  const text = answer.trim()
+  if (!text) return { action: 'decline' }
+  const props = Object.entries(schema?.properties ?? {})
+  const coerce = (type: string | undefined, value: string): unknown =>
+    type === 'number' || type === 'integer' ? Number(value) : type === 'boolean' ? /^(y|yes|true|1|はい)$/i.test(value) : value
+  if (props.length === 1) {
+    const [name, spec] = props[0]!
+    return { action: 'accept', content: { [name]: coerce(spec.type, text) } }
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return { action: 'accept', content: parsed as Record<string, unknown> }
+  } catch {
+    // fall through
+  }
+  return props.length === 0 ? { action: 'accept', content: { response: text } } : { action: 'decline' }
+}
+
+export interface McpPrompt {
+  server: string
+  name: string
+  description?: string
+  arguments: Array<{ name: string; description?: string; required?: boolean }>
+}
+
 export interface McpTransport {
   readonly name: string
   request(method: string, params?: unknown): Promise<unknown>
@@ -272,7 +338,7 @@ export class McpHttpClient implements McpTransport {
     const client = new McpHttpClient(name, config)
     await client.request('initialize', {
       protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities: {},
+      capabilities: { elicitation: {} },
       clientInfo: { name: 'hy-harness', version: '0.1.0' },
     })
     client.notify('notifications/initialized')
@@ -520,6 +586,60 @@ export class McpManager {
     if (!client) throw new Error(`MCP server ${server} is not running`)
     return client.readResource(uri)
   }
+  /** CP-11: prompts of every server (`prompts/list`, paged). */
+  async prompts(): Promise<{ prompts: McpPrompt[]; errors: string[] }> {
+    const prompts: McpPrompt[] = []
+    const errors: string[] = []
+    for (const [name, client] of this.clients) {
+      try {
+        let cursor: string | undefined
+        for (let page = 0; page < 20; page++) {
+          const r = (await client.request('prompts/list', cursor !== undefined ? { cursor } : {})) as {
+            prompts?: Array<{ name?: unknown; description?: unknown; arguments?: unknown }>
+            nextCursor?: unknown
+          }
+          for (const p of r.prompts ?? []) {
+            if (typeof p.name !== 'string') continue
+            prompts.push({
+              server: name,
+              name: p.name,
+              ...(typeof p.description === 'string' ? { description: p.description } : {}),
+              arguments: Array.isArray(p.arguments)
+                ? (p.arguments as Array<{ name?: unknown; description?: unknown; required?: unknown }>)
+                    .filter((a) => typeof a.name === 'string')
+                    .map((a) => ({ name: String(a.name), ...(typeof a.description === 'string' ? { description: a.description } : {}), ...(a.required === true ? { required: true } : {}) }))
+                : [],
+            })
+          }
+          cursor = typeof r.nextCursor === 'string' ? r.nextCursor : undefined
+          if (!cursor) break
+        }
+      } catch (error) {
+        // A server without prompts answers -32601; that is not an error to show.
+        const message = error instanceof Error ? error.message : String(error)
+        if (!/-32601|not found|unknown method/i.test(message)) errors.push(`${name}: ${message}`)
+      }
+    }
+    return { prompts, errors }
+  }
+
+  /** CP-11: one prompt rendered by its server (`prompts/get`), as role + text messages. */
+  async getPrompt(server: string, name: string, args: Record<string, string> = {}): Promise<{ description?: string; messages: Array<{ role: string; text: string }> }> {
+    const client = this.clients.get(server)
+    if (!client) throw new Error(`MCP server ${server} is not running`)
+    const r = (await client.request('prompts/get', { name, arguments: args })) as {
+      description?: unknown
+      messages?: Array<{ role?: unknown; content?: { type?: unknown; text?: unknown; resource?: { text?: unknown } } }>
+    }
+    return {
+      ...(typeof r.description === 'string' ? { description: r.description } : {}),
+      messages: (r.messages ?? []).map((m) => ({
+        role: String(m.role ?? 'user'),
+        text: m.content?.type === 'text' ? String(m.content.text ?? '') : m.content?.resource?.text !== undefined ? String(m.content.resource.text) : `[${String(m.content?.type ?? 'content')}]`,
+      })),
+    }
+  }
+
   /** The system-prompt section listing the tools. */
   renderCatalog(): string {
     if (this.tools.length === 0) return ''

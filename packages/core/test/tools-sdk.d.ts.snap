@@ -6,7 +6,7 @@ declare namespace tools {
   /** Diff, or file + content. Read existing files first. Added roots: whole-file content with root. */
   function applyPatch(args: { patch: string } | { file: string; content: string; root?: string }): Promise<{ appliedFiles: string[]; created: string[]; deleted: string[]; warnings: string[] }>
   /** Run a command; after foregroundWaitMs it becomes a job. root: workspace root ID (default main). Windows: PowerShell, not grep/head/find. */
-  function shell(args: { command: string; root?: string; cwd?: string; foregroundWaitMs?: number; hardTimeoutMs?: number; persistent?: boolean; stdinPipe?: boolean }): Promise<{ status: 'completed' | 'backgrounded'; exitCode?: number | null; stdout: string; stderr: string; jobId?: string | null; gap?: string }>
+  function shell(args: { command: string; root?: string; cwd?: string; foregroundWaitMs?: number; hardTimeoutMs?: number; persistent?: boolean; stdinPipe?: boolean; tty?: boolean }): Promise<{ status: 'completed' | 'backgrounded'; exitCode?: number | null; stdout: string; stderr: string; jobId?: string | null; gap?: string }>
   namespace search {
     /** Glob paths (skips .git/node_modules/.hy-harness). root:* = all roots. */
     function glob(args: { pattern: string; root?: string; maxResults?: number }): Promise<{ files: string[]; truncated: boolean }>

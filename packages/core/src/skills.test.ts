@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { rankSkills, SkillUsageStore, discoverSkills, loadSkill, parseSkillFrontmatter, renderSkillCatalog } from './skills.js'
+import { rankSkills, SkillUsageStore, discoverSkills, expandSkillMentions, loadSkill, parseSkillFrontmatter, renderSkillCatalog } from './skills.js'
 import { buildSystemPrompt } from './prompt.js'
 
 function skill(root: string, dir: string, text: string): void {
@@ -84,4 +84,17 @@ test('CP-21: the usage store persists counts and sorts skills', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
+})
+test('CP-21: @skill: mentions add the skill body once and name unknown skills', () => {
+  const skills = [
+    { name: 'release', description: 'Release steps', file: '/x/release/SKILL.md', scope: 'project' as const },
+    { name: 'review', description: 'Review', file: '/x/review/SKILL.md', scope: 'user' as const },
+  ]
+  const load = (name: string) => ({ content: `${name} body\n` })
+  const none = expandSkillMentions('no mention here, email a@skill:x', skills, load)
+  assert.deepEqual(none, { text: 'no mention here, email a@skill:x', used: [], unknown: [] })
+  const r = expandSkillMentions('Use @skill:release then @skill:release and @skill:ghost', skills, load)
+  assert.deepEqual(r.used, ['release'])
+  assert.deepEqual(r.unknown, ['ghost'])
+  assert.equal(r.text, 'Use @skill:release then @skill:release and @skill:ghost\n\n<skill name="release">\nrelease body\n</skill>\n\n[not installed skills: @skill:ghost]')
 })

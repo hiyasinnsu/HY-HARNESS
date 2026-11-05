@@ -179,6 +179,11 @@ export interface ExecCommandParams {
    */
   stdinPipe?: boolean
   /**
+   * CP-09: run in a pseudo console (programs that need a terminal). Implies
+   * a writable stdin; output is the console's, with escape sequences removed.
+   */
+  tty?: boolean
+  /**
    * Gate commands from the user's command line may run unconfined (OQ-2).
    */
   userSupplied?: boolean

@@ -146,6 +146,7 @@ pub async fn run(
         token: None,
         app_container: Some(&rt.ac_sid),
         stdin_pipe: true,
+        pty: None,
         job: job.raw(),
         command_line: &command_line,
         cwd: &rt.runtime_dir,

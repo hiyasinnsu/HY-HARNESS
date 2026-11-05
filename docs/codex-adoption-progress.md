@@ -6,6 +6,58 @@
 
 ---
 
+## ラウンド 57（2026-11-06）— C1/C2 の残りと C5（配布・単一バイナリ・文書）
+
+### 完了
+
+| WP | 内容 | 主な変更 | 検証 |
+| :--- | :--- | :--- | :--- |
+| **CP-10（残り）** | `features.tool-search` フラグを実際に使う | `ToolRuntimeOptions.toolSearch`。`false` なら遅延ツールを最初から全部有効にする。`session-app.ts` の 2 か所が設定から渡す | `tools.test.ts` に「フラグ off で遅延ツールが直接呼べる」 |
+| **CP-21（残り）** | `@skill:名前` メンション | `skills.ts` の `expandSkillMentions`: 本文を `<skill name="…">` ブロックとして足し、未導入の名前は注記にする。利用回数の記録と `skill/mention` ログ。GUI の @ メニューの先頭にスキルを出す（`/api/references` が `skills` を返す）。表示側の `stripPlanPrefix` が展開部分を隠す | `skills.test.ts`・`chat-projection.test.ts` に追加 |
+| **CP-11（残り）** | MCP の prompts と elicitation | `McpManager.prompts()` / `getPrompt()`、遅延ツール `list_mcp_prompts` / `get_mcp_prompt`。initialize で `capabilities.elicitation` を宣言し、stdio クライアントが `elicitation/create` に答える。CLI は端末で質問し、GUI は実行中のセッションの質問カードに出す（該当セッションが無ければ辞退） | `mcp.test.ts` 3 件、新規 fixture `tests/fixtures/mcp-prompts-server.mjs`、統合 `mcp.test.mjs` に `hy chat` での elicitation 往復 |
+| **CP-18（残り）** | ストリーミングの再試行 | `llm.ts` の `openStreamWithRetry`: ストリームが始まる前の 429・5xx・ネットワークエラーを指数バックオフで再試行（始まった後は再試行しない） | `llm.test.ts` に 503 → 200 の再試行 |
+| **CP-09（残り）** | PTY（ConPTY） | `hy-sandbox-windows` の `SpawnRequest.pty`。`CreatePseudoConsole` と `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`。子が exec server のリダイレクトされた標準出力を継いで止まる問題は `STARTF_USESTDHANDLES` と null ハンドルで解決。プロセス終了後に疑似コンソールを閉じて出力を EOF にする。`shell` の `tty: true`（プロトコルの `ExecCommandParams.tty`）、出力の VT シーケンスは `VtStripper` で除く | `jobs.rs` の `vt_tests`、統合 `write-stdin.test.mjs` に tty 2 件（非閉じ込めと `workspace-write`。`IS-TTY`、`write_stdin` の往復、`\x1b` が残らない） |
+| **CP-40** | 配布物の署名とパッケージマネージャ | `electron-builder.yml` の `signtoolOptions`（SHA-256、RFC 3161）。新規 `.github/workflows/release.yml`（タグで verify → package → Authenticode 確認 → フィード署名 → マニフェスト → リリース）。新規 `package-manifests.ts`（winget 1.6.0 の 3 ファイル、Scoop）と `scripts/gen-package-manifests.mjs`。手順は新規 `docs/release-signing.md` | `package-manifests.test.ts`。更新の検証とロールバックは既存の `update-feed.test.ts`・`onboarding.test.mjs`・`update-script.test.mjs` |
+| **CP-41** | 単一バイナリの試作と判断 | `scripts/sea/`（Node SEA の起動部・ビルド・計測）。`hy version` コマンドを追加 | 実測: SEA 101.3 MB・`version` 約 173 ms（`node main.js` 約 170 ms）、Electron portable 182.7 MB。目標（60 MB・100 ms）は満たせず、Rust 移植も見合わないため、SEA は任意の CLI 配布物として残す（新規 `docs/adr/0003-single-binary.md`） |
+| **CP-43** | 文書 | 新規 `docs/protocol.md`（経路・最小の会話・メソッド・エラー・TS/Python SDK・リモート exec server・ACP）。`docs/migration.md` の先頭に C0〜C5 の移行節。`codex-gap-analysis.md` に実装後の状況、README にリンク | 文書内のコマンドとメソッド名は `protocol-methods.json` と照合 |
+
+### 検証結果
+
+`pnpm build`、`pnpm verify` の 12 ゲートすべて PASS（単体 `pnpm test` **558 / 558**、`cargo test`・`cargo fmt --check`・`cargo clippy -D warnings`、`protocol-methods.json` の照合を含む）、統合 `pnpm test:integration` **137 / 137 PASS**（Ollama による K9 のツールプロンプト計測が予算 1,200 トークン以内であることを含む）。
+
+### この環境で確認できていないこと
+
+- 実際の証明書による Authenticode 署名と SmartScreen の評価、`winget validate` と winget-pkgs への提出。
+- MCP の elicitation は stdio のサーバーのみ（HTTP トランスポートでは未対応）。
+- 非同期コンパクションの「さらなる最適化」は計画の記述が曖昧なため着手していない（CP-22 の受け入れ自体は満たしている）。
+- 既知の不安定なテスト: 統合 `web-ui` の「persistent PTY keeps shell state」は全体実行の負荷下でまれに失敗する（プロンプトを待ち、失敗時に終了情報を出すようにした）。
+
+---
+
+## ラウンド 56（2026-11-05〜06）— C4（CP-33〜36）と C3（CP-27〜31）
+
+コミット `60ffc10`。
+
+### 完了
+
+| WP | 内容 | 検証 |
+| :--- | :--- | :--- |
+| **CP-33** | 差分ビューア（折りたたみ・行番号・行コメントをまとめてエージェントへ送る・新規/削除/改名の印）、トランスクリプト検索（F3 / Ctrl+F、1,000 件で 200 ms を大きく下回る）、生/整形の切替、任意のターンへの巻き戻し（Esc Esc、`/rewind`、`POST /undo {toTurn}`） | `diff-view.test.mjs`・`transcript-search.test.mjs`、統合 `web-ui`、ブラウザで実測 |
+| **CP-34** | 承認カードに cwd・サンドボックスの効果・パス・想定される通信先。1 回だけ / このセッション / 常に（`policy.star` に検査済みの `prefix_rule` を書く。非閉じ込めでは拒否）。拒否理由をエージェントへ返す。Y/S/A/N と Alt+Y/S/A/N | `approval-view.test.ts`、統合 `web-ui`、ブラウザで実測 |
+| **CP-35** | 機能とツールモード付きのモデル選択、GUI からのワークツリー（`/api/worktrees` の作成・適用・削除）、セッション操作の E2E | `model-picker.test.mjs`、統合 `web-ui` |
+| **CP-36** | ステータスラインの項目、コードの色分け（ハイライタとテーマ）、Vim モード。`ui-state.json`（`/api/ui-prefs`）に保存し再起動後も戻る | `statusline`・`highlight`・`vim`・`ui-prefs` の各テスト、ブラウザで再起動後の復元を確認 |
+| **CP-27** | 共有の `ProtocolHost`（クライアントをまたいだスレッドの使用中判定、承認とイベントはターンの持ち主へ）、stdio・名前付きパイプ・WebSocket（RFC 6455、トークン、`--allow-remote` が無ければループバックのみ）、`hy serve` の常駐（ロックファイル、冪等な起動、バックオフ付き再接続） | `ws.test.ts`、統合 `daemon.test.mjs` |
+| **CP-28** | `hy-exec-server --listen ws://IP:PORT --token T [--allow-remote]`、`ExecRpcClient.connect`、CLI の `HY_EXEC_URL` / `HY_EXEC_TOKEN` | 統合 `exec-remote.test.mjs` |
+| **CP-29** | `config/get|set`、`model/set`、`mcpServer/reload`、`plugin/reload` | 統合 `daemon.test.mjs` |
+| **CP-30** | TS の `ProtocolClient`（stdio/pipe/ws、`connectDaemon`）、Python の `ProtocolClient`、同じホスト上の ACP。`docs/protocol-methods.json` を `pnpm verify` で照合 | `protocol-methods.test.ts`、統合 `sdk.test.mjs`・`acp.test.mjs` |
+| **CP-31** | `hy import claude|dsh`（と GUI のウィザード）: AGENTS.md・MCP・フック・スキル・プロンプト・メモリ・DSH の zstd セッション。書き込む前に差分付きの計画を出す | `import.test.ts`、統合 `import.test.mjs` |
+
+### 検証結果
+
+単体 548 / 548 PASS、追加した統合テスト PASS、ブラウザでの確認。全体の結果はラウンド 57 を参照。
+
+---
+
 ## ラウンド 55（2026-11-05）— CP-32 スラッシュコマンドとパレット
 
 リポジトリを GitHub（`hiyasinnsu/HY-HARNESS`、`main`）に初回 push してから着手した。

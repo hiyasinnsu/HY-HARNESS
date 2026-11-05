@@ -96,7 +96,13 @@ export function cleanPowerShellOutput(text: string): string {
     .trim()
 }
 
-export interface ToolRuntimeOptions {  /** The run's Rationale Ledger, for `tools.rationale.*` (design §8). */
+export interface ToolRuntimeOptions {
+  /**
+   * CP-38/CP-10: the `tool-search` feature flag. Off: every deferred tool is
+   * loaded from the start (offered directly, no tool_search round trip).
+   */
+  toolSearch?: boolean
+  /** The run's Rationale Ledger, for `tools.rationale.*` (design §8). */
   ledger?: Ledger
   /** `<stateDir>/spill`; `read_file({ path: "spill://<id>" })` reads from it. */
   spillDir?: string
@@ -446,6 +452,8 @@ export class ToolRuntime {
     this.roots = options.roots?.length
       ? [...options.roots]
       : [{ id: 'main', path: workspaceRoot, label: path.basename(workspaceRoot), writable: true }]
+    // Field initialisers have run, so `activated` exists here.
+    if (options.toolSearch === false) for (const spec of this.deferredAvailable()) this.activated.add(spec.name)
   }
 
   private root(ref: string | undefined): WorkspaceRootConfig {
@@ -965,6 +973,16 @@ export class ToolRuntime {
           errors: listed.errors,
         }
       }
+      case 'list_mcp_prompts': {
+        if (!this.options.mcp) throw new Error('mcp tools are not configured')
+        return { ...(await this.options.mcp.prompts()) }
+      }
+      case 'get_mcp_prompt': {
+        if (!this.options.mcp) throw new Error('mcp tools are not configured')
+        const raw = (a.arguments ?? {}) as Record<string, unknown>
+        const args = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, String(v)]))
+        return { ...(await this.options.mcp.getPrompt(String(a.server), String(a.name), args)) }
+      }
       case 'read_mcp_resource': {
         if (!this.options.mcp) throw new Error('mcp tools are not configured')
         const resource = await this.options.mcp.readResource(String(a.server), String(a.uri))
@@ -1439,6 +1457,8 @@ export class ToolRuntime {
       ...(foregroundWaitMs !== undefined ? { foregroundWaitMs } : {}),
       ...(args.hardTimeoutMs !== undefined ? { hardTimeoutMs: Number(args.hardTimeoutMs) } : {}),
       ...(args.stdinPipe === true ? { stdinPipe: true } : {}),
+      // CP-09: a pseudo console for programs that need a terminal.
+      ...(args.tty === true ? { tty: true } : {}),
       // WP-12: the session may switch modes mid-conversation.
       ...(this.options.sandboxMode !== undefined ? { sandboxMode: this.options.sandboxMode() } : {}),
     }

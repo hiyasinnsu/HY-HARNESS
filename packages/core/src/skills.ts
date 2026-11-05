@@ -200,3 +200,35 @@ export class SkillUsageStore {
     return [...skills].sort((a, b) => (counts[b.name] ?? 0) - (counts[a.name] ?? 0) || a.name.localeCompare(b.name))
   }
 }
+
+/**
+ * CP-21: `@skill:<name>` in a user message loads that skill for the turn.
+ * The mention stays in the text; each known skill's SKILL.md body is added
+ * once as a <skill> block, and an unknown name is said to be unknown instead
+ * of being dropped silently.
+ */
+export function expandSkillMentions(
+  message: string,
+  skills: readonly SkillInfo[],
+  load: (name: string) => { content: string } = (name) => loadSkill(skills, name),
+): { text: string; used: string[]; unknown: string[] } {
+  const names = [...new Set([...message.matchAll(/(?:^|\s)@skill:([A-Za-z0-9][\w.-]*)/g)].map((m) => m[1]!))]
+  if (names.length === 0) return { text: message, used: [], unknown: [] }
+  const used: string[] = []
+  const unknown: string[] = []
+  const blocks: string[] = []
+  for (const name of names) {
+    if (!skills.some((s) => s.name === name)) {
+      unknown.push(name)
+      continue
+    }
+    try {
+      blocks.push(`<skill name="${name}">\n${load(name).content.trim()}\n</skill>`)
+      used.push(name)
+    } catch {
+      unknown.push(name)
+    }
+  }
+  const note = unknown.length ? [`[not installed skills: ${unknown.map((n) => `@skill:${n}`).join(', ')}]`] : []
+  return { text: [message, ...blocks, ...note].join('\n\n'), used, unknown }
+}

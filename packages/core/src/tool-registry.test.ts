@@ -89,7 +89,7 @@ test('jsonSchemaToTs renders unions, arrays and optional fields', () => {  asser
 
 test('SDK-only tools are not offered as wire tools', () => {
   const wire = TOOL_SPECS.filter((t) => t.wire && !t.objectiveOnly).map((t) => t.name)
-  assert.deepEqual(wire, ['read_file', 'apply_patch', 'shell', 'run_code', 'search_glob', 'search_grep', 'current_time', 'sleep', 'get_context_remaining', 'update_plan', 'skill_load', 'mcp_call', 'delegate', 'web_fetch', 'web_search', 'tool_search', 'lsp', 'memory', 'spawn_agent', 'wait_agent', 'list_agents', 'close_agent', 'list_mcp_resources', 'read_mcp_resource', 'request_permissions', 'write_stdin', 'ask_user'])
+  assert.deepEqual(wire, ['read_file', 'apply_patch', 'shell', 'run_code', 'search_glob', 'search_grep', 'current_time', 'sleep', 'get_context_remaining', 'update_plan', 'skill_load', 'mcp_call', 'delegate', 'web_fetch', 'web_search', 'tool_search', 'lsp', 'memory', 'spawn_agent', 'wait_agent', 'list_agents', 'close_agent', 'list_mcp_resources', 'read_mcp_resource', 'list_mcp_prompts', 'get_mcp_prompt', 'request_permissions', 'write_stdin', 'ask_user'])
   // A read-only session (subagent, review) is offered only reading tools.
   const ro = renderToolPrompt(true, undefined, false, new Set(['delegate']), READ_ONLY_TOOLS)
   assert.ok(!/- (apply_patch|shell|delegate)\(/.test(ro) && !/namespace (agents|jobs) \{[\s\S]*function kill/.test(ro), ro)

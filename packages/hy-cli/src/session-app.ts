@@ -12,6 +12,7 @@ import {
   MemoryStore,
   MemoryPipeline,
   SkillUsageStore,
+  expandSkillMentions,
   MockCompactorProvider,
   MockGraderProvider,
   MockGuardianProvider,
@@ -904,6 +905,7 @@ async function runSubagent(
   const mcp = o.readOnly ? undefined : sessionMcp
   const hooks = sessionHooks(config)
   const tools = new ToolRuntime(client, config.workspaceRoot, o.approve, false, {
+    toolSearch: config.features['tool-search'] !== false,
     spillDir: o.spillDir,
     // Jobs are tagged with the parent run, so its rollback kills them.
     runId: o.parentRunId,
@@ -1283,6 +1285,7 @@ export class Conversation {
         : bundleTools
       : readOnlyTools
     const tools = new ToolRuntime(client, config.workspaceRoot, approve, false, {
+      toolSearch: config.features['tool-search'] !== false,
       contextWindowTokens: config.role.contextWindowTokens,
       ledger,
       spillDir,
@@ -1512,7 +1515,7 @@ export class Conversation {
       this.planMode && !this.planOnly
         ? '[plan mode: read-only. Investigate, then propose a plan with update_plan and explain it in your final answer; do not change files until the user leaves plan mode.]'
         : '',
-      message,
+      this.withSkillMentions(message),
     ]
       .filter(Boolean)
       .join('\n\n')
@@ -1564,6 +1567,17 @@ export class Conversation {
         this.goals.view(),
       )
     }
+  }
+
+  /** CP-21: `@skill:name` loads that skill into this turn and counts its use. */
+  private withSkillMentions(message: string): string {
+    const expanded = expandSkillMentions(message, this.skills)
+    if (expanded.used.length > 0) {
+      const usage = SkillUsageStore.forStateDir(this.config.stateDir)
+      for (const name of expanded.used) usage.bump(name)
+      this.log.append('skill/mention', { used: expanded.used, unknown: expanded.unknown })
+    }
+    return expanded.text
   }
 
   /** Restores the files to before the last turn and drops it from the conversation. */

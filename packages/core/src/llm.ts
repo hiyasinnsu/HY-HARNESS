@@ -166,6 +166,39 @@ export async function postWithRetry(
   }
 }
 
+/**
+ * CP-18: opens a streaming POST, retrying like `postWithRetry` (429, 5xx,
+ * network errors; `Retry-After` honoured) until the response is OK. Nothing
+ * has been streamed before the status is known, so a retry cannot duplicate
+ * output. Returns the open response; its body is the caller's to read.
+ */
+export async function openStreamWithRetry(
+  label: string,
+  url: string,
+  init: { headers: Record<string, string>; body: string; signal?: AbortSignal },
+  retry: RetryOptions = DEFAULT_RETRY,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    let response: Response
+    try {
+      response = await fetch(url, { method: 'POST', headers: init.headers, body: init.body, ...(init.signal !== undefined ? { signal: init.signal } : {}) })
+    } catch (error) {
+      if (init.signal?.aborted || attempt >= retry.retries) throw error
+      await sleep(Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** attempt), init.signal)
+      continue
+    }
+    if (response.ok) return response
+    const text = await response.text()
+    const retriable = response.status === 429 || response.status >= 500
+    if (!retriable || attempt >= retry.retries) {
+      throw new LlmError(`${label} HTTP ${response.status}: ${text.slice(0, 300)}`, response.status, text.slice(0, 300))
+    }
+    const after = Number(response.headers.get('retry-after'))
+    const delay = Number.isFinite(after) && after > 0 ? after * 1_000 : retry.baseDelayMs * 2 ** attempt
+    await sleep(Math.min(retry.maxDelayMs, delay), init.signal)
+  }
+}
+
 export class OllamaProvider implements LlmProvider {
   readonly name: string
   private readonly baseUrl: string
@@ -305,11 +338,7 @@ export class OpenAiProvider implements LlmProvider {
       ? (typeof AbortSignal.any === 'function' ? AbortSignal.any([options.signal, controller.signal]) : options.signal)
       : controller.signal
     try {
-      const response = await fetch(`${this.baseUrl}/chat/completions`, { method: 'POST', headers, body, signal })
-      if (!response.ok) {
-        const detail = (await response.text()).slice(0, 300)
-        throw new LlmError(`${this.role.provider} HTTP ${response.status}: ${detail}`, response.status, detail)
-      }
+      const response = await openStreamWithRetry(this.role.provider, `${this.baseUrl}/chat/completions`, { headers, body, signal }, this.retry)
       const reader = response.body?.getReader()
       if (!reader) throw new LlmError(`${this.role.provider}: the streaming response has no body`)
       const decoder = new TextDecoder()

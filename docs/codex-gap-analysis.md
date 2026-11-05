@@ -6,6 +6,8 @@
 - **参照クローン**: `F:\HY-HARNESS\.refs\codex`（`.gitignore` 済み、121 MB）。分析の再現に使える。
 - **限界**: Codex は 1 つのリポジトリで 227 万行あり、全行を読んではいない。機能の存在はモジュール・型・ツール定義・テストで確認し、意味は README とコードの構造から判断した。**「未確認」と書いた項目は断定していない**。
 
+- **実装後の状況（2026-11-06 追記）**: 本文は 2026-11-05 時点の分析のまま残す。その後、計画 C0〜C5 の対象 WP（ネットワーク関連の CP-03/04 と SEC-02/03/04 は対象外）を実装した。§0 の構造的な負け 4 点のうち、(b) 既定 `workspace-write`（CP-01）、(c) hy-protocol/1・常駐デーモン・SDK（CP-25〜30）、(d) `tool_search` と遅延ツール（CP-10）は解消済み。(a) は読み取りのみ `denyRead`（NO_READ_UP ラベル）で対応し、ネットワークは対象外のまま。WP ごとの状況は [implementation_status.md §7](implementation_status.md)、検証の記録は [codex-adoption-progress.md](codex-adoption-progress.md)、プロトコルは [protocol.md](protocol.md)、移行は [migration.md](migration.md)。
+
 ---
 
 ## 0. 要旨

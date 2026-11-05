@@ -265,3 +265,12 @@ test('CP-33: a user message carries the turn it opened; undo keeps the numbering
     { text: 'second again', turn: 2 },
   ])
 })
+
+test('CP-21: the chat shows the user\'s words, not the skill bodies added for the model', () => {
+  const events: SessionEvent[] = [
+    ev(1, 'turn/start', { turn: 1 }),
+    ev(2, 'user/message', { content: 'Ship it with @skill:release\n\n<skill name="release">\nStep 1\n</skill>\n\n[not installed skills: @skill:ghost]' }),
+  ]
+  const user = projectChat(events, 'run-test').find((e) => e.kind === 'user')
+  assert.equal(user?.kind === 'user' ? user.text : '', 'Ship it with @skill:release')
+})

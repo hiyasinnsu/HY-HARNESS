@@ -202,6 +202,9 @@ export function stripPlanPrefix(text: string): string {
         .replace(/^\[plan mode: read-only\.[^\]]*\]\n?/, '')
         // WP-60: `@session:` context blocks are for the model, not the chat.
         .replace(/\n*\[session reference [^\]]*\]\n[\s\S]*?\[\/session reference\]\n*/g, '')
+        // CP-21: `@skill:` blocks and the not-installed note are context too.
+        .replace(/\n*<skill name="[^"]*">\n[\s\S]*?\n<\/skill>/g, '')
+        .replace(/\n*\[not installed skills: [^\]]*\]/g, '')
         .replace(/^\n+/, ''),
     )
     if (out === before) break

@@ -500,3 +500,40 @@ test('CP-18: the OpenAI-compatible adapter streams deltas and assembles the repl
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
 })
+test('CP-18: a streaming request retries 503 and 429 before the stream starts; 400 fails at once', async () => {
+  let calls = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      calls += 1
+      if (req.url?.includes('bad')) {
+        res.writeHead(400).end('bad request')
+        return
+      }
+      if (calls === 1) return void res.writeHead(503).end('busy')
+      if (calls === 2) return void res.writeHead(429, { 'retry-after': '0' }).end('slow down')
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })}\n\n`)
+      res.end('data: [DONE]\n\n')
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const { port } = server.address() as AddressInfo
+  const make = (suffix: string) =>
+    new OpenAiProvider(
+      { provider: 'openai-compatible', model: 'm', baseUrl: `http://127.0.0.1:${port}${suffix}`, apiKey: 'k', contextWindowTokens: 10_000, maxOutputTokens: 100 },
+      { retries: 3, baseDelayMs: 1, maxDelayMs: 5 },
+    )
+  try {
+    const deltas: string[] = []
+    const done = await make('').complete([{ role: 'user', content: 'hi' }], { maxTokens: 8, temperature: 0, onDelta: (d) => deltas.push(d.content ?? '') })
+    assert.equal(done.content, 'ok')
+    assert.equal(calls, 3, 'two retries, then the stream')
+    assert.deepEqual(deltas, ['ok'], 'no output was duplicated by the retries')
+    calls = 0
+    await assert.rejects(make('/bad').complete([{ role: 'user', content: 'hi' }], { maxTokens: 8, temperature: 0, onDelta: () => undefined }), /HTTP 400/)
+    assert.equal(calls, 1)
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})

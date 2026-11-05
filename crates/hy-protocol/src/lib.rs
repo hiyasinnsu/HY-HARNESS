@@ -330,6 +330,10 @@ pub struct ExecCommandParams {
     /// CP-09: keep stdin open so `job/write` can feed the process.
     #[serde(default)]
     pub stdin_pipe: bool,
+    /// CP-09: run in a pseudo console (programs that need a terminal). Implies
+    /// a writable stdin; output is the console's, with escape sequences removed.
+    #[serde(default)]
+    pub tty: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

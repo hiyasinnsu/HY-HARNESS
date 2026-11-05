@@ -348,17 +348,19 @@ F:\HY-HARNESS\
 
 ---
 
-## 7. Codex 採用計画の実装状況（2026-11-05、WP 単位）
+## 7. Codex 採用計画の実装状況（2026-11-06、WP 単位）
 
 計画 [codex-adoption-plan.md](codex-adoption-plan.md) の 44 WP のうち、実装・受け入れテスト・進捗記録まで終えたもの:
 
 | フェーズ | 完了 WP | 残り（主なもの） |
 | :--- | :--- | :--- |
 | C0 封じ込め | CP-01 / CP-02 / CP-05 / CP-06 / CP-07 / CP-08 / CP-44 | なし（ネットワーク・SEC-02/03/04 は対象外） |
-| C1 道具箱 | CP-09〜CP-17（CP-09 は PTY なし） | CP-11 の prompts/elicitation |
-| C2 ループ | CP-18〜CP-24 | `@skill:` メンション、`tool-search` フラグの消費 |
-| C3 プロトコル | CP-25（JSON-RPC の読み取り・turn 制御・承認）、CP-26（API スキーマ） | CP-27/28（WS・daemon）、CP-29〜31（SDK/ACP/移行）、`hy serve` の常駐化 |
-| C4 UX | CP-32（コマンド表の統一、追加コマンド、Ctrl+K のファイル・設定検索、`/` 補完、`/api/hooks`・`/api/doctor`、CLI の同等コマンド） | CP-32 の `/worktree`・`/import` と自動ブラウザ E2E、CP-33〜36 |
-| C5 運用 | CP-37 / CP-38 / CP-39 / CP-42（`hy doctor`・フラグ・CI ゲート・`pnpm verify`） | CP-40 の配布署名手順、CP-41 の単一バイナリ、CP-43 |
+| C1 道具箱 | CP-09〜CP-17（CP-09 の PTY、CP-11 の prompts/elicitation を含む） | MCP elicitation の HTTP トランスポート |
+| C2 ループ | CP-18〜CP-24（`@skill:` メンション、`tool-search` フラグ、ストリーミングの再試行を含む） | 非同期コンパクションの追加の最適化（計画の記述が曖昧） |
+| C3 プロトコル | CP-25〜CP-31（共有ホスト、stdio/パイプ/WebSocket、`hy serve` 常駐、リモート exec server、設定 API、TS/Python SDK、ACP、`hy import`） | なし |
+| C4 UX | CP-32〜CP-36（コマンド表、差分・検索・巻き戻し、承認カード、モデル選択・ワークツリー、ステータスライン・色・Vim） | 自動化されたブラウザ E2E（現状は HTTP レベルの統合テストと手動のブラウザ確認） |
+| C5 運用 | CP-37〜CP-43（CP-40 は署名の設定・ワークフロー・マニフェスト、CP-41 は試作と ADR 0003、CP-43 は `docs/protocol.md`・移行ガイド） | 実証明書での署名と SmartScreen、`winget validate`（この環境では不可） |
 
-検証の現状（2026-11-05 ラウンド 54、子プロセス・Ollama・NTFS が使える環境）: `pnpm build` / `typecheck` / 生成物チェック / `cargo fmt --check` / `cargo clippy -D warnings` は緑。単体 `pnpm test` は **499 / 499 PASS**、`cargo test` も全件 PASS。それ以前の「失敗は環境要因のみ」という記載は誤りで、統合テストは構文エラーで 1 本も動いておらず、`denyRead` が読み取りを止めていない・`readOnly` の既存ファイルが書ける・K9 超過（1,552 トークン）などの回帰があった（[codex-adoption-progress.md](codex-adoption-progress.md) ラウンド 54 で修正）。
+検証の現状（2026-11-06 ラウンド 57）: `pnpm verify` の 12 ゲートすべて PASS（単体 **558 / 558**、Rust のテスト・fmt・clippy を含む）、統合 **137 / 137 PASS**。
+
+以前の記録（2026-11-05 ラウンド 54、子プロセス・Ollama・NTFS が使える環境）: `pnpm build` / `typecheck` / 生成物チェック / `cargo fmt --check` / `cargo clippy -D warnings` は緑。単体 `pnpm test` は **499 / 499 PASS**、`cargo test` も全件 PASS。それ以前の「失敗は環境要因のみ」という記載は誤りで、統合テストは構文エラーで 1 本も動いておらず、`denyRead` が読み取りを止めていない・`readOnly` の既存ファイルが書ける・K9 超過（1,552 トークン）などの回帰があった（[codex-adoption-progress.md](codex-adoption-progress.md) ラウンド 54 で修正）。

@@ -1,0 +1,70 @@
+# CP-40: build, sign and describe a release when a version tag is pushed.
+#
+# Secrets (all optional; without them the artifacts are built but unsigned):
+#   CSC_LINK / CSC_KEY_PASSWORD  Authenticode certificate (.pfx, base64) for the exe
+#   HY_RELEASE_KEY               Ed25519 private key (PEM) for the release feed entry
+# The steps are documented in docs/release-signing.md.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      HAS_CSC: ${{ secrets.CSC_LINK != '' }}
+      HAS_RELEASE_KEY: ${{ secrets.HY_RELEASE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the exec server and helper (release)
+        run: cargo build --release -p hy-exec-server -p hy-sandbox-windows
+      - name: Verify (all gates)
+        run: pnpm verify
+      - name: Package the portable exe (signed when CSC_LINK is set)
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: pnpm desktop:package
+      - name: Check the Authenticode signature
+        if: env.HAS_CSC == 'true'
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature release/HY-HARNESS.exe
+          if ($sig.Status -ne 'Valid') { throw "signature: $($sig.Status) $($sig.StatusMessage)" }
+      - name: Sign the release feed entry (Ed25519)
+        if: env.HAS_RELEASE_KEY == 'true'
+        env:
+          HY_RELEASE_KEY: ${{ secrets.HY_RELEASE_KEY }}
+        shell: pwsh
+        run: |
+          $version = node packages/hy-cli/dist/main.js version
+          $url = "https://github.com/${{ github.repository }}/releases/download/v$version/HY-HARNESS.exe"
+          Set-Content -Path release/release-key.pem -Value $env:HY_RELEASE_KEY -NoNewline
+          $sha = (Get-FileHash -Algorithm SHA256 release/HY-HARNESS.exe).Hash.ToLower()
+          node packages/hy-cli/dist/main.js update sign --key release/release-key.pem --sha256 $sha --url $url --version $version > release/feed-entry.json
+          Remove-Item release/release-key.pem
+      - name: winget and Scoop manifests
+        shell: pwsh
+        run: |
+          $version = node packages/hy-cli/dist/main.js version
+          node scripts/gen-package-manifests.mjs --version $version --url "https://github.com/${{ github.repository }}/releases/download/v$version/HY-HARNESS.exe" --file release/HY-HARNESS.exe
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/HY-HARNESS.exe
+            release/feed-entry.json
+            release/manifests/**/*
+          fail_on_unmatched_files: false

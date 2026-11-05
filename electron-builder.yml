@@ -47,6 +47,15 @@ win:
       arch:
         - x64
   requestedExecutionLevel: asInvoker
+  # CP-40: Authenticode. electron-builder signs when CSC_LINK (a .pfx path or
+  # base64) and CSC_KEY_PASSWORD are set (the release workflow passes them from
+  # repository secrets); without them the build stays unsigned. The release feed
+  # is signed separately with Ed25519 (hy update sign), see docs/release-signing.md.
+  signtoolOptions:
+    signingHashAlgorithms:
+      - sha256
+    rfc3161TimeStampServer: http://timestamp.digicert.com
+  signAndEditExecutable: true
 
 # Some locked-down Windows hosts (AppLocker / endpoint policy / Google Drive
 # sync roots) refuse to start the external 7za.exe that electron-builder uses

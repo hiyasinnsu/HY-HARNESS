@@ -238,6 +238,8 @@ interface State {
   mentions: string[]
   /** WP-60: earlier chats offered by the `@` menu. */
   mentionSessions: ReferenceSession[]
+  /** CP-21: skills offered as `@skill:name`. */
+  mentionSkills: Array<{ name: string; description: string }>
   mentionStart: number
   mentionEnd: number
   mentionIndex: number
@@ -341,6 +343,7 @@ const state: State = {
   attachments: [],
   mentions: [],
   mentionSessions: [],
+  mentionSkills: [],
   mentionStart: 0,
   mentionEnd: 0,
   mentionIndex: 0,
@@ -1299,7 +1302,7 @@ function updateComposerState(): void {
 }
 
 function mentionCount(): number {
-  return state.slashItems.length + state.mentionSessions.length + state.mentions.length
+  return state.slashItems.length + state.mentionSkills.length + state.mentionSessions.length + state.mentions.length
 }
 
 function scheduleMentions(input: HTMLTextAreaElement): void {
@@ -1311,6 +1314,7 @@ function scheduleMentions(input: HTMLTextAreaElement): void {
     if (state.slashItems.length > 0) {
       state.mentions = []
       state.mentionSessions = []
+      state.mentionSkills = []
       state.mentionIndex = 0
       renderMentionMenu()
       return
@@ -1320,6 +1324,7 @@ function scheduleMentions(input: HTMLTextAreaElement): void {
     if (!match) {
       state.mentions = []
       state.mentionSessions = []
+      state.mentionSkills = []
       renderMentionMenu()
       return
     }
@@ -1329,17 +1334,19 @@ function scheduleMentions(input: HTMLTextAreaElement): void {
     state.mentionIndex = 0
     const runId = currentRunId()
     // WP-60: one call returns files and the earlier chats worth referencing.
-    void api<{ files: string[]; sessions: ReferenceSession[] }>(
+    void api<{ files: string[]; sessions: ReferenceSession[]; skills?: Array<{ name: string; description: string }> }>(
       `/api/references?q=${encodeURIComponent(query)}${runId ? `&exclude=${encodeURIComponent(runId)}` : ''}`,
     )
       .then((data) => {
         state.mentions = data.files.slice(0, 30)
         state.mentionSessions = data.sessions.slice(0, 10)
+        state.mentionSkills = (data.skills ?? []).slice(0, 8)
         renderMentionMenu()
       })
       .catch(() => {
         state.mentions = []
         state.mentionSessions = []
+        state.mentionSkills = []
         renderMentionMenu()
       })
   }, 120)
@@ -1363,20 +1370,24 @@ function renderMentionMenu(): void {
       .join('')}`
     return
   }
+  const skillRows = state.mentionSkills
+    .map((skill, i) => `<button type="button" class="mention-item ${i === state.mentionIndex ? 'active' : ''}" data-action="insert-mention" data-index="${i}">${icon('book', 13)}<span>@skill:${escapeHtml(skill.name)}</span><span class="muted small slash-desc">${escapeHtml(oneLine(skill.description, 60))}</span></button>`)
+    .join('')
+  const skillOffset = state.mentionSkills.length
   const sessions = state.mentionSessions
     .map(
-      (session, i) =>
-        `<button type="button" class="mention-item ${i === state.mentionIndex ? 'active' : ''}" data-action="insert-mention" data-index="${i}">${icon('clock', 13)}<span>${escapeHtml(oneLine(session.label, 70))}</span><code>${escapeHtml(session.runId)}</code></button>`,
+      (session, j) => { const i = j + skillOffset; return (
+        `<button type="button" class="mention-item ${i === state.mentionIndex ? 'active' : ''}" data-action="insert-mention" data-index="${i}">${icon('clock', 13)}<span>${escapeHtml(oneLine(session.label, 70))}</span><code>${escapeHtml(session.runId)}</code></button>`) },
     )
     .join('')
   const files = state.mentions
     .map((file, offset) => {
-      const i = sessions ? state.mentionSessions.length + offset : offset
+      const i = skillOffset + state.mentionSessions.length + offset
       const folder = file.endsWith('/')
       return `<button type="button" class="mention-item ${i === state.mentionIndex ? 'active' : ''}" data-action="insert-mention" data-index="${i}">${icon(folder ? 'folder' : 'file', 13)}<span>${escapeHtml(file)}</span></button>`
     })
     .join('')
-  el.innerHTML = `${sessions ? `<div class="mention-section">${tr('sessionsSection')}</div>${sessions}` : ''}${files ? `<div class="mention-section">${tr('filesSection')}</div>${files}` : ''}`
+  el.innerHTML = `${skillRows ? `<div class="mention-section">${tr('skills')}</div>${skillRows}` : ''}${sessions ? `<div class="mention-section">${tr('sessionsSection')}</div>${sessions}` : ''}${files ? `<div class="mention-section">${tr('filesSection')}</div>${files}` : ''}`
 }
 
 /**
@@ -1405,15 +1416,18 @@ function insertSlash(index: number, fill = false): void {
 function insertMention(index: number): void {
   const input = document.getElementById('composer-input') as HTMLTextAreaElement | null
   if (!input) return
+  const skillCount = state.mentionSkills.length
   const sessionCount = state.mentionSessions.length
   let text: string
   let drilled = false
-  if (index < sessionCount) {
-    const session = state.mentionSessions[index]
+  if (index < skillCount) {
+    text = `@skill:${state.mentionSkills[index]!.name} `
+  } else if (index - skillCount < sessionCount) {
+    const session = state.mentionSessions[index - skillCount]
     if (!session) return
     text = `@session:${session.runId} `
   } else {
-    const file = state.mentions[index - sessionCount]
+    const file = state.mentions[index - skillCount - sessionCount]
     if (!file) return
     text = `@${file} `
     // A folder keeps the menu open so the next level can be picked.
@@ -1425,6 +1439,7 @@ function insertMention(index: number): void {
   saveComposerDraft(input.value)
   state.mentions = []
   state.mentionSessions = []
+  state.mentionSkills = []
   state.mentionIndex = 0
   renderMentionMenu()
   const cursor = before.length + text.length
@@ -6277,6 +6292,7 @@ function onDocumentKeydown(event: KeyboardEvent): void {
       state.slashItems = []
       state.mentions = []
       state.mentionSessions = []
+      state.mentionSkills = []
       renderMentionMenu()
       return
     }

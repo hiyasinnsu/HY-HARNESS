@@ -33,6 +33,9 @@ oversized (> 50 MiB) untracked checkpoint exclusion (`unprotected`), and the
   implementation plan: [docs/codex-gap-analysis.md](docs/codex-gap-analysis.md),
   [docs/codex-adoption-plan.md](docs/codex-adoption-plan.md),
   [docs/codex-adoption-progress.md](docs/codex-adoption-progress.md)
+- hy-protocol/1 (CLI, daemon, SDKs, ACP): [docs/protocol.md](docs/protocol.md);
+  release signing and package manifests: [docs/release-signing.md](docs/release-signing.md);
+  single-binary decision: [docs/adr/0003-single-binary.md](docs/adr/0003-single-binary.md)
 
 ## Completion criteria (approved scope)
 

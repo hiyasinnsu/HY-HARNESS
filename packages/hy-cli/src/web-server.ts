@@ -15,6 +15,9 @@ import {
   readEvents,
   metricsSnapshot,
   describeHooks,
+  elicitationContent,
+  setElicitationHandler,
+  discoverSkills,
   WorktreeManager,
   worktreesDir,
   roleSupportsImages,
@@ -1722,6 +1725,15 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       : `subagent ${view.agentId} finished: ${(view.final ?? '').replace(/\s+/g, ' ').slice(0, 300)}`
     broadcast(session, { type: 'notice', level: view.error ? 'warn' : 'info', text })
   }
+
+  // CP-11: an MCP server asking for input becomes a question card in the chat
+  // whose turn is running; with none (or several) it is declined.
+  setElicitationHandler(async (request) => {
+    const running = [...sessions.values()].filter((s) => s.busy)
+    if (running.length !== 1) return { action: 'decline' }
+    const reply = await requestQuestion(running[0]!, `MCP ${request.server}: ${request.message}`)
+    return elicitationContent(request.requestedSchema, reply)
+  })
 
   /** CP-34: commands approved "for this session", per chat, until the server stops. */
   const sessionApprovals = new Map<string, Set<string>>()
@@ -4872,7 +4884,13 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             .sort((a, b) => b.score - a.score || b.last - a.last)
             .slice(0, 10)
             .map(({ score, ...run }) => run)
-          json(res, 200, { root: root.id, files, sessions })
+          // CP-21: `@skill:` candidates (by name, then description).
+          const skillNeedle = needle.replace(/^skill:/, '')
+          const skills = discoverSkills(config.workspaceRoot)
+            .filter((s) => !skillNeedle || s.name.toLowerCase().includes(skillNeedle) || s.description.toLowerCase().includes(skillNeedle))
+            .slice(0, 8)
+            .map((s) => ({ name: s.name, description: s.description, scope: s.scope }))
+          json(res, 200, { root: root.id, files, sessions, skills })
           return
         }
 

@@ -386,6 +386,8 @@ pub struct SpawnSpec {
     pub confined: Option<Confined>,
     /// CP-09: keep stdin open and writable (`job/write`).
     pub stdin_pipe: bool,
+    /// CP-09: run in a pseudo console (Windows ConPTY).
+    pub tty: bool,
 }
 
 pub struct JobManager {
@@ -408,7 +410,8 @@ impl JobManager {
         let log_dir = self.state_dir.join("jobs");
         std::fs::create_dir_all(&log_dir)?;
         let log_path = log_dir.join(format!("{id}.log"));
-        if spec.confined.is_some() {
+        // A pseudo console needs the Win32 spawn path, confined or not.
+        if spec.confined.is_some() || spec.tty {
             return self.start_confined(id, log_path, spec);
         }
 
@@ -508,16 +511,38 @@ impl JobManager {
         spec: SpawnSpec,
     ) -> std::io::Result<Arc<Job>> {
         use hy_sandbox_windows::spawn::{self, SpawnRequest};
-        let Some(confined) = spec.confined else {
-            return Err(std::io::Error::other("not a confined spawn"));
+        // Unconfined tty jobs run as this process's user (no token).
+        let (token, command_line) = match spec.confined {
+            Some(c) => (
+                Some(c.token as windows_sys::Win32::Foundation::HANDLE),
+                c.command_line,
+            ),
+            None if spec.tty => {
+                let mut line = spawn::quote_arg(&spec.program.to_string_lossy());
+                match &spec.raw_arg {
+                    Some(raw) => {
+                        line.push(' ');
+                        line.push_str(raw);
+                    }
+                    None => {
+                        for arg in &spec.args {
+                            line.push(' ');
+                            line.push_str(&spawn::quote_arg(arg));
+                        }
+                    }
+                }
+                (None, line)
+            }
+            None => return Err(std::io::Error::other("not a confined spawn")),
         };
         let job_object = JobHandle::new()?;
         let child = spawn::spawn(&SpawnRequest {
-            token: Some(confined.token as windows_sys::Win32::Foundation::HANDLE),
+            token,
             app_container: None,
             stdin_pipe: spec.stdin_pipe,
+            pty: spec.tty.then_some((120, 30)),
             job: job_object.raw(),
-            command_line: &confined.command_line,
+            command_line: &command_line,
             cwd: &spec.cwd,
             env: &spec.env,
         })
@@ -553,9 +578,12 @@ impl JobManager {
         });
         self.jobs.lock().insert(id, job.clone());
 
-        let out_task = spawn_blocking_reader(job.clone(), child.stdout, Stream::Stdout);
-        let err_task = spawn_blocking_reader(job.clone(), child.stderr, Stream::Stderr);
+        let out_task = spawn_blocking_reader(job.clone(), child.stdout, Stream::Stdout, spec.tty);
+        let err_task = spawn_blocking_reader(job.clone(), child.stderr, Stream::Stderr, false);
         let process = child.process;
+        // The console must close after the process exits, or its output pipe
+        // never reaches EOF and the reader (and this job) would hang.
+        let pty = child.pty;
         let waiter_job = job.clone();
         // INFINITE is u32::MAX; longer timeouts are clamped just below it.
         let timeout = spec
@@ -574,6 +602,7 @@ impl JobManager {
             .await
             .ok()
             .flatten();
+            drop(pty);
             let _ = out_task.await;
             let _ = err_task.await;
             let state = if waiter_job.killed.load(Ordering::SeqCst) {
@@ -663,20 +692,88 @@ fn spawn_blocking_reader(
     job: Arc<Job>,
     mut file: std::fs::File,
     kind: Stream,
+    strip_vt: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
+        let mut vt = VtStripper::default();
         loop {
             match file.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let data = &buf[..n];
+                    let raw = &buf[..n];
+                    let cleaned;
+                    let data: &[u8] = if strip_vt {
+                        cleaned = vt.feed(raw);
+                        &cleaned
+                    } else {
+                        raw
+                    };
                     job.captured.lock().append(kind, data);
                     append_log(&job.log_path, data);
                 }
             }
         }
     })
+}
+
+/// CP-09: removes terminal escape sequences from pseudo-console output, so
+/// the model reads text. Keeps state across reads (a sequence may be split).
+#[derive(Default)]
+pub struct VtStripper {
+    state: VtState,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum VtState {
+    #[default]
+    Text,
+    Esc,
+    Csi,
+    Osc,
+    OscEsc,
+}
+
+impl VtStripper {
+    pub fn feed(&mut self, input: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(input.len());
+        for &b in input {
+            self.state = match (self.state, b) {
+                (VtState::Text, 0x1b) => VtState::Esc,
+                (VtState::Text, b'\r') => VtState::Text,
+                (VtState::Text, _) => {
+                    out.push(b);
+                    VtState::Text
+                }
+                (VtState::Esc, b'[') => VtState::Csi,
+                (VtState::Esc, b']') => VtState::Osc,
+                (VtState::Esc, _) => VtState::Text,
+                // CSI ends with a byte in 0x40..=0x7E.
+                (VtState::Csi, 0x40..=0x7e) => VtState::Text,
+                (VtState::Csi, _) => VtState::Csi,
+                // OSC ends with BEL or ESC \.
+                (VtState::Osc, 0x07) => VtState::Text,
+                (VtState::Osc, 0x1b) => VtState::OscEsc,
+                (VtState::Osc, _) => VtState::Osc,
+                (VtState::OscEsc, _) => VtState::Text,
+            };
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod vt_tests {
+    use super::VtStripper;
+
+    #[test]
+    fn strips_csi_osc_and_carriage_returns_across_reads() {
+        let mut vt = VtStripper::default();
+        let mut out = vt.feed(b"\x1b[?25l\x1b]0;title\x07hel");
+        out.extend(vt.feed(b"lo\x1b[3"));
+        out.extend(vt.feed(b"2mX\x1b[0m\r\n"));
+        assert_eq!(String::from_utf8_lossy(&out), "helloX\n");
+    }
 }
 
 fn append_log(path: &Path, data: &[u8]) {

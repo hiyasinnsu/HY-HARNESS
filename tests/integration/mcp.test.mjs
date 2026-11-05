@@ -55,3 +55,30 @@ test('hy chat calls MCP tools with approval where needed', { skip: skipReason('s
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('CP-11: hy chat answers an MCP elicitation at the prompt and lists MCP prompts', { skip: skipReason('sync') }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-mcp-elicit-'))
+  const userDir = path.join(dir, 'user')
+  const ws = path.join(dir, 'ws')
+  try {
+    fs.mkdirSync(userDir)
+    fs.mkdirSync(ws)
+    const fixture = path.join(repo, 'tests', 'fixtures', 'mcp-prompts-server.mjs')
+    fs.writeFileSync(path.join(userDir, 'config.json'), JSON.stringify({ mcpServers: { p: { command: process.execPath, args: [fixture] } } }))
+    const input = ['MCP p ask {}', 'teal', 'CALL list_mcp_prompts {}', '/exit', ''].join('\n')
+    const r = spawnSync(process.execPath, [cli, 'chat', '--mock', '--cwd', ws, '--json'], {
+      cwd: repo,
+      encoding: 'utf8',
+      input,
+      env: { ...process.env, HY_CONFIG_DIR: userDir },
+      timeout: 120_000,
+    })
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stderr, /\[MCP p asks\] Which colour\?/)
+    const finals = r.stdout.trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.type === 'turn/final').map((e) => e.content)
+    assert.match(finals[0], /colour: teal/)
+    assert.match(finals[1], /review/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

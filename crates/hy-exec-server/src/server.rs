@@ -537,7 +537,7 @@ impl Server {
                 command_line,
             }
         });
-        let cwd = if confined.is_some() {
+        let cwd = if confined.is_some() || p.tty {
             plain_path(&cwd)
         } else {
             cwd
@@ -561,7 +561,8 @@ impl Server {
                 run_id: p.run_id,
                 hard_timeout_ms: hard_timeout,
                 confined,
-                stdin_pipe: p.stdin_pipe,
+                stdin_pipe: p.stdin_pipe || p.tty,
+                tty: p.tty,
             })
             .await
             .map_err(|e| RpcError::new(error_code::INTERNAL_ERROR, format!("spawn: {e}")))?;

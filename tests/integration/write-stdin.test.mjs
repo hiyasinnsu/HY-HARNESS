@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { skipReason } from './capability.mjs'
+import { skipReason, tmpRoot } from './capability.mjs'
 
 // CP-09: a job started with `stdinPipe` accepts `job/write` and its output is
 // readable while it runs. The program under test is a Node one-liner that
@@ -63,3 +63,52 @@ test('CP-09: stdinPipe jobs accept input and stream output', { skip, timeout: 12
     fs.rmSync(base, { recursive: true, force: true })
   }
 })
+
+for (const sandbox of ['unconfined', 'workspace-write']) {
+  test(`CP-09: a tty job runs in a pseudo console (${sandbox}); input reaches it and escapes are stripped`, { skip, timeout: 120_000, concurrency: false }, async () => {
+    const base = fs.mkdtempSync(path.join(tmpRoot(), 'tty-'))
+    const ws = path.join(base, 'ws')
+    fs.mkdirSync(ws)
+    fs.writeFileSync(path.join(ws, 'README.md'), '# fixture\n')
+    spawnSync('git', ['init', '-q'], { cwd: ws })
+    const client = await core.ExecRpcClient.start(core.resolveServerPath(), {
+      protocolVersion: 1,
+      workspaceRoot: fs.realpathSync.native(ws),
+      stateDir: path.join(base, 'state'),
+      sandbox,
+      extraWritableRoots: [],
+      envPassthrough: [],
+      projectTrusted: false,
+      protectedPaths: [],
+      denyRead: [],
+      readOnly: [],
+    })
+    try {
+      const status = await client.sandboxStatus()
+      if (sandbox !== 'unconfined' && !status.workspaceWriteAvailable) return
+      const code = 'console.log(process.stdout.isTTY ? "IS-TTY" : "NO-TTY"); process.stdin.once("data", (d) => { console.log("GOT:" + d.toString().trim()); process.exit(0) })'
+      const started = await client.exec({ command: `node -e '${code}'`, mode: 'agent', tty: true, sandboxMode: sandbox, foregroundWaitMs: 300, hardTimeoutMs: 60_000, approval: { by: 'user', callId: 'it' } })
+      assert.equal(started.status, 'backgrounded', JSON.stringify(started))
+      let output = ''
+      const read = async (needle) => {
+        for (let i = 0; i < 100 && !output.includes(needle); i++) {
+          const page = await client.jobOutput(started.jobId, output.length)
+          output += page.data
+          if (!output.includes(needle)) await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+      }
+      await read('IS-TTY')
+      assert.match(output, /IS-TTY/, output)
+      await client.jobWrite(started.jobId, 'hello\r')
+      await read('GOT:hello')
+      assert.match(output, /GOT:hello/, output)
+      assert.doesNotMatch(output, /\x1b/, 'no escape sequences reach the model')
+      const done = await client.jobWait(started.jobId, 20_000)
+      assert.equal(done.state, 'exited', JSON.stringify(done))
+    } finally {
+      await client.sandboxRevoke().catch(() => undefined)
+      await client.stop()
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 3 })
+    }
+  })
+}
