@@ -2,9 +2,10 @@
 // validation at dispatch, the compact signatures in the system prompt, and the
 // `declare namespace tools` SDK shown for `run_code` (`jsonSchemaToTs`).
 //
-// Four wire tools are offered to the model directly. Everything else
-// (`tools.search.*`, `tools.jobs.*`) exists only inside `run_code` scripts,
-// so it costs prompt tokens only when PTC is on.
+// Wire tools are offered to the model directly; deferred wire tools (CP-10)
+// join the prompt only after `tool_search` loads them. SDK-only tools
+// (`tools.jobs.*`, `tools.rationale.*`) exist only inside `run_code` scripts,
+// so they cost prompt tokens only when PTC is on.
 
 /** The subset of JSON Schema the registry uses. */
 export interface Schema {
@@ -37,7 +38,7 @@ export interface ToolSpec {
   /** Advertised only when the session has this feature (e.g. skills were found). */
   requires?: 'skills' | 'mcp' | 'delegate' | 'web' | 'ask' | 'search' | 'lsp' | 'memory' | 'deferred'
   /**
-   * CP-10: deferred tools stay out of the initial prompt; 	ool_search
+   * CP-10: deferred tools stay out of the initial prompt; `tool_search`
    * loads them (and they are callable only after loading).
    */
   exposure?: 'direct' | 'deferred'

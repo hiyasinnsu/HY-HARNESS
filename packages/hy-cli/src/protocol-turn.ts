@@ -13,7 +13,7 @@ export interface TurnResult {
 }
 
 export interface TurnHost {
-  /** 	hreadId resumes that run; absent starts a new one. */
+  /** `threadId` resumes that run; absent starts a new one. */
   start(message: string, images: ImageInput[], onEvent: (event: AgentEvent, threadId?: string) => void, threadId?: string): Promise<TurnResult>
   /** Aborts a running turn; false when that thread has no turn in flight. */
   cancel?(threadId: string): boolean

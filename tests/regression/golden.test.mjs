@@ -123,25 +123,35 @@ test('K1: the four sandbox modes parse strictly and the default stays unconfined
   assert.equal(config.sandbox, 'unconfined', 'the 2026-11-02 decision: the sandbox is opt-in')
 })
 
-test('K9: the wire tool set is exactly the documented 14 and SDK-only tools stay inside run_code', () => {
-  const wire = core.TOOL_SPECS.filter((spec) => spec.wire !== false).map((spec) => spec.name)
-  assert.deepEqual(wire.sort(), [
+// K9 was redefined by CP-10 (docs/codex-adoption-plan.md): the budget applies to
+// the *initial* tool prompt, deferred tools stay out of it until `tool_search`
+// loads them, and the token measurement lives in tool-overhead.test.mjs.
+test('K9: the initial tool set is fixed, deferred tools stay out of it, and SDK-only tools stay inside run_code', () => {
+  const allFeatures = new Set(['skills', 'mcp', 'delegate', 'web', 'ask', 'search', 'lsp', 'memory', 'deferred'])
+  const initial = core.offeredTools(true, core.TOOL_SPECS, false, allFeatures).map((spec) => spec.name)
+  assert.deepEqual(initial.sort(), [
     'apply_patch',
     'ask_user',
-    'claim_complete',
+    'current_time',
     'delegate',
-    'lsp',
-    'mcp_call',
-    'memory',
+    'get_context_remaining',
     'read_file',
+    'request_permissions',
     'run_code',
+    'search_glob',
+    'search_grep',
     'shell',
     'skill_load',
+    'sleep',
+    'tool_search',
     'update_plan',
-    'web_fetch',
-    'web_search',
+    'write_stdin',
   ])
-  for (const name of ['search_glob', 'search_grep', 'job_status', 'job_output', 'job_wait', 'job_kill']) {
+  for (const spec of core.TOOL_SPECS.filter((s) => s.exposure === 'deferred')) {
+    assert.equal(spec.wire, true, `${spec.name}: a deferred tool is a wire tool once loaded`)
+    assert.equal(initial.includes(spec.name), false, `${spec.name} must not be in the initial prompt`)
+  }
+  for (const name of ['job_status', 'job_output', 'job_wait', 'job_kill', 'rationale_upsert', 'rationale_supersede', 'rationale_remove']) {
     const spec = core.TOOLS_BY_NAME.get(name)
     assert.ok(spec, `${name} must still exist`)
     assert.equal(spec.wire, false, `${name} must stay SDK-only`)
