@@ -367,6 +367,11 @@ code, pre { font-family: var(--mono); }
 
 .transcript { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
 .transcript-inner { max-width: 880px; margin: 0 auto; padding: 24px 32px 16px; }
+/* The transcript is rebuilt on every live frame; an entry that was already shown
+   must not replay its entrance animation (it starts at opacity 0 and blinked).
+   See web/src/entry-motion.ts. `display: contents` keeps the layout unchanged. */
+.entry { display: contents; }
+.entry.settled > * { animation: none; }
 
 /* ---------- Messages ---------- */
 .message { display: flex; gap: 12px; margin: 16px 0; animation: rise 160ms var(--ease) both; }

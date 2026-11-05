@@ -40,6 +40,7 @@ import { queueBadgeLabel, sendIntent, steerToggleLabel } from './turn-queue-inte
 import { renderTurnQueueHtml } from './turn-queue-view.js'
 import { orchestrationIntent } from './orchestration-intent.js'
 import { SCROLL_ANCHOR_AT_BOTTOM, anchorAfterRender, captureAnchor, type ScrollAnchor } from './scroll-anchor.js'
+import { entryMotionKey, settledFlags, wrapEntryHtml } from './entry-motion.js'
 import { caretAfterRender, composerDraftKey, readComposerDraft, shouldRebuildComposer, shouldStartSessionOnFocus, writeComposerDraft, type ComposerSnapshot } from './composer-draft.js'
 import { Terminal } from '../vendor/xterm.mjs'
 import { FitAddon } from '../vendor/addon-fit.mjs'
@@ -970,6 +971,14 @@ function watchTranscriptScroll(el: HTMLElement): void {
 
 let transcriptRenderFrame: number | undefined
 
+/** Entries already on screen once; they must not replay their entrance animation. */
+const shownEntries = new Set<string>()
+
+function renderEntries(): string {
+  const settled = settledFlags(shownEntries, state.entries.map(entryMotionKey))
+  return state.entries.map((entry, i) => wrapEntryHtml(renderEntry(entry), settled[i] === true)).join('')
+}
+
 /** Coalesces live events into one transcript render per animation frame. */
 function renderTranscript(): void {
   if (transcriptRenderFrame !== undefined) return
@@ -983,7 +992,7 @@ function renderTranscriptNow(): void {
   const el = document.getElementById('transcript')
   if (!el) return
   window.queueMicrotask(() => applyFindHighlight())
-  const body = state.entries.length === 0 && !state.busy ? renderEmptyState() : state.entries.map(renderEntry).join('')
+  const body = state.entries.length === 0 && !state.busy ? renderEmptyState() : renderEntries()
   const running = state.busy
     ? `<div class="running-row"><span class="tool-spinner"></span><span>${state.connection === 'online' ? tr('working') : `${tr('reconnecting')}…`}</span></div>`
     : ''
