@@ -6,6 +6,37 @@
 
 ---
 
+## ラウンド 55（2026-11-05）— CP-32 スラッシュコマンドとパレット
+
+リポジトリを GitHub（`hiyasinnsu/HY-HARNESS`、`main`）に初回 push してから着手した。
+
+### 完了
+
+| WP | 内容 | 主な変更 | 検証 |
+| :--- | :--- | :--- | :--- |
+| **CP-32** | GUI のコマンド表を 1 つに統一 | 新規 `web/src/slash-commands.ts`（`COMMANDS` / `parseSlash` / `helpRows` / `filterCommands` / `slashCompletions`）。コンポーザーの `/` 解析・`/help`・Ctrl+K パレットが同じ表を読む。`app.ts` の 2 つの switch（slash 用とパレット用、重複 case あり）を `runCommand` に統合 | 新規 `web/test/slash-commands.test.mjs` 7 件（名前の一意性、計画のコマンドが揃う、`/help` が全件を列挙、**バンドル内の `runCommand` が全 id を処理**、別名、パレット検索、補完） |
+| **CP-32** | 追加コマンド | `/usage` `/mcp` `/plugins` `/memories`（`/memory`）`/skills` `/status` `/notes` は詳細パネルの該当セクションへスクロールして点滅。`/rename [title]`（引数ありは即時変更）、`/fork`、`/archive`（再実行で解除）、`/resume [search]`（パレットを検索語付きで開く）、`/hooks`、`/doctor`、`/config`（= `/settings`）、`/plan-mode [on|off]`。`/plan` は CLI と同じく計画パネル（従来の GUI はプランモード切替だった） | ブラウザで実測（下記） |
+| **CP-32** | Ctrl+K の対象を拡大 | コマンド（ラベル・slash 名・説明で検索）・チャット（タイトルも対象）・**ワークスペースのファイル**（150 ms デバウンス、古い応答は破棄）・**設定のセクション**（設定ダイアログを開いて該当セクションへ） | ブラウザで実測 |
+| **CP-32** | コンポーザーの `/` 補完 | `/re` で `/review` `/rename` `/resume` を提示（@ 参照メニューを流用）。Enter は必須引数のないコマンドを即実行、`<name>` を取るものは `/model ` を挿入して待つ。Tab は常に挿入 | ブラウザで実測 |
+| **CP-32** | API | `GET /api/hooks`（`describeHooks`）、`GET /api/doctor`（`hy doctor --json` と同じ報告。`doctorSandbox` を CLI と共有）。`api-contract.ts` に追加し `api.gen.ts` / `api.schema.json` を再生成（93 ルート） | 統合 `web-ui.test.mjs` に 1 件（フック一覧、doctor の構造、未認証 401） |
+| **CP-32** | CLI | `hy chat` に `/usage` `/mcp` `/plugins` `/memories` `/hooks` `/doctor` `/config` を追加。コマンド表を `chat-commands.ts` に移し、`/help` を表から生成 | 新規 `chat-commands.test.ts`: **CLI の全コマンドが GUI にもある**ことを GUI の表と照合、`/help` が全件を含む、出力書式。手動で `hy chat --mock` に投入して確認 |
+| **CP-19（回帰修正）** | **`sessionStart` などの新しいフックが設定から読み込まれていなかった**。`mergeHooks` が `preToolUse` / `postToolUse` / `turnEnd` の 3 つしかコピーしていなかった | `mergeHooks` を全イベントの汎用マージに | `config.test.ts` に「全イベントが読み込まれ、ユーザー → 信頼済みプロジェクトの順」を追加 |
+
+### ブラウザでの確認（`hy web --mock`、隔離した設定ディレクトリ）
+
+`/help`（27 行、別名・引数付き）、`/hooks`（2 件）、`/doctor`（11 項目）、`/usage` `/mcp` `/memories` `/skills` `/status`（該当セクションが表示範囲内で点滅）、`/rename Palette check chat`、`/archive` ×2（アーカイブ → 解除。初版は 2 回目もアーカイブしてしまう不具合があり、サーバーに状態を問い合わせるよう修正）、`/fork`、`/resume palette`、未知コマンドのトースト、パレットでのファイル（`docs/palette-notes.md`）・設定（設定 › 外観、ダイアログが該当位置へスクロール）・コマンド検索、**キーボードのみ**で Ctrl+K → `doctor` → Enter、`/re` 補完 → ↓ → Tab で `/rename `、`/hoo` → Enter で即実行、`/mod` → Enter で `/model ` 挿入。
+
+### 検証結果
+
+`pnpm verify` 11 ゲートすべて PASS（単体 `pnpm test` を含む）、統合 `pnpm test:integration` **114 / 114 PASS**。
+
+### 残り（CP-32）
+
+- `/worktree`・`/import` は GUI 未対応（worktree は API がなく、import は CP-31 未着手）。
+- 計画の受け入れ「主要 10 コマンドの E2E」は今回ブラウザで手動確認したもので、自動化されたブラウザ E2E はまだない（統合テストは HTTP レベル）。
+
+---
+
 ## ラウンド 54（2026-11-05）— 実環境での全テストと回帰の修正
 
 ### 前提の訂正（重要）

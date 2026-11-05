@@ -33,6 +33,23 @@ export interface DoctorInput {
   secretBin?: string
 }
 
+/** The report's sandbox input from a `sandbox/status` result. */
+export function doctorSandbox(status: {
+  enforcement: unknown
+  workspaceWriteAvailable: boolean
+  gaps?: string[] | null
+  denyRead?: string[] | null
+  readOnly?: string[] | null
+}): NonNullable<DoctorInput['sandbox']> {
+  return {
+    enforcement: String(status.enforcement),
+    available: status.workspaceWriteAvailable,
+    gaps: status.gaps ?? [],
+    denyRead: status.denyRead ?? [],
+    readOnly: status.readOnly ?? [],
+  }
+}
+
 const KEYLESS = new Set(['mock', 'ollama'])
 
 /** True when the role can authenticate: a literal key, a set env var, or a keyless provider. */

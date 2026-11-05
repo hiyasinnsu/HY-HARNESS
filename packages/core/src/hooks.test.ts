@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { Hooks, type HookOutcome, type HookRunner, type HookSpec } from './hooks.js'
+import { Hooks, describeHooks, type HookOutcome, type HookRunner, type HookSpec } from './hooks.js'
 
 /** A runner that answers from a queue and records what it was asked. */
 function fakeRunner(replies: Array<Partial<HookOutcome>>): { run: HookRunner; calls: Array<{ stdin: string; command: readonly string[] }> } {
@@ -95,4 +95,19 @@ test('CP-19: subagent lifecycle hooks carry the agent and task', async () => {
     agentId: 'agent-1',
     status: 'done',
   })
+})
+test('CP-32: describeHooks flattens the configuration for /hooks', () => {
+  assert.deepEqual(describeHooks(undefined), [])
+  assert.deepEqual(
+    describeHooks({
+      sessionStart: [{ command: ['node', 'start.mjs'] }],
+      preToolUse: [{ command: ['guard'], tools: ['shell'], timeoutMs: 2_000 }, { command: ['log'] }],
+      stop: [],
+    }),
+    [
+      { event: 'sessionStart', command: ['node', 'start.mjs'] },
+      { event: 'preToolUse', command: ['guard'], tools: ['shell'], timeoutMs: 2_000 },
+      { event: 'preToolUse', command: ['log'] },
+    ],
+  )
 })

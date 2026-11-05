@@ -39,6 +39,30 @@ export interface HooksConfig {
   turnEnd?: HookSpec[]
 }
 
+/** One configured hook, flattened for display (CP-32 `/hooks`). */
+export interface HookListing {
+  event: string
+  command: string[]
+  tools?: string[]
+  timeoutMs?: number
+}
+
+/** Every configured hook in event order, then configuration order. */
+export function describeHooks(hooks: HooksConfig | undefined): HookListing[] {
+  const out: HookListing[] = []
+  for (const [event, specs] of Object.entries(hooks ?? {}) as Array<[string, HookSpec[] | undefined]>) {
+    for (const spec of specs ?? []) {
+      out.push({
+        event,
+        command: [...spec.command],
+        ...(spec.tools?.length ? { tools: [...spec.tools] } : {}),
+        ...(spec.timeoutMs !== undefined ? { timeoutMs: spec.timeoutMs } : {}),
+      })
+    }
+  }
+  return out
+}
+
 export interface HookOutcome {
   code: number | null
   stdout: string

@@ -15,6 +15,7 @@ import {
   LspManager,
   McpManager,
   MemoryStore,
+  describeHooks,
   loadPlugins,
   READ_ONLY_TOOLS,
   MockCompactorProvider,
@@ -76,7 +77,8 @@ import {
 } from '../../seams/dist/index.js'
 import { bool, parseArgs, str, toOverrides, type Parsed } from './cli-args.js'
 import { renderApiSchema } from './api-schema.js'
-import { buildDoctorReport, findSecretBinary } from './doctor.js'
+import { buildDoctorReport, doctorSandbox, findSecretBinary } from './doctor.js'
+import { BUILTIN_COMMANDS, chatHelp, formatDoctor, formatHooks, formatUsage } from './chat-commands.js'
 import { listThreads, readThread } from './protocol-threads.js'
 import { turnCancelMethod, turnStartMethod, turnStatusMethod, turnSteerMethod } from './protocol-turn.js'
 import { ApprovalBridge } from './protocol-approvals.js'
@@ -361,28 +363,6 @@ async function run(p: Parsed): Promise<number> {
   }
 }
 
-const CHAT_HELP = `Commands:
-  /status   run, model, sandbox, turns and tokens
-  /diff     changes since the session started
-  /undo     restore the files to before the last turn and drop the turn
-  /notes    the run's rationale notes
-  /plan     the agent's current plan (update_plan)
-  /skills   the skills offered to the agent
-  /review [base]  a read-only review of uncommitted changes (or base...HEAD)
-  /init     draft an AGENTS.md for this repository
-  /compact  compact the conversation now
-  /plan-mode [off]  read-only planning until turned off
-  /model <name>   switch the worker model
-  /<prompt> [args]  run prompts/<prompt>.md ($ARGUMENTS, $1..$9)
-  /new      start a new run (fresh conversation)
-  /exit     leave (the run can be continued with hy resume <run-id>)`
-
-/** Built-in commands; a custom prompt with the same name does not shadow them. */
-const BUILTIN_COMMANDS = new Set([
-  '/help', '/status', '/diff', '/undo', '/notes', '/plan', '/skills', '/review', '/init', '/compact', '/model', '/new', '/exit', '/quit',
-  '/plan-mode',
-])
-
 /** `hy review [--base <ref>]`: a read-only review of the changes (Codex `/review`). */
 async function review(p: Parsed): Promise<number> {
   const base = str(p.flags, 'base')
@@ -570,7 +550,7 @@ async function chatLoop(p: Parsed, config: HarnessConfig, client: ExecRpcClient,
             out = rest ? conv.setModel(rest) : `model: ${config.role.provider}/${config.role.model}`
             break
           case '/help':
-            out = CHAT_HELP
+            out = chatHelp()
             break
           case '/status':
             out = conv.status()
@@ -589,6 +569,32 @@ async function chatLoop(p: Parsed, config: HarnessConfig, client: ExecRpcClient,
             break
           case '/skills':
             out = conv.skillList()
+            break
+          // CP-32: the same commands as the GUI.
+          case '/usage':
+            out = formatUsage(conv.usageSnapshot())
+            break
+          case '/mcp':
+            out = sessionMcp?.renderCatalog() || 'no MCP tools (configure mcpServers)'
+            break
+          case '/plugins': {
+            const tools = pluginSpecs()
+            out = tools.length ? tools.map((t) => `${t.name}: ${t.description}`).join('\n') : 'no plugin tools'
+            break
+          }
+          case '/memories':
+            out = config.memory ? MemoryStore.forStateDir(config.stateDir).render() || 'workspace memory is empty' : 'workspace memory is off (memory: true enables it)'
+            break
+          case '/hooks':
+            out = formatHooks(describeHooks(config.hooks))
+            break
+          case '/doctor':
+            out = formatDoctor(await doctorReport(config, client))
+            break
+          case '/config':
+            out = Object.entries(configPaths(config.workspaceRoot, config.stateDir))
+              .map(([name, value]) => `${name}: ${value}`)
+              .join('\n')
             break
           case '/new':
             conv = Conversation.create(config, client, newRunId(), json, ask, answer)
@@ -1398,45 +1404,43 @@ async function protocolCommand(p: Parsed): Promise<number> {
   return 0
 }
 /** CP-39: `hy doctor` gathers the facts a support request needs. */
-async function doctorCommand(p: Parsed): Promise<number> {
-  const config = loadConfig(toOverrides(p))
+/** The `hy doctor` report for a loaded config; `client` is asked for the sandbox. */
+async function doctorReport(config: HarnessConfig, client: ExecRpcClient | undefined, error?: unknown) {
   let sandbox: Parameters<typeof buildDoctorReport>[0]['sandbox']
   try {
-    const { client } = await openClient(p)
-    try {
-      const status = await client.sandboxStatus()
-      sandbox = {
-        enforcement: String(status.enforcement),
-        available: status.workspaceWriteAvailable,
-        gaps: status.gaps ?? [],
-        denyRead: status.denyRead ?? [],
-        readOnly: status.readOnly ?? [],
-      }
-    } finally {
-      await client.stop()
-    }
-  } catch (error) {
-    sandbox = { enforcement: 'unknown', available: false, error: error instanceof Error ? error.message : String(error) }
+    if (!client) throw error ?? new Error('the exec server did not start')
+    sandbox = doctorSandbox(await client.sandboxStatus())
+  } catch (failure) {
+    sandbox = { enforcement: 'unknown', available: false, error: failure instanceof Error ? failure.message : String(failure) }
   }
-  const report = buildDoctorReport({
+  const secretBin = findSecretBinary()
+  return buildDoctorReport({
     version: HARNESS_VERSION,
     node: process.version,
     platform: `${process.platform} ${process.arch}`,
     workspace: config.workspaceRoot,
     config,
     execServerPath: resolveServerPath(),
-    ...(sandbox !== undefined ? { sandbox } : {}),
+    sandbox,
     mcpServers: Object.keys(config.mcpServers),
-    ...(findSecretBinary() ? { secretBin: findSecretBinary()! } : {}),
+    ...(secretBin ? { secretBin } : {}),
   })
-  if (bool(p.flags, 'json')) {
-    console.log(JSON.stringify(report, null, 2))
-  } else {
-    console.log(`HY-HARNESS ${report.version}`)
-    for (const check of report.checks) {
-      console.log(`${check.status === 'ok' ? 'ok  ' : check.status === 'warn' ? 'warn' : 'FAIL'} ${check.name}: ${check.detail}`)
+}
+
+async function doctorCommand(p: Parsed): Promise<number> {
+  const config = loadConfig(toOverrides(p))
+  let report: Awaited<ReturnType<typeof doctorReport>>
+  try {
+    const { client } = await openClient(p)
+    try {
+      report = await doctorReport(config, client)
+    } finally {
+      await client.stop()
     }
+  } catch (error) {
+    report = await doctorReport(config, undefined, error)
   }
+  console.log(bool(p.flags, 'json') ? JSON.stringify(report, null, 2) : formatDoctor(report))
   return report.ok ? 0 : 1
 }
 /** CP-38: `hy features [list|enable|disable]`, persisted in the user config. */

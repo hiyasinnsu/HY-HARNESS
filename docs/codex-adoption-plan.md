@@ -1,6 +1,6 @@
 # Codex 差分の導入計画（実装計画 v1）
 
-- **実装状況**: 2026-11-05 の時点で **C0〜C2 を完了**、C3 は CP-25/CP-26（JSON-RPC の thread/turn 制御・承認・API スキーマ）、C5 は CP-37/38/39/42 を実装済み。C4 の GUI と C3 の WS/SDK・C5 の配布物は未着手。WP 単位の表は [implementation_status.md §7](implementation_status.md)、ラウンドごとの検証は [codex-adoption-progress.md](codex-adoption-progress.md)。
+- **実装状況**: 2026-11-05 の時点で **C0〜C2 を完了**、C3 は CP-25/CP-26（JSON-RPC の thread/turn 制御・承認・API スキーマ）、C4 は CP-32（コマンドとパレット、ラウンド 55）、C5 は CP-37/38/39/42 を実装済み。C4 の CP-33〜36、C3 の WS/SDK、C5 の配布物は未着手。WP 単位の表は [implementation_status.md §7](implementation_status.md)、ラウンドごとの検証は [codex-adoption-progress.md](codex-adoption-progress.md)。
 - **前提**: [codex-gap-analysis.md](codex-gap-analysis.md) の 119 件（P0: 7、P1: 28、P2: 51、P3: 33）。
 - **日付**: 2026-11-05。**対象**: HY-HARNESS v0.4.0（Windows 10 first、TS 制御プレーン + Rust 実行デーモン）。
 - **原則**:

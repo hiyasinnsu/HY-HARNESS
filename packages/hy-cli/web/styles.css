@@ -1329,3 +1329,11 @@ code, pre { font-family: var(--mono); }
 .msg-time { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .message.user .msg-time { text-align: right; }
 .message.assistant .msg-time { margin-top: 6px; }
+
+/* CP-32: commands jump to a details or settings section; doctor badges. */
+.detail-block.flash, .settings-section.flash { animation: hy-flash 1.2s ease-out; }
+.palette-row code { margin-left: auto; color: var(--muted); font-size: 11px; }
+.tag.doctor-ok { color: var(--muted); }
+.tag.doctor-warn { border-color: #c9a227; color: #c9a227; background: transparent; }
+.tag.doctor-fail { border-color: var(--danger, #b4453f); color: var(--danger, #b4453f); background: transparent; }
+.mention-item .slash-desc { margin-left: auto; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

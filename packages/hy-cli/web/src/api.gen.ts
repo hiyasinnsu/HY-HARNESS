@@ -33,6 +33,18 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
   },
   {
     method: "GET",
+    path: "/api/hooks",
+    summary: "The configured hooks, flattened (GUI /hooks).",
+    response: "HooksResponse",
+  },
+  {
+    method: "GET",
+    path: "/api/doctor",
+    summary: "The hy doctor report: installation, sandbox, roles, MCP (GUI /doctor).",
+    response: "DoctorReport",
+  },
+  {
+    method: "GET",
     path: "/api/bootstrap",
     summary: "Config summary, sandbox status, plugins and features.",
     response: "Bootstrap",

@@ -14,6 +14,8 @@ import {
   parseSandboxMode,
   readEvents,
   metricsSnapshot,
+  describeHooks,
+  resolveServerPath,
   resolveSandboxMode,
   SessionLog,
   BUNDLES,
@@ -54,6 +56,7 @@ import { applyAgentEvent, projectChat, stripPlanPrefix, type ChatEntry } from '.
 import { API_VERSION } from './api-schema.js'
 import { matchContract, validateRequest } from './api-contract.js'
 import { DocumentError, previewDocument } from './documents.js'
+import { buildDoctorReport, doctorSandbox, findSecretBinary } from './doctor.js'
 import { applyOnboardingDefaults, OnboardingError, onboardingView, readOnboarding, writeOnboarding } from './onboarding.js'
 import {
   UpdateFeedError,
@@ -3020,6 +3023,36 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
 
         if (pathname === '/api/metrics' && method === 'GET') {
           json(res, 200, metricsSnapshot({ uptimeSeconds: process.uptime(), sessions: sessions.size, rssBytes: process.memoryUsage().rss }))
+          return
+        }
+        // CP-32: `/hooks` and `/doctor` in the GUI.
+        if (pathname === '/api/hooks' && method === 'GET') {
+          json(res, 200, { hooks: describeHooks(config.hooks) })
+          return
+        }
+        if (pathname === '/api/doctor' && method === 'GET') {
+          let doctorSandboxInput: Parameters<typeof buildDoctorReport>[0]['sandbox']
+          try {
+            doctorSandboxInput = doctorSandbox(await client.sandboxStatus())
+          } catch (error) {
+            doctorSandboxInput = { enforcement: 'unknown', available: false, error: errorMessage(error) }
+          }
+          const secretBin = findSecretBinary()
+          json(
+            res,
+            200,
+            buildDoctorReport({
+              version: HARNESS_VERSION,
+              node: process.version,
+              platform: `${process.platform} ${process.arch}`,
+              workspace: config.workspaceRoot,
+              config,
+              execServerPath: options.execServer ?? resolveServerPath(),
+              sandbox: doctorSandboxInput,
+              mcpServers: Object.keys(config.mcpServers),
+              ...(secretBin ? { secretBin } : {}),
+            }),
+          )
           return
         }
         if (pathname === '/api/health' && method === 'GET') {

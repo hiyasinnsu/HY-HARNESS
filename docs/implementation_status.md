@@ -358,7 +358,7 @@ F:\HY-HARNESS\
 | C1 道具箱 | CP-09〜CP-17（CP-09 は PTY なし） | CP-11 の prompts/elicitation |
 | C2 ループ | CP-18〜CP-24 | `@skill:` メンション、`tool-search` フラグの消費 |
 | C3 プロトコル | CP-25（JSON-RPC の読み取り・turn 制御・承認）、CP-26（API スキーマ） | CP-27/28（WS・daemon）、CP-29〜31（SDK/ACP/移行）、`hy serve` の常駐化 |
-| C4 UX | `hy fork` などバックエンドの一部 | CP-32〜36 の GUI（ブラウザ検証が前提） |
+| C4 UX | CP-32（コマンド表の統一、追加コマンド、Ctrl+K のファイル・設定検索、`/` 補完、`/api/hooks`・`/api/doctor`、CLI の同等コマンド） | CP-32 の `/worktree`・`/import` と自動ブラウザ E2E、CP-33〜36 |
 | C5 運用 | CP-37 / CP-38 / CP-39 / CP-42（`hy doctor`・フラグ・CI ゲート・`pnpm verify`） | CP-40 の配布署名手順、CP-41 の単一バイナリ、CP-43 |
 
 検証の現状（2026-11-05 ラウンド 54、子プロセス・Ollama・NTFS が使える環境）: `pnpm build` / `typecheck` / 生成物チェック / `cargo fmt --check` / `cargo clippy -D warnings` は緑。単体 `pnpm test` は **499 / 499 PASS**、`cargo test` も全件 PASS。それ以前の「失敗は環境要因のみ」という記載は誤りで、統合テストは構文エラーで 1 本も動いておらず、`denyRead` が読み取りを止めていない・`readOnly` の既存ファイルが書ける・K9 超過（1,552 トークン）などの回帰があった（[codex-adoption-progress.md](codex-adoption-progress.md) ラウンド 54 で修正）。

@@ -7,7 +7,7 @@ import { catalogVision } from './model-catalog.js'
 import { resolveBundles, type ResolvedBundles } from './bundles.js'
 import type { SandboxMode } from './protocol.js'
 import type { McpServerConfig } from './mcp.js'
-import type { HooksConfig } from './hooks.js'
+import type { HookSpec, HooksConfig } from './hooks.js'
 import type { WebConfig } from './web.js'
 import type { LspServerConfig } from './lsp.js'
 import { isSecretRef, resolveSecretRef } from './secrets.js'
@@ -932,12 +932,19 @@ function applyProfile(user: UserConfigFile | undefined, name: string | undefined
   return merge(user, profile) as UserConfigFile
 }
 
+/**
+ * The user's hooks, then a trusted project's, for every event. It used to list
+ * three events by name, so the CP-19 events (sessionStart, userPromptSubmit,
+ * permissionRequest, stop, …) were dropped on load and never ran.
+ */
 function mergeHooks(a: HooksConfig = {}, b: HooksConfig = {}): HooksConfig {
-  return {
-    preToolUse: [...(a.preToolUse ?? []), ...(b.preToolUse ?? [])],
-    postToolUse: [...(a.postToolUse ?? []), ...(b.postToolUse ?? [])],
-    turnEnd: [...(a.turnEnd ?? []), ...(b.turnEnd ?? [])],
+  const out: Record<string, HookSpec[]> = {}
+  for (const source of [a, b] as Array<Record<string, HookSpec[] | undefined>>) {
+    for (const [event, specs] of Object.entries(source)) {
+      if (Array.isArray(specs)) out[event] = [...(out[event] ?? []), ...specs]
+    }
   }
+  return out as HooksConfig
 }
 
 export function roleApiKey(role: RoleConfig): string | undefined {

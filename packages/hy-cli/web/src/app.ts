@@ -4,6 +4,30 @@ import { formatRelative } from './time-format.js'
 import { renderAssistantMessage, renderUserMessage, type MessageContext } from './message-view.js'
 import { SHORTCUT_ACTIONS, matchesAccelerator, normalizeAccelerator, resolveShortcuts, shortcutConflicts, type ShortcutMap } from './shortcuts.js'
 import { icon } from './icons.js'
+import { COMMANDS, filterCommands, helpRows, parseSlash, slashCompletions, type CommandSpec, type DetailsSection } from './slash-commands.js'
+
+/** CP-32: `GET /api/hooks`. */
+interface HooksView {
+  hooks: Array<{ event: string; command: string[]; tools?: string[]; timeoutMs?: number }>
+}
+
+/** CP-32: `GET /api/doctor` (the same report as `hy doctor --json`). */
+interface DoctorView {
+  ok: boolean
+  version: string
+  checks: Array<{ name: string; status: 'ok' | 'warn' | 'fail'; detail: string }>
+}
+
+/** CP-32: settings sections the palette can jump to (`data-settings-section`). */
+const SETTINGS_SECTIONS: ReadonlyArray<{ id: string; key: string }> = [
+  { id: 'workspace', key: 'workspaceTitle' },
+  { id: 'appearance', key: 'appearance' },
+  { id: 'approval', key: 'approvalMode' },
+  { id: 'models', key: 'models' },
+  { id: 'capabilities', key: 'capabilities' },
+  { id: 'automation', key: 'automation' },
+  { id: 'update', key: 'updateTitle' },
+]
 import { sumDenials } from './denials.js'
 import { escapeHtml, oneLine, renderMarkdown } from './markdown.js'
 import { renderNoticeHtml } from './notice.js'
@@ -134,13 +158,18 @@ interface State {
   automationForm?: AutomationForm | undefined
   automationRun?: AutomationRun | undefined
   automationTimer?: number | undefined
-  modal?: 'settings' | 'help' | 'goal' | 'ralph' | 'model' | 'workspace' | 'palette' | 'automation' | 'roots' | 'rename' | 'sandbox' | 'onboarding' | 'outline' | 'feedback' | 'shortcuts' | undefined
+  modal?: 'settings' | 'help' | 'goal' | 'ralph' | 'model' | 'workspace' | 'palette' | 'automation' | 'roots' | 'rename' | 'sandbox' | 'onboarding' | 'outline' | 'feedback' | 'shortcuts' | 'hooks' | 'doctor' | undefined
   /** Chat being renamed; only set while the rename dialog is open. */
   renameRunId?: string | undefined
   /** Current text of the rename input, so a failed save keeps what was typed. */
   renameDraft: string
   workspaces: string[]
   paletteQuery: string
+  /** CP-32: workspace files matching the palette query (fetched as you type). */
+  paletteFiles: string[]
+  /** CP-32: `/hooks` and `/doctor` modal contents. */
+  hooksView?: HooksView | undefined
+  doctorView?: DoctorView | undefined
   browserUrl: string
   browserSrc: string
   browserMode: 'preview' | 'automation'
@@ -182,6 +211,8 @@ interface State {
   mentionStart: number
   mentionEnd: number
   mentionIndex: number
+  /** CP-32: slash-command suggestions while the composer holds only `/name`. */
+  slashItems: CommandSpec[]
   mentionTimer?: number | undefined
   jobs: JobRecord[]
   jobOutput: string
@@ -245,6 +276,7 @@ const state: State = {
   workspaces: [],
   automationTab: 'schedules',
   paletteQuery: '',
+  paletteFiles: [],
   renameDraft: '',
   browserUrl: '',
   browserSrc: '',
@@ -270,6 +302,7 @@ const state: State = {
   mentionStart: 0,
   mentionEnd: 0,
   mentionIndex: 0,
+  slashItems: [],
   jobs: [],
   jobOutput: '',
   subagents: [],
@@ -1145,13 +1178,22 @@ function updateComposerState(): void {
 }
 
 function mentionCount(): number {
-  return state.mentionSessions.length + state.mentions.length
+  return state.slashItems.length + state.mentionSessions.length + state.mentions.length
 }
 
 function scheduleMentions(input: HTMLTextAreaElement): void {
   if (state.mentionTimer !== undefined) window.clearTimeout(state.mentionTimer)
   state.mentionTimer = window.setTimeout(() => {
     const cursor = input.selectionStart ?? input.value.length
+    // CP-32: `/re` suggests /rename, /resume, /review.
+    state.slashItems = cursor === input.value.length ? slashCompletions(input.value).slice(0, 8) : []
+    if (state.slashItems.length > 0) {
+      state.mentions = []
+      state.mentionSessions = []
+      state.mentionIndex = 0
+      renderMentionMenu()
+      return
+    }
     const before = input.value.slice(0, cursor)
     const match = /(?:^|\s)@([^\s@]*)$/.exec(before)
     if (!match) {
@@ -1191,6 +1233,15 @@ function renderMentionMenu(): void {
     return
   }
   el.classList.add('open')
+  if (state.slashItems.length > 0) {
+    el.innerHTML = `<div class="mention-section">${tr('commandsSection')}</div>${state.slashItems
+      .map(
+        (c, i) =>
+          `<button type="button" class="mention-item ${i === state.mentionIndex ? 'active' : ''}" data-action="insert-slash" data-index="${i}">${icon(c.icon, 13)}<span>/${escapeHtml(c.slash ?? c.id)}${c.args ? ` <span class="muted">${escapeHtml(c.args)}</span>` : ''}</span><span class="muted small slash-desc">${escapeHtml(c.desc)}</span></button>`,
+      )
+      .join('')}`
+    return
+  }
   const sessions = state.mentionSessions
     .map(
       (session, i) =>
@@ -1205,6 +1256,29 @@ function renderMentionMenu(): void {
     })
     .join('')
   el.innerHTML = `${sessions ? `<div class="mention-section">${tr('sessionsSection')}</div>${sessions}` : ''}${files ? `<div class="mention-section">${tr('filesSection')}</div>${files}` : ''}`
+}
+
+/**
+ * CP-32: picks a slash suggestion. A command without a required argument runs
+ * at once (Enter); otherwise, or with `fill` (Tab), its name is inserted.
+ */
+function insertSlash(index: number, fill = false): void {
+  const input = document.getElementById('composer-input') as HTMLTextAreaElement | null
+  const spec = state.slashItems[index]
+  if (!input || !spec?.slash) return
+  state.slashItems = []
+  state.mentionIndex = 0
+  renderMentionMenu()
+  if (!fill && !spec.args?.startsWith('<')) {
+    input.value = ''
+    saveComposerDraft('')
+    void runCommand(spec.id)
+    return
+  }
+  input.value = `/${spec.slash} `
+  saveComposerDraft(input.value)
+  input.focus()
+  input.setSelectionRange(input.value.length, input.value.length)
 }
 
 function insertMention(index: number): void {
@@ -1951,15 +2025,15 @@ function renderDetailsPanel(): string {
     <section class="detail-block"><h3>${icon('terminal', 16)} ${tr('jobs')}</h3>${jobs}${state.jobOutput ? `<pre class="detail-json">${escapeHtml(state.jobOutput)}</pre>` : ''}<button class="link-btn" data-action="refresh-jobs">${icon('refresh', 14)} ${tr('refreshJobs')}</button></section>
     <section class="detail-block"><h3>${icon('bot', 16)} ${tr('workers')}</h3>${workers}</section>
     <section class="detail-block"><h3>${icon('bot', 16)} ${tr('subagents')}</h3>${agents}${subagents}${state.agentEntries.length ? `<div class="mini-transcript">${renderMiniEntries(state.agentEntries)}</div>` : ''}</section>
-    <section class="detail-block"><h3>${icon('info', 16)} ${tr('session')}</h3><pre class="panel-pre">${escapeHtml(state.status || 'No status yet.')}</pre></section>
-    <section class="detail-block"><h3>${icon('clock', 16)} ${tr('statsTitle')}</h3>${statsRows()}</section>
+    <section class="detail-block" data-section="session"><h3>${icon('info', 16)} ${tr('session')}</h3><pre class="panel-pre">${escapeHtml(state.status || 'No status yet.')}</pre></section>
+    <section class="detail-block" data-section="stats"><h3>${icon('clock', 16)} ${tr('statsTitle')}</h3>${statsRows()}</section>
     <section class="detail-block"><h3>${icon('git', 16)} ${tr('forkChat')}</h3><p class="muted small">${tr('forkHint')}</p><button class="btn ghost" data-action="fork-chat" data-run-id="${escapeHtml(currentRunId() ?? '')}" ${currentRunId() ? '' : 'disabled'}>${icon('git', 14)} ${tr('forkChat')}</button></section>
     <section class="detail-block"><h3>${icon('external', 16)} ${tr('openIn')}</h3>${openInRows()}</section>
-    <section class="detail-block"><h3>${icon('plan', 16)} ${tr('notes')}</h3><pre class="panel-pre">${escapeHtml(state.notes || tr('noNotes'))}</pre></section>
-    <section class="detail-block"><h3>${icon('book', 16)} ${tr('skills')}</h3><pre class="panel-pre">${escapeHtml(state.skills || tr('noSkills'))}</pre></section>
-    <section class="detail-block"><h3>${icon('cpu', 16)} ${tr('mcp')}</h3>${mcp}</section>
-    <section class="detail-block"><h3>${icon('cpu', 16)} ${tr('plugins')}</h3>${plugins}</section>
-    <section class="detail-block"><h3>${icon('read', 16)} ${tr('workspaceMemory')}</h3>${memory}</section>
+    <section class="detail-block" data-section="notes"><h3>${icon('plan', 16)} ${tr('notes')}</h3><pre class="panel-pre">${escapeHtml(state.notes || tr('noNotes'))}</pre></section>
+    <section class="detail-block" data-section="skills"><h3>${icon('book', 16)} ${tr('skills')}</h3><pre class="panel-pre">${escapeHtml(state.skills || tr('noSkills'))}</pre></section>
+    <section class="detail-block" data-section="mcp"><h3>${icon('cpu', 16)} ${tr('mcp')}</h3>${mcp}</section>
+    <section class="detail-block" data-section="plugins"><h3>${icon('cpu', 16)} ${tr('plugins')}</h3>${plugins}</section>
+    <section class="detail-block" data-section="memory"><h3>${icon('read', 16)} ${tr('workspaceMemory')}</h3>${memory}</section>
     <section class="detail-block"><h3>${icon('shield', 16)} ${tr('sandbox')}</h3>${sandboxRows(sandbox)}</section>
     <section class="detail-block"><h3>${icon('cpu', 16)} ${tr('roles')}</h3>${config ? roleRows(config) : ''}</section>
     <section class="detail-block"><h3>${icon('clock', 16)} ${tr('trajectory')}</h3>${trajectory}<button class="link-btn" data-action="refresh-details">${icon('refresh', 14)} ${tr('refresh')}</button></section>
@@ -2618,65 +2692,42 @@ function renderModal(): void {
     el.innerHTML = `<div class="modal-backdrop" data-action="close-modal"><div class="modal" role="dialog" aria-modal="true">
       <div class="modal-head"><h2>${icon('question', 16)} ${tr('helpTitle')}</h2><button class="icon-btn" data-action="close-modal">${icon('close', 16)}</button></div>
       <div class="modal-body help-list">
-        ${[
-          ['/new', 'Start a fresh session'],
-          ['/status', 'Show run, model, sandbox and token usage'],
-          ['/diff', 'Show changes since the run started'],
-          ['/undo', 'Restore files to before the last turn'],
-          ['/notes', 'Show the rationale ledger notes'],
-          ['/plan', 'Toggle read-only planning mode'],
-          ['/goal [objective|pause|resume|clear]', 'Set or control the long-running goal'],
-          ['/compact', 'Compact the conversation now'],
-          ['/model <name>', 'Switch the worker model'],
-          ['/review', 'Run a read-only review of uncommitted changes'],
-          ['/init', 'Draft an AGENTS.md for this repository'],
-          ['/settings', 'Open model and sandbox settings'],
-          ['/export', 'Export this session as Markdown'],
-          ['/help', 'Show this help'],
-        ].map(([cmd, desc]) => `<div class="help-row"><code>${cmd}</code><span>${desc}</span></div>`).join('')}
+        ${helpRows().map((row) => `<div class="help-row"><code>${escapeHtml(row.usage)}</code><span>${escapeHtml(row.desc)}</span></div>`).join('')}
       </div>
     </div></div>`
     return
   }
   if (state.modal === 'palette') {
-    const actions: Array<[string, string, string]> = [
-      ['New chat', 'new', 'plus'],
-      ['Verifier loop', 'ralph', 'plan'],
-      ['Settings', 'settings', 'settings'],
-      ['Set or edit goal', 'goal', 'target'],
-      ['Toggle plan mode', 'plan-mode', 'plan'],
-      ['Files panel', 'files', 'folder'],
-      ['Diff panel', 'diff', 'diff'],
-      ['Plan panel', 'plan', 'plan'],
-      ['Trace panel', 'trace', 'clock'],
-      ['Browser panel', 'browser', 'globe'],
-      ['Terminal panel', 'terminal', 'terminal'],
-      ['Review changes', 'review', 'search'],
-      ['Undo last turn', 'undo', 'refresh'],
-      ['Compact conversation', 'compact', 'cpu'],
-      ['Export as Markdown', 'export', 'external'],
-      ['Rename chat', 'rename', 'edit'],
-      ['Generate title', 'generate-title', 'bolt'],
-      ['Fork chat', 'fork', 'git'],
-      ['Turn outline', 'outline', 'plan'],
-      ['Rate last answer', 'feedback', 'alert'],
-      ['Keyboard shortcuts', 'shortcuts', 'bolt'],
-      ['Toggle theme', 'theme', 'sun'],
-      ['Help / commands', 'help', 'question'],
-    ]
+    // CP-32: commands, chats, workspace files and settings sections in one list.
     const query = state.paletteQuery.toLowerCase().trim()
-    const filtered = actions.filter(([label]) => !query || label.toLowerCase().includes(query))
-    const sessions = state.sessions
-      .filter((s) => !query || `${s.first} ${s.runId}`.toLowerCase().includes(query))
-      .slice(0, 5)
-      .map((s) => `<button class="palette-row" data-action="palette-session" data-run-id="${s.runId}">${icon('clock', 16)}<span>${escapeHtml(s.first ? oneLine(s.first, 70) : tr('newSession'))}</span><code>${escapeHtml(s.runId)}</code></button>`)
+    const commands = filterCommands(query)
+      .map((c) => `<button class="palette-row" data-action="palette-run" data-command="${c.id}">${icon(c.icon, 16)}<span>${escapeHtml(c.label ?? c.id)}</span>${c.slash ? `<code>/${escapeHtml(c.slash)}</code>` : ''}</button>`)
       .join('')
+    const sessions = state.sessions
+      .filter((s) => !query || `${s.first} ${s.title ?? ''} ${s.workerTitle ?? ''} ${s.runId}`.toLowerCase().includes(query))
+      .slice(0, 5)
+      .map((s) => `<button class="palette-row" data-action="palette-session" data-run-id="${s.runId}">${icon('clock', 16)}<span>${escapeHtml(oneLine(s.title || s.first || tr('newSession'), 70))}</span><code>${escapeHtml(s.runId)}</code></button>`)
+      .join('')
+    const files = query
+      ? state.paletteFiles
+          .slice(0, 6)
+          .map((file) => `<button class="palette-row" data-action="palette-file" data-path="${escapeHtml(file)}">${icon('file', 16)}<span>${escapeHtml(file)}</span></button>`)
+          .join('')
+      : ''
+    const settings = query
+      ? SETTINGS_SECTIONS.filter((section) => `${tr(section.key)} settings ${section.id}`.toLowerCase().includes(query))
+          .map((section) => `<button class="palette-row" data-action="palette-settings" data-section="${section.id}">${icon('settings', 16)}<span>${tr('settings')} › ${escapeHtml(tr(section.key))}</span></button>`)
+          .join('')
+      : ''
+    const empty = !commands && !sessions && !files && !settings
     el.innerHTML = `<div class="modal-backdrop" data-action="close-modal"><div class="modal palette-modal" role="dialog" aria-modal="true">
       <div class="palette-input-row">${icon('search', 16)}<input id="palette-input" value="${escapeHtml(state.paletteQuery)}" placeholder="${tr('palettePlaceholder')}" autocomplete="off" autofocus><kbd>Esc</kbd></div>
       <div class="palette-list">
-        ${filtered.length ? `<div class="palette-section">${tr('commandsSection')}</div>${filtered.map(([label, command, ico]) => `<button class="palette-row" data-action="palette-run" data-command="${command}">${icon(ico, 16)}<span>${label}</span></button>`).join('')}` : ''}
+        ${commands ? `<div class="palette-section">${tr('commandsSection')}</div>${commands}` : ''}
         ${sessions ? `<div class="palette-section">${tr('sessionsSection')}</div>${sessions}` : ''}
-        ${!filtered.length && !sessions ? `<div class="panel-empty">${tr('noMatches')}</div>` : ''}
+        ${files ? `<div class="palette-section">${tr('filesSection')}</div>${files}` : ''}
+        ${settings ? `<div class="palette-section">${tr('settings')}</div>${settings}` : ''}
+        ${empty ? `<div class="panel-empty">${tr('noMatches')}</div>` : ''}
       </div>
     </div></div>`
     const input = document.getElementById('palette-input') as HTMLInputElement | null
@@ -2686,8 +2737,38 @@ function renderModal(): void {
       input.addEventListener('input', () => {
         state.paletteQuery = input.value
         renderModal()
+        schedulePaletteFiles(input.value)
       })
     }
+    return
+  }
+  if (state.modal === 'hooks') {
+    const hooks = state.hooksView?.hooks ?? []
+    const rows = hooks.length
+      ? hooks
+          .map(
+            (hook) => `<div class="catalog-row"><span class="tag">${escapeHtml(hook.event)}</span><code>${escapeHtml(hook.command.join(' '))}</code><span class="muted small">${hook.tools?.length ? escapeHtml(hook.tools.join(', ')) : ''}${hook.timeoutMs ? ` · ${hook.timeoutMs} ms` : ''}</span></div>`,
+          )
+          .join('')
+      : `<div class="panel-empty">${tr('noHooks')}</div>`
+    el.innerHTML = `<div class="modal-backdrop" data-action="close-modal"><div class="modal" role="dialog" aria-modal="true" data-modal="hooks">
+      <div class="modal-head"><h2>${icon('bolt', 16)} ${tr('hooksTitle')}</h2><button class="icon-btn" data-action="close-modal">${icon('close', 16)}</button></div>
+      <div class="modal-body"><p class="muted">${tr('hooksDesc')}</p>${rows}</div>
+    </div></div>`
+    return
+  }
+  if (state.modal === 'doctor') {
+    const report = state.doctorView
+    const badge = (status: string) => `<span class="tag doctor-${status}">${escapeHtml(status)}</span>`
+    const body = report
+      ? `<p class="muted">HY-HARNESS ${escapeHtml(report.version)} · ${report.ok ? tr('doctorOk') : tr('doctorProblems')}</p>${report.checks
+          .map((check) => `<div class="catalog-row">${badge(check.status)}<code>${escapeHtml(check.name)}</code><span>${escapeHtml(check.detail)}</span></div>`)
+          .join('')}`
+      : `<div class="panel-empty">${tr('doctorRunning')}</div>`
+    el.innerHTML = `<div class="modal-backdrop" data-action="close-modal"><div class="modal" role="dialog" aria-modal="true" data-modal="doctor">
+      <div class="modal-head"><h2>${icon('shield', 16)} ${tr('doctorTitle')}</h2><button class="icon-btn" data-action="close-modal">${icon('close', 16)}</button></div>
+      <div class="modal-body">${body}</div>
+    </div></div>`
     return
   }
   if (state.modal === 'workspace') {
@@ -2860,7 +2941,7 @@ function renderModal(): void {
     <div class="modal-head"><h2>${icon('settings', 16)} ${tr('settingsTitle')}</h2><button class="icon-btn" data-action="close-modal">${icon('close', 16)}</button></div>
     <div class="modal-body">
       <div class="settings-note">${icon('info', 14)} ${tr('settingsHotApply')}</div>
-      <section class="settings-section">
+      <section class="settings-section" data-settings-section="workspace">
         <h3>${tr('workspaceTitle')}</h3>
         <div class="settings-row"><span>${tr('settingsRoot')}</span><code>${escapeHtml(settings?.active.workspace ?? state.boot?.workspace.root ?? '')}</code></div>
         <div class="settings-row"><span>${tr('settingsConfig')}</span><code>${escapeHtml(settings?.path ?? '')}</code></div>
@@ -2868,7 +2949,7 @@ function renderModal(): void {
         <div class="settings-row"><span>${tr('sandbox')}</span><select id="settings-sandbox">${['unconfined', 'workspace-write', 'read-only'].map((m) => `<option value="${m}" ${settings?.active.sandbox === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
         <div class="settings-row"><span>${tr('enforcement')}</span><strong>${escapeHtml(String((state.boot?.sandbox?.enforcement ?? 'unknown')))}</strong></div>
       </section>
-      <section class="settings-section">
+      <section class="settings-section" data-settings-section="appearance">
         <h3>${tr('appearance')}</h3>
         <div class="settings-row"><span>${tr('theme')}</span><select id="settings-theme">${['light', 'dark', 'system'].map((value) => `<option value="${value}" ${state.theme === value ? 'selected' : ''}>${tr(`theme_${value}`)}</option>`).join('')}</select></div>
         <div class="settings-row"><span>${tr('maskSecretsLabel')}</span><label class="toggle"><input id="settings-mask" type="checkbox" ${state.maskSecrets ? 'checked' : ''}> ${tr('enabled')}</label></div>
@@ -2877,7 +2958,7 @@ function renderModal(): void {
         <div class="settings-row"><span>${tr('shortcuts')}</span><button type="button" class="btn ghost" data-action="open-shortcuts">${icon('bolt', 14)} ${tr('editShortcuts')}</button></div>
         <div class="settings-note">${icon('info', 14)} ${tr('appearanceNote')}</div>
       </section>
-      <section class="settings-section">
+      <section class="settings-section" data-settings-section="approval">
         <h3>${tr('approvalMode')}</h3>
         <div class="settings-row"><span>${tr('approvalMode')}</span><select id="settings-approval">
           <option value="manual" ${approvalMode === 'manual' ? 'selected' : ''}>${tr('approvalManual')}</option>
@@ -2886,7 +2967,7 @@ function renderModal(): void {
         </select></div>
         <div class="settings-note">${icon('info', 14)} <span>${tr('approvalNote')} <span id="approval-sandbox-note">${escapeHtml(approvalSandboxNote(settings?.active.sandbox ?? 'unconfined'))}</span></span></div>
       </section>
-      <section class="settings-section"><h3>${tr('models')}</h3><div class="settings-note">${icon('info', 14)} ${tr('apiKeyEnvHint')}</div>
+      <section class="settings-section" data-settings-section="models"><h3>${tr('models')}</h3><div class="settings-note">${icon('info', 14)} ${tr('apiKeyEnvHint')}</div>
         <div class="model-registry">
           <div class="settings-row"><strong>${tr('modelRegistry')}</strong><span class="muted small">${tr('modelRegistryHint')}</span></div>
           <div class="model-profile-list">${state.modelProfiles.length ? state.modelProfiles.map((p) => `<div class="model-profile-row"><span>${escapeHtml(p.name)}</span><code>${escapeHtml(p.provider)}/${escapeHtml(p.model)}</code><button class="link-btn danger" data-action="model-delete" data-id="${escapeHtml(p.id)}">${tr('delete')}</button></div>`).join('') : `<div class="panel-empty">${tr('noModels')}</div>`}</div>
@@ -2902,7 +2983,7 @@ function renderModal(): void {
         <h4 class="settings-subhead">${tr('roleAssignment')}</h4>
         ${fields('worker', tr('workerRequired'), true)}${fields('orchestrator', tr('orchestratorRole'))}${fields('subagent', tr('subagentRole'))}${fields('guardian', tr('guardianRole'))}${fields('grader', tr('graderRole'))}${fields('compactor', tr('compactorRole'))}${fields('summarizer', tr('summarizerRole'))}
       </section>
-      <section class="settings-section">
+      <section class="settings-section" data-settings-section="capabilities">
         <h3>${tr('capabilities')}</h3>
         <div class="settings-row"><span>${tr('workspaceMemory')}</span><label class="toggle"><input id="settings-memory" type="checkbox" ${(settings?.user.memory?.enabled ?? settings?.active.features.memory) ? 'checked' : ''}> ${tr('memoryEnabled')}</label></div>
         <div class="settings-row"><span>${tr('webTools')}</span><label class="toggle"><input id="settings-web" type="checkbox" ${(settings?.user.web?.enabled ?? settings?.active.features.web) ? 'checked' : ''}> ${tr('webEnabled')}</label></div>
@@ -2912,7 +2993,7 @@ function renderModal(): void {
         </div>
         <div class="plugin-actions"><button type="button" class="btn ghost" data-action="reload-plugins">${icon('refresh', 14)} ${tr('reloadPlugins')}</button>${isDesktop() ? `<button type="button" class="btn ghost" data-action="add-plugin-file">${icon('plus', 14)} ${tr('addPluginFile')}</button>` : ''}</div>
       </section>
-      <section class="settings-section">
+      <section class="settings-section" data-settings-section="automation">
         <h3>${tr('automation')}</h3>
         <div class="settings-row"><span>${tr('browserAutomation')}</span><label class="toggle"><input id="settings-browser" type="checkbox" ${settings?.user.automation?.browser?.enabled ? 'checked' : ''}> ${tr('enabled')}</label></div>
         <div class="settings-row"><span>${tr('browser')}</span><select id="settings-browser-name">${['chrome', 'msedge', 'chromium', 'firefox', 'webkit'].map((b) => `<option value="${b}" ${(settings?.user.automation?.browser?.browser ?? 'chrome') === b ? 'selected' : ''}>${b}</option>`).join('')}</select></div>
@@ -2920,7 +3001,7 @@ function renderModal(): void {
         <div class="settings-row"><span>${tr('desktopAutomation')}</span><label class="toggle"><input id="settings-desktop" type="checkbox" ${settings?.user.automation?.desktop?.enabled ? 'checked' : ''}> ${tr('enabled')}</label></div>
         <div class="settings-note" id="automation-restart-note" hidden>${icon('alert', 14)} ${tr('automationChangedNote')}</div>
       </section>
-      <section class="settings-section">
+      <section class="settings-section" data-settings-section="update">
         <h3>${tr('updateTitle')}</h3>
         <div class="settings-note">${icon('info', 14)} ${tr('updateHint')}</div>
         <div class="settings-row"><span>${tr('updateChannel')}</span><code>${escapeHtml(state.update?.channel ?? 'stable')}</code></div>
@@ -3712,92 +3793,193 @@ async function onQueueAction(el: HTMLElement): Promise<void> {
 }
 
 function command(text: string): boolean {
-  const match = /^\/([a-zA-Z-]+)(?:\s+([\s\S]*))?$/.exec(text.trim())
-  if (!match) return false
-  const name = match[1]!.toLowerCase()
-  const args = (match[2] ?? '').trim()
-  switch (name) {
+  const parsed = parseSlash(text)
+  if (!parsed) return false
+  if (!parsed.command) {
+    toast(`Unknown command /${parsed.name}. Try /help.`, 'error')
+    return true
+  }
+  void runCommand(parsed.command.id, parsed.args)
+  return true
+}
+
+/** CP-32: runs one entry of COMMANDS, from the composer or the palette. */
+async function runCommand(id: string, args = ''): Promise<void> {
+  const spec = COMMANDS.find((c) => c.id === id)
+  if (spec?.section) {
+    await openDetailsSection(spec.section)
+    return
+  }
+  const runId = currentRunId()
+  switch (id) {
     case 'new':
-    case 'clear':
-      void newSession()
-      return true
+      await newSession()
+      return
     case 'help':
       state.modal = 'help'
       renderModal()
-      return true
+      return
     case 'settings':
-      void openSettings()
-      return true
+      await openSettings()
+      return
     case 'diff':
-      void setRight('diff')
-      return true
     case 'plan':
-      void togglePlan()
-      return true
-    case 'status':
-      void setRight('details')
-      void loadDetails()
-      return true
-    case 'notes':
-    case 'skills':
-      void setRight('details')
-      void loadDetails()
-      return true
+    case 'files':
+    case 'trace':
+    case 'browser':
+    case 'terminal':
+      await showRight(id)
+      return
+    case 'plan-mode':
+      await togglePlan(args === 'off' ? false : args === 'on' ? true : undefined)
+      return
     case 'goal': {
       if (!args) {
-        void openGoal()
-        return true
+        await openGoal()
+        return
       }
       const [sub, ...rest] = args.split(/\s+/)
-      if (sub === 'pause' || sub === 'resume' || sub === 'clear') {
-        void goalAction(sub)
-        return true
-      }
-      if (sub === 'edit') {
-        void saveGoalText(rest.join(' '), 'edit')
-        return true
-      }
-      void saveGoalText(args)
-      return true
+      if (sub === 'pause' || sub === 'resume' || sub === 'clear') await goalAction(sub)
+      else if (sub === 'edit') await saveGoalText(rest.join(' '), 'edit')
+      else await saveGoalText(args)
+      return
     }
     case 'undo':
-      void runAction('undo')
-      return true
     case 'compact':
-      void runAction('compact')
-      return true
     case 'review':
-      void runAction('review')
-      return true
+      await runAction(id)
+      return
     case 'init':
-      void sendMessage('Create an AGENTS.md at the workspace root for coding agents working in this repository. Inspect the repository first (README, package manifests, build and test scripts, directory layout). Include: what the project is, how to build, test and lint it (exact commands), the code layout, and conventions a contributor must follow. Keep it short and factual; do not invent commands. If AGENTS.md already exists, improve it instead of replacing what is still right.')
-      return true
+      await sendMessage('Create an AGENTS.md at the workspace root for coding agents working in this repository. Inspect the repository first (README, package manifests, build and test scripts, directory layout). Include: what the project is, how to build, test and lint it (exact commands), the code layout, and conventions a contributor must follow. Keep it short and factual; do not invent commands. If AGENTS.md already exists, improve it instead of replacing what is still right.')
+      return
     case 'model':
-      if (args) void runAction('model', args)
+      if (args) await runAction('model', args)
       else toast('Usage: /model <name>')
-      return true
-    case 'export': {
-      const runId = currentRunId()
+      return
+    case 'export':
       if (runId) window.open(`/api/sessions/${encodeURIComponent(runId)}/export?format=md`, '_blank')
-      return true
-    }
+      return
     // WP-61: `/feedback [text]` rates the last answer from the keyboard.
     case 'feedback': {
       const lastAnswer = [...state.entries].reverse().find((entry) => entry.kind === 'assistant')
       if (!lastAnswer) {
         toast(tr('feedbackNoAnswer'))
-        return true
+        return
       }
       state.feedbackEntryId = lastAnswer.id
       state.feedbackNote = args
       state.modal = 'feedback'
       renderModal()
-      return true
+      return
     }
+    case 'rename':
+      if (!runId) return
+      if (!args) {
+        openRename(runId)
+        return
+      }
+      try {
+        const data = await setSessionTitle(runId, args)
+        toast(data.title ? tr('renamed') : tr('renamedAuto'), 'success')
+        await refreshSessions()
+        renderHeader()
+      } catch (error) {
+        toast(error instanceof Error ? error.message : String(error), 'error')
+      }
+      return
+    case 'generate-title':
+      if (runId) await generateTitleFor(runId)
+      return
+    case 'fork':
+      if (runId) await forkSession(runId)
+      return
+    case 'archive': {
+      if (!runId) return
+      // An archived chat is not in state.sessions unless "show archived" is
+      // on, so ask the server (with archived chats) for the current state.
+      let archived = false
+      try {
+        const listed = await api<{ sessions: SessionSummary[] }>('/api/sessions?archived=1')
+        archived = listed.sessions.find((s) => s.runId === runId)?.archived === true
+      } catch (error) {
+        toast(error instanceof Error ? error.message : String(error), 'error')
+        return
+      }
+      await toggleArchive(runId, !archived)
+      toast(archived ? tr('chatUnarchived') : tr('chatArchived'), 'success')
+      return
+    }
+    case 'resume':
+      state.paletteQuery = args
+      state.paletteFiles = []
+      state.modal = 'palette'
+      renderModal()
+      return
+    case 'hooks':
+      await openHooks()
+      return
+    case 'doctor':
+      await openDoctor()
+      return
+    case 'ralph':
+      openRalph()
+      return
+    case 'outline':
+      state.modal = 'outline'
+      renderModal()
+      return
+    case 'shortcuts':
+      state.modal = 'shortcuts'
+      renderModal()
+      return
+    case 'theme':
+      setTheme(state.theme === 'dark' ? 'light' : 'dark')
+      return
     default:
-      toast(`Unknown command /${name}. Try /help.`, 'error')
-      return true
+      toast(`Unknown command ${id}`, 'error')
   }
+}
+
+/** Opens a right panel; unlike setRight it never closes one that is already open. */
+async function showRight(panel: 'files' | 'diff' | 'plan' | 'details' | 'trace' | 'browser' | 'terminal'): Promise<void> {
+  if (state.right === panel) state.right = null
+  await setRight(panel)
+}
+
+/** CP-32: `/mcp`, `/usage`, … open the details panel at their section. */
+async function openDetailsSection(section: DetailsSection): Promise<void> {
+  await showRight('details')
+  const block = document.querySelector<HTMLElement>(`.detail-block[data-section="${section}"]`)
+  if (!block) return
+  block.scrollIntoView({ block: 'start' })
+  block.classList.add('flash')
+  window.setTimeout(() => block.classList.remove('flash'), 1_200)
+}
+
+async function openHooks(): Promise<void> {
+  try {
+    state.hooksView = await api<HooksView>('/api/hooks')
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+    return
+  }
+  state.modal = 'hooks'
+  renderModal()
+}
+
+async function openDoctor(): Promise<void> {
+  state.doctorView = undefined
+  state.modal = 'doctor'
+  renderModal()
+  try {
+    state.doctorView = await api<DoctorView>('/api/doctor')
+  } catch (error) {
+    state.modal = undefined
+    renderModal()
+    toast(error instanceof Error ? error.message : String(error), 'error')
+    return
+  }
+  if (state.modal === 'doctor') renderModal()
 }
 
 async function runAction(action: 'undo' | 'compact' | 'review' | 'model', value?: string): Promise<void> {
@@ -3847,7 +4029,7 @@ async function setEffort(effort: string): Promise<void> {
   }
 }
 
-async function togglePlan(): Promise<void> {
+async function togglePlan(on?: boolean): Promise<void> {
   const runId = currentRunId()
   if (!runId) return
   if (state.current?.state.kind === 'orchestrator') {
@@ -3855,7 +4037,7 @@ async function togglePlan(): Promise<void> {
     return
   }
   try {
-    const result = await post<{ result: string; planMode: boolean }>(`/api/sessions/${encodeURIComponent(runId)}/plan-mode`, { on: !state.planMode })
+    const result = await post<{ result: string; planMode: boolean }>(`/api/sessions/${encodeURIComponent(runId)}/plan-mode`, { on: on ?? !state.planMode })
     state.planMode = result.planMode
     toast(result.result, 'success')
     renderComposer()
@@ -4096,104 +4278,51 @@ async function loadDetails(): Promise<void> {
 
 function openPalette(): void {
   state.paletteQuery = ''
+  state.paletteFiles = []
   state.modal = 'palette'
   renderModal()
+}
+
+let paletteFilesTimer: number | undefined
+let paletteFilesSeq = 0
+
+/**
+ * CP-32: workspace files for the palette, fetched 150 ms after typing stops.
+ * A response for an older query is dropped, so results never flicker back.
+ */
+function schedulePaletteFiles(query: string): void {
+  if (paletteFilesTimer !== undefined) window.clearTimeout(paletteFilesTimer)
+  const q = query.trim().replace(/^\//, '')
+  if (q.length < 2) {
+    state.paletteFiles = []
+    return
+  }
+  const seq = ++paletteFilesSeq
+  paletteFilesTimer = window.setTimeout(() => {
+    void api<{ files: string[] }>(`/api/files/search?q=${encodeURIComponent(q)}`)
+      .then((data) => {
+        if (seq !== paletteFilesSeq || state.modal !== 'palette') return
+        state.paletteFiles = data.files
+        renderModal()
+      })
+      .catch(() => undefined)
+  }, 150)
+}
+
+/** CP-32: the palette's "Settings › …" rows open the dialog at that section. */
+async function openSettingsSection(section: string): Promise<void> {
+  await openSettings()
+  const block = document.querySelector<HTMLElement>(`[data-settings-section="${section}"]`)
+  if (!block) return
+  block.scrollIntoView({ block: 'start' })
+  block.classList.add('flash')
+  window.setTimeout(() => block.classList.remove('flash'), 1_200)
 }
 
 function runPalette(command: string): void {
   state.modal = undefined
   renderModal()
-  switch (command) {
-    case 'new':
-      void newSession()
-      break
-    case 'ralph':
-      openRalph()
-      break
-    case 'settings':
-      void openSettings()
-      break
-    case 'goal':
-      void openGoal()
-      break
-    case 'plan-mode':
-      void togglePlan()
-      break
-    case 'files':
-      void setRight('files')
-      break
-    case 'diff':
-      void setRight('diff')
-      break
-    case 'plan':
-      void setRight('plan')
-      break
-    case 'trace':
-      void setRight('trace')
-      break
-    case 'browser':
-      void setRight('browser')
-      break
-    case 'terminal':
-      void setRight('terminal')
-      break
-    case 'review':
-      void runAction('review')
-      break
-    case 'undo':
-      void runAction('undo')
-      break
-    case 'compact':
-      void runAction('compact')
-      break
-    case 'export': {
-      const runId = currentRunId()
-      if (runId) window.open(`/api/sessions/${encodeURIComponent(runId)}/export?format=md`, '_blank')
-      break
-    }
-    case 'theme':
-      setTheme(state.theme === 'dark' ? 'light' : 'dark')
-      break
-    case 'rename': {
-      const runId = currentRunId()
-      if (runId) openRename(runId)
-      break
-    }
-    case 'generate-title': {
-      const runId = currentRunId()
-      if (runId) void generateTitleFor(runId)
-      break
-    }
-    case 'fork': {
-      const runId = currentRunId()
-      if (runId) void forkSession(runId)
-      break
-    }
-    case 'outline':
-      state.modal = 'outline'
-      renderModal()
-      break
-    case 'outline':
-      state.modal = 'outline'
-      renderModal()
-      break
-    case 'feedback': {
-      const lastAnswer = [...state.entries].reverse().find((entry) => entry.kind === 'assistant')
-      if (lastAnswer) openFeedback(lastAnswer.id)
-      else toast(tr('feedbackNoAnswer'))
-      break
-    }
-    case 'shortcuts':
-      state.modal = 'shortcuts'
-      renderModal()
-      break
-    case 'help':
-      state.modal = 'help'
-      renderModal()
-      break
-    default:
-      break
-  }
+  void runCommand(command)
 }
 
 function openRalph(): void {
@@ -5207,6 +5336,11 @@ function onDocumentClick(event: MouseEvent): void {
     case 'attach-image':
       ;(document.getElementById('image-input') as HTMLInputElement | null)?.click()
       break
+    case 'insert-slash': {
+      const index = Number(el.dataset.index)
+      if (Number.isInteger(index)) insertSlash(index)
+      break
+    }
     case 'insert-mention': {
       const index = Number(el.dataset.index)
       if (Number.isInteger(index)) insertMention(index)
@@ -5287,6 +5421,16 @@ function onDocumentClick(event: MouseEvent): void {
         renderModal()
         void selectSession(el.dataset.runId)
       }
+      break
+    case 'palette-file':
+      if (el.dataset.path) {
+        state.modal = undefined
+        renderModal()
+        void openFile(el.dataset.path)
+      }
+      break
+    case 'palette-settings':
+      if (el.dataset.section) void openSettingsSection(el.dataset.section)
       break
     case 'start-ralph':
       void startRalph()
@@ -5440,11 +5584,13 @@ function onDocumentKeydown(event: KeyboardEvent): void {
     }
     if (event.key === 'Enter' || event.key === 'Tab') {
       event.preventDefault()
-      insertMention(state.mentionIndex)
+      if (state.slashItems.length > 0) insertSlash(state.mentionIndex, event.key === 'Tab')
+      else insertMention(state.mentionIndex)
       return
     }
     if (event.key === 'Escape') {
       event.preventDefault()
+      state.slashItems = []
       state.mentions = []
       state.mentionSessions = []
       renderMentionMenu()

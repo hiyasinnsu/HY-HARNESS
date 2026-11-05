@@ -8,3 +8,6 @@ dist/
 
 # Local build / packaging / integration run logs
 /*.log
+
+# Local preview launcher (points at a session scratchpad)
+/.claude/launch.json

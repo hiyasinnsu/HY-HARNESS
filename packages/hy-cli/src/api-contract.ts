@@ -37,6 +37,8 @@ export const API_ROUTES: readonly RouteContract[] = [
   // ----- general -----
   { method: 'GET', path: '/api/health', summary: 'Liveness probe.', response: 'HealthResponse' },
   { method: 'GET', path: '/api/metrics', summary: 'Process metrics: uptime, open sessions, RSS.', response: 'MetricsResponse' },
+  { method: 'GET', path: '/api/hooks', summary: 'The configured hooks, flattened (GUI /hooks).', response: 'HooksResponse' },
+  { method: 'GET', path: '/api/doctor', summary: 'The hy doctor report: installation, sandbox, roles, MCP (GUI /doctor).', response: 'DoctorReport' },
   { method: 'GET', path: '/api/bootstrap', summary: 'Config summary, sandbox status, plugins and features.', response: 'Bootstrap' },
   { method: 'GET', path: '/api/events', summary: 'Server-wide SSE stream (sessions, automation).', response: 'Sse' },
   { method: 'GET', path: '/api/models', summary: 'Model catalog plus the roles in use.', response: 'ModelsResponse' },

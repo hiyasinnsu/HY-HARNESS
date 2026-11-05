@@ -199,7 +199,7 @@ test('profiles overlay the user config; --full-auto implies workspace-write; pro
     assert.equal(plain.sandboxSource, 'default')
     assert.equal(plain.web, undefined)
     assert.deepEqual(Object.keys(plain.mcpServers), ['mine'], 'an untrusted project adds no MCP servers')
-    assert.equal(plain.hooks.turnEnd?.length, 0, 'an untrusted project adds no hooks')
+    assert.equal((plain.hooks.turnEnd ?? []).length, 0, 'an untrusted project adds no hooks')
 
     const deep = loadConfig({ cwd: ws, profile: 'deep' })
     assert.equal(deep.sandboxSource, 'config')
@@ -542,4 +542,37 @@ test('CP-37: config paths report every layer', () => {
   assert.equal(paths.stateDir, '/state')
   assert.equal(paths.worktreesDir, path.join('/state', 'worktrees'))
   assert.ok(paths.userConfig.endsWith('config.json'))
+})
+test('CP-19: every hook event survives loading, user hooks before trusted project hooks', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-hook-events-'))
+  const saved = process.env.HY_CONFIG_DIR
+  try {
+    const user = path.join(dir, 'user')
+    const ws = path.join(dir, 'ws')
+    fs.mkdirSync(user)
+    fs.mkdirSync(path.join(ws, '.hy-harness'), { recursive: true })
+    process.env.HY_CONFIG_DIR = user
+    fs.writeFileSync(
+      path.join(user, 'config.json'),
+      JSON.stringify({
+
+        hooks: {
+          sessionStart: [{ command: ['user-start'] }],
+          userPromptSubmit: [{ command: ['user-prompt'] }],
+          permissionRequest: [{ command: ['user-perm'] }],
+          stop: [{ command: ['user-stop'] }],
+        },
+      }),
+    )
+    fs.writeFileSync(path.join(ws, '.hy-harness', 'config.json'), JSON.stringify({ hooks: { sessionStart: [{ command: ['project-start'] }] } }))
+    const config = loadConfig({ cwd: ws, mock: true, projectTrusted: true })
+    assert.deepEqual(config.hooks.sessionStart?.map((h) => h.command[0]), ['user-start', 'project-start'])
+    assert.equal(config.hooks.userPromptSubmit?.length, 1)
+    assert.equal(config.hooks.permissionRequest?.length, 1)
+    assert.equal(config.hooks.stop?.length, 1)
+  } finally {
+    if (saved === undefined) delete process.env.HY_CONFIG_DIR
+    else process.env.HY_CONFIG_DIR = saved
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })

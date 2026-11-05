@@ -1448,3 +1448,33 @@ test('web GUI: opt-in telemetry posts spans without content', { skip: skipReason
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('CP-32: /api/hooks lists the configured hooks and /api/doctor returns the report', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  let ctx
+  try {
+    ctx = await runServer(dir, {}, {
+      hooks: { sessionStart: [{ command: ['node', '-e', '0'] }], preToolUse: [{ command: ['node', 'guard.mjs'], tools: ['shell'], timeoutMs: 3000 }] },
+    })
+    const hooks = await ctx.request('/api/hooks')
+    assert.equal(hooks.status, 200, hooks.text)
+    assert.deepEqual(hooks.json.hooks, [
+      { event: 'sessionStart', command: ['node', '-e', '0'] },
+      { event: 'preToolUse', command: ['node', 'guard.mjs'], tools: ['shell'], timeoutMs: 3000 },
+    ])
+
+    const doctor = await ctx.request('/api/doctor')
+    assert.equal(doctor.status, 200, doctor.text)
+    assert.equal(typeof doctor.json.ok, 'boolean')
+    assert.match(doctor.json.version, /^\d+\.\d+\.\d+/)
+    const names = doctor.json.checks.map((c) => c.name)
+    for (const name of ['workspace', 'exec-server', 'sandbox']) assert.ok(names.includes(name), `${name} in ${names.join(', ')}`)
+    for (const check of doctor.json.checks) assert.ok(['ok', 'warn', 'fail'].includes(check.status), JSON.stringify(check))
+
+    const unauthorized = await fetch(`${ctx.base}/api/doctor`)
+    assert.equal(unauthorized.status, 401)
+  } finally {
+    await ctx?.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
