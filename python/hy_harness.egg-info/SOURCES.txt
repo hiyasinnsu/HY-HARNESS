@@ -1,7 +1,0 @@
-README.md
-pyproject.toml
-hy_harness/__init__.py
-hy_harness.egg-info/PKG-INFO
-hy_harness.egg-info/SOURCES.txt
-hy_harness.egg-info/dependency_links.txt
-hy_harness.egg-info/top_level.txt

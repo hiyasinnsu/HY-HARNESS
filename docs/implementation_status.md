@@ -121,7 +121,7 @@ prefix_rule(pattern = [["jest", "vitest"]], sandbox = "low-integrity", match = [
 ### 2.4 ツールの登録表と `run_code` の SDK（Phase 5）
 
 - **登録表**（`packages/core/src/tool-registry.ts`）: ツールごとに 1 つの JSON Schema。これを、呼び出し時の引数の検査、システムプロンプトの関数シグネチャ、`run_code` の `declare namespace tools`（`jsonSchemaToTs`）の 3 つに使う。
-  - 直接呼べるツールは `read_file`、`apply_patch`、`shell`、`run_code` の 4 つ。`tools.search.{glob,grep}` と `tools.jobs.{status,output,wait,kill}` は `run_code` の中でだけ使え、モデルが直接呼ぶと拒否する。
+  - 直接呼べるツールは当初 `read_file`、`apply_patch`、`shell`、`run_code` の 4 つだった（Phase 5 時点）。現在は CP-10 / CP-14 で `search_glob` / `search_grep` などが直接ツールになり、初期プロンプトの一覧は §「不変条件」と `tests/regression/golden.test.mjs` の K9 が正。`tools.jobs.{status,output,wait,kill}` と `tools.rationale.*` は今も `run_code` の中でだけ使え、モデルが直接呼ぶと拒否する。
   - 引数の検査は、型、必須、enum、最小値を守らせる。知らないプロパティは無視する（小規模モデルが余計なものを付けるため）。`apply_patch` の `path` は `file` の別名として受け付ける（プロンプトのトークンを増やさないため、スキーマには載せない）。
 - **検索**: `glob`（`*`、`**`、`?`、`{a,b}`）と `grep`（JavaScript の正規表現、`glob` で絞り込み）。`.git`、`node_modules`、`.hy-harness` には入らず、リンクはたどらない。`grep` は 1 MB 超とバイナリを飛ばす。
 - **トークン量（実測）**: `qwen2.5:3b` のトークナイザーで、直接呼べる 4 ツールが約 320、SDK を含めて約 1,140 トークン（設計の上限 1,200。Phase 6 以降のツール追加後。SDK は同じ型を `type Job` / `type NoteCount` として 1 回だけ宣言して参照する）。Ollama が使えるときに `tool-overhead.test.mjs` が毎回測る。

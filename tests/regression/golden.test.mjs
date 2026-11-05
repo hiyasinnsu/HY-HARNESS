@@ -114,13 +114,24 @@ test('K6: the queue view never carries image bytes and the request parser reject
   assert.equal(queueView.parseResolveRequest({ runId: 'run', id: 'a', decision: 'maybe' }).ok, false)
 })
 
-test('K1: the four sandbox modes parse strictly and the default stays unconfined', () => {
+test('K1: the four sandbox modes parse strictly and the default is workspace-write', () => {
   for (const mode of ['unconfined', 'workspace-write', 'read-only', 'low-integrity']) {
     assert.equal(core.parseSandboxMode(mode), mode)
   }
   assert.throws(() => core.parseSandboxMode('yolo'))
-  const config = core.loadConfig({ mock: true })
-  assert.equal(config.sandbox, 'unconfined', 'the 2026-11-02 decision: the sandbox is opt-in')
+  // isolate.mjs sets HY_SANDBOX=unconfined for the suite; the default is only
+  // visible without it. CP-01 (2026-11-05) made workspace-write the default.
+  const saved = process.env.HY_SANDBOX
+  delete process.env.HY_SANDBOX
+  try {
+    const config = core.loadConfig({ mock: true })
+    assert.equal(config.sandbox, 'workspace-write', 'CP-01: the sandbox is on by default')
+    assert.equal(config.sandboxSource, 'default')
+  } finally {
+    if (saved === undefined) delete process.env.HY_SANDBOX
+    else process.env.HY_SANDBOX = saved
+  }
+  assert.equal(core.loadConfig({ mock: true, sandbox: 'unconfined' }).sandbox, 'unconfined', 'an explicit opt-out still wins')
 })
 
 // K9 was redefined by CP-10 (docs/codex-adoption-plan.md): the budget applies to

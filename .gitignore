@@ -6,6 +6,14 @@ dist/
 /.hy-harness/state/
 /.refs/
 
+# Python SDK build output
+__pycache__/
+*.pyc
+*.egg-info/
+
+# One-off local scripts
+.tmp-*
+
 # Local build / packaging / integration run logs
 /*.log
 
