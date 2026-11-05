@@ -150,7 +150,8 @@ test('the release feed is checked on demand and a bad signature is refused', { s
     assert.equal(body.configured, true)
     assert.equal(body.release.version, '0.5.0')
     assert.equal(body.release.notes, 'the update path')
-    assert.equal(body.currentVersion, '0.4.0')
+    const rootPkg = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json'), 'utf8').replace(/^﻿/, ''))
+    assert.equal(body.currentVersion, rootPkg.version)
 
     // A tampered entry no longer matches the signature: refused, not installed.
     const refused = await call(`/api/update?${new URLSearchParams({ feed: tamperedFile })}`)

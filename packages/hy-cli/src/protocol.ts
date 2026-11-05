@@ -5,6 +5,7 @@
 // surfaces behave the same. Responses are returned as strings so a transport
 // can write them without knowing the protocol.
 
+import { HARNESS_VERSION } from '../../core/dist/index.js'
 import { API_VERSION } from './api-schema.js'
 
 export const PROTOCOL_VERSION = 'hy-protocol/1'
@@ -159,7 +160,7 @@ export function initializeHandler(capabilities: Record<string, unknown> = { thre
       return {
         protocolVersion: PROTOCOL_VERSION,
         requestedVersion: requested,
-        serverInfo: { name: 'hy-harness', version: '0.4.0', apiVersion: API_VERSION },
+        serverInfo: { name: 'hy-harness', version: HARNESS_VERSION, apiVersion: API_VERSION },
         capabilities,
       }
     },
