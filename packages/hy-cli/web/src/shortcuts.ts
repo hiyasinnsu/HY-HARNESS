@@ -22,6 +22,7 @@ export const SHORTCUT_ACTIONS: readonly ShortcutAction[] = [
   { id: 'toggleTheme', labelKey: 'shortcutTheme', defaultKeys: 'Ctrl+Shift+L' },
   { id: 'focusComposer', labelKey: 'shortcutFocusComposer', defaultKeys: 'Ctrl+L' },
   { id: 'stopTurn', labelKey: 'shortcutStop', defaultKeys: 'Ctrl+.' },
+  { id: 'find', labelKey: 'shortcutFind', defaultKeys: 'Ctrl+F' },
 ]
 
 export type ShortcutMap = Record<string, string>

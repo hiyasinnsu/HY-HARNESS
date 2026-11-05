@@ -17,6 +17,8 @@
     "check:api": "node scripts/gen-api-types.mjs --check",
     "gen:api-schema": "node scripts/gen-api-schema.mjs",
     "check:api-schema": "node scripts/gen-api-schema.mjs --check",
+    "gen:protocol-methods": "node scripts/gen-protocol-methods.mjs",
+    "check:protocol-methods": "node scripts/gen-protocol-methods.mjs --check",
     "verify": "node scripts/verify-all.mjs",
     "verify:list": "node scripts/verify-all.mjs --list",
     "check:config-schema": "node scripts/gen-config-schema.mjs --check",

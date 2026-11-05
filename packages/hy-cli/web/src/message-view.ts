@@ -17,6 +17,8 @@ export interface MessageContext {
   mask: boolean
   /** Fixed clock for tests; defaults to the real one. */
   now?: number
+  /** CP-33: show the message source instead of rendered Markdown. */
+  raw?: boolean
 }
 
 export interface UserMessageEntry {
@@ -38,6 +40,11 @@ function displayText(text: string, context: MessageContext): string {
   return context.mask ? maskSecrets(text).text : text
 }
 
+function messageBody(text: string, context: MessageContext): string {
+  const shown = displayText(text, context)
+  return context.raw ? `<pre class="raw-message">${escapeHtml(shown)}</pre>` : renderMarkdown(shown)
+}
+
 /** A user turn: optional steering badge, image count, the text and its time. */
 export function renderUserMessage(entry: UserMessageEntry, context: MessageContext): string {
   const steering = entry.steering
@@ -46,10 +53,10 @@ export function renderUserMessage(entry: UserMessageEntry, context: MessageConte
   const images = entry.images && entry.images > 0
     ? `<div class="message-attachments">${icon('paperclip', 14)} ${entry.images} image${entry.images === 1 ? '' : 's'}</div>`
     : ''
-  return `<article class="message user${entry.steering ? ' steering' : ''}" data-entry-id="${escapeHtml(entry.id)}">${steering}<div class="message-body">${images}${renderMarkdown(displayText(entry.text, context))}${messageTimeHtml(entry.ts, context.locale, context.now)}</div></article>`
+  return `<article class="message user${entry.steering ? ' steering' : ''}" data-entry-id="${escapeHtml(entry.id)}">${steering}<div class="message-body">${images}${messageBody(entry.text, context)}${messageTimeHtml(entry.ts, context.locale, context.now)}</div></article>`
 }
 
 /** An assistant turn: the answer, its time and the copy/feedback actions. */
 export function renderAssistantMessage(entry: AssistantMessageEntry, context: MessageContext): string {
-  return `<article class="message assistant" data-entry-id="${escapeHtml(entry.id)}"><div class="message-body">${renderMarkdown(displayText(entry.text, context))}${messageTimeHtml(entry.ts, context.locale, context.now)}</div><div class="message-actions"><button class="link-btn" data-action="copy-entry" data-entry-id="${escapeHtml(entry.id)}">${icon('copy', 12)} ${escapeHtml(translate(context.locale, 'copyAnswer'))}</button><button class="link-btn" data-action="feedback-up" data-entry-id="${escapeHtml(entry.id)}" title="${escapeHtml(translate(context.locale, 'feedbackUp'))}">${icon('check', 12)}</button><button class="link-btn" data-action="feedback-down" data-entry-id="${escapeHtml(entry.id)}" title="${escapeHtml(translate(context.locale, 'feedbackDown'))}">${icon('x', 12)}</button></div></article>`
+  return `<article class="message assistant" data-entry-id="${escapeHtml(entry.id)}"><div class="message-body">${messageBody(entry.text, context)}${messageTimeHtml(entry.ts, context.locale, context.now)}</div><div class="message-actions"><button class="link-btn" data-action="copy-entry" data-entry-id="${escapeHtml(entry.id)}">${icon('copy', 12)} ${escapeHtml(translate(context.locale, 'copyAnswer'))}</button><button class="link-btn" data-action="feedback-up" data-entry-id="${escapeHtml(entry.id)}" title="${escapeHtml(translate(context.locale, 'feedbackUp'))}">${icon('check', 12)}</button><button class="link-btn" data-action="feedback-down" data-entry-id="${escapeHtml(entry.id)}" title="${escapeHtml(translate(context.locale, 'feedbackDown'))}">${icon('x', 12)}</button></div></article>`
 }

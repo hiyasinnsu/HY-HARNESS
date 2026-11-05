@@ -4,6 +4,11 @@ import { formatRelative } from './time-format.js'
 import { renderAssistantMessage, renderUserMessage, type MessageContext } from './message-view.js'
 import { SHORTCUT_ACTIONS, matchesAccelerator, normalizeAccelerator, resolveShortcuts, shortcutConflicts, type ShortcutMap } from './shortcuts.js'
 import { icon } from './icons.js'
+import { commentKey, commentsToPrompt, parseUnifiedDiff, renderDiffFiles, type DiffComment } from './diff-view.js'
+import { buildIndex, searchIndex, stepHit, type SearchHit } from './transcript-search.js'
+import { pickerModels, renderModelRows, type CatalogModel } from './model-picker.js'
+import { STATUS_ITEMS, renderStatusline, type StatusItem } from './statusline.js'
+import { INITIAL_VIM, vimKey, type VimState } from './vim.js'
 import { COMMANDS, filterCommands, helpRows, parseSlash, slashCompletions, type CommandSpec, type DetailsSection } from './slash-commands.js'
 
 /** CP-32: `GET /api/hooks`. */
@@ -41,6 +46,7 @@ import { FitAddon } from '../vendor/addon-fit.mjs'
 import type {
   AgentEvent,
   AgentView,
+  ApprovalDetails,
   ApprovalRequest,
   AutomationData,
   AutomationRun,
@@ -158,13 +164,37 @@ interface State {
   automationForm?: AutomationForm | undefined
   automationRun?: AutomationRun | undefined
   automationTimer?: number | undefined
-  modal?: 'settings' | 'help' | 'goal' | 'ralph' | 'model' | 'workspace' | 'palette' | 'automation' | 'roots' | 'rename' | 'sandbox' | 'onboarding' | 'outline' | 'feedback' | 'shortcuts' | 'hooks' | 'doctor' | undefined
+  modal?: 'settings' | 'help' | 'goal' | 'ralph' | 'model' | 'workspace' | 'palette' | 'automation' | 'roots' | 'rename' | 'sandbox' | 'onboarding' | 'outline' | 'feedback' | 'shortcuts' | 'hooks' | 'doctor' | 'rewind' | 'worktree' | 'import' | undefined
   /** Chat being renamed; only set while the rename dialog is open. */
   renameRunId?: string | undefined
   /** Current text of the rename input, so a failed save keeps what was typed. */
   renameDraft: string
   workspaces: string[]
   paletteQuery: string
+  /** CP-33: diff viewer state (folded files, line comments, the open comment box). */
+  diffCollapsed: Set<string>
+  diffComments: Map<string, DiffComment>
+  diffEditing?: { path: string; side: 'old' | 'new'; line: number } | undefined
+  /** CP-33: transcript search (F3 / Ctrl+F). */
+  findOpen: boolean
+  findQuery: string
+  findHits: SearchHit[]
+  findPos: number
+  /** CP-33: show message source instead of rendered Markdown. */
+  rawTranscript: boolean
+  /** CP-35: the model catalog for the picker, loaded when it opens. */
+  modelCatalog: CatalogModel[]
+  modelQuery: string
+  /** CP-31: the import wizard's plan and the kinds the user keeps ticked. */
+  importView?: { source: 'claude' | 'dsh'; items: Array<{ kind: string; target: string; action: string; summary: string; diff: string }> } | undefined
+  importKinds: Set<string>
+  /** CP-36: preferences from ui-state.json (via /api/ui-prefs). */
+  prefs: { statusline: StatusItem[]; codeTheme: 'auto' | 'github' | 'monokai' | 'plain'; vimMode: boolean; shortcuts: Record<string, string> }
+  vim: VimState
+  /** CP-35: `/api/worktrees`. */
+  worktrees?: { repo: boolean; dir: string; worktrees: Array<{ path: string; branch?: string; head?: string }> } | undefined
+  /** CP-33: the turn picked in the rewind dialog, awaiting confirmation. */
+  rewindTurn?: number | undefined
   /** CP-32: workspace files matching the palette query (fetched as you type). */
   paletteFiles: string[]
   /** CP-32: `/hooks` and `/doctor` modal contents. */
@@ -276,6 +306,18 @@ const state: State = {
   workspaces: [],
   automationTab: 'schedules',
   paletteQuery: '',
+  diffCollapsed: new Set<string>(),
+  diffComments: new Map<string, DiffComment>(),
+  findOpen: false,
+  findQuery: '',
+  findHits: [],
+  findPos: -1,
+  rawTranscript: false,
+  modelCatalog: [],
+  modelQuery: '',
+  importKinds: new Set<string>(),
+  prefs: { statusline: ['tokens', 'cache', 'last'], codeTheme: 'auto', vimMode: false, shortcuts: {} },
+  vim: INITIAL_VIM,
   paletteFiles: [],
   renameDraft: '',
   browserUrl: '',
@@ -335,7 +377,7 @@ function loadStoredShortcuts(): ShortcutMap {
 
 /** WP-64: the display switches `message-view.ts` needs. */
 function messageContext(): MessageContext {
-  return { locale: state.locale, mask: state.maskSecrets }
+  return { locale: state.locale, mask: state.maskSecrets, raw: state.rawTranscript }
 }
 
 let toastId = 0
@@ -450,6 +492,56 @@ function formatDuration(ms: number | undefined): string {
   if (ms < 1_000) return `${Math.round(ms)} ms`
   if (ms < 60_000) return `${(ms / 1_000).toFixed(1)} s`
   return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1_000)}s`
+}
+
+/** CP-36: the composer statusline with the items picked in Settings. */
+function statuslineHtml(current: SessionState | undefined): string {
+  const role = state.boot?.config.worker
+  const html = renderStatusline(state.prefs.statusline, {
+    ...(current?.model ? { provider: current.model.provider, model: current.model.model } : role ? { provider: role.provider, model: role.model } : {}),
+    ...(current?.sandboxMode ? { sandbox: current.sandboxMode } : state.boot?.config.sandbox ? { sandbox: state.boot.config.sandbox } : {}),
+    inputTokens: current?.usage.inputTokens ?? 0,
+    outputTokens: current?.usage.outputTokens ?? 0,
+    cacheHitTokens: current?.usage.cacheHitTokens ?? 0,
+    ...(current?.usage.cacheMissTokens !== undefined ? { cacheMissTokens: current.usage.cacheMissTokens } : {}),
+    ...(current?.usage.lastInputTokens !== undefined ? { lastInputTokens: current.usage.lastInputTokens, lastOutputTokens: current.usage.lastOutputTokens ?? 0 } : {}),
+    ...(role ? { contextWindowTokens: role.contextWindowTokens } : {}),
+    ...(current ? { turns: current.turns } : {}),
+  })
+  const vim = state.prefs.vimMode ? `<span class="status-item vim-mode vim-${state.vim.mode}">${state.vim.mode === 'normal' ? 'NORMAL' : 'INSERT'}</span>` : ''
+  return vim ? (html ? `${vim}<span class="status-sep">·</span>${html}` : vim) : html
+}
+
+/** CP-36: loads the saved preferences and applies them. */
+async function loadPrefs(): Promise<void> {
+  try {
+    const data = await api<{ prefs: typeof state.prefs }>('/api/ui-prefs')
+    state.prefs = data.prefs
+    if (Object.keys(data.prefs.shortcuts).length > 0) {
+      state.shortcuts = resolveShortcuts(data.prefs.shortcuts)
+      localStorage.setItem('hy-shortcuts', JSON.stringify(data.prefs.shortcuts))
+    }
+  } catch {
+    // Older server or offline: keep the defaults.
+  }
+  applyPrefs()
+}
+
+function applyPrefs(): void {
+  document.documentElement.dataset.codeTheme = state.prefs.codeTheme
+  if (!state.prefs.vimMode) state.vim = INITIAL_VIM
+  renderComposer()
+}
+
+async function savePrefs(patch: Partial<typeof state.prefs>): Promise<void> {
+  state.prefs = { ...state.prefs, ...patch }
+  applyPrefs()
+  try {
+    const data = await put<{ prefs: typeof state.prefs }>('/api/ui-prefs', patch)
+    state.prefs = data.prefs
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+  }
 }
 
 function cacheInfo(usage: SessionState['usage'] | undefined): { hit: number; total: number; rate: string } {
@@ -637,26 +729,40 @@ function renderPlanCard(entry: Extract<ChatEntry, { kind: 'plan' }>): string {
 
 function renderApproval(entry: Extract<ChatEntry, { kind: 'approval' }>): string {
   if (entry.decision) {
-    return `<article class="approval-card decided ${entry.decision}"><div class="approval-head">${entry.decision === 'approved' ? icon('check', 16) : icon('x', 16)}<strong>${entry.decision === 'approved' ? tr('approved') : tr('denied')}</strong><span class="muted">${escapeHtml(entry.request.command)}</span></div></article>`
+    const scope = entry.scope && entry.scope !== 'once' ? ` <span class="tag subtle">${escapeHtml(tr(entry.scope === 'always' ? 'approveAlways' : 'approveSession'))}</span>` : ''
+    const reason = entry.reason ? `<div class="approval-reason">${escapeHtml(entry.reason)}</div>` : ''
+    return `<article class="approval-card decided ${entry.decision}"><div class="approval-head">${entry.decision === 'approved' ? icon('check', 16) : icon('x', 16)}<strong>${entry.decision === 'approved' ? tr('approved') : tr('denied')}</strong>${scope}<span class="muted">${escapeHtml(entry.request.command)}</span></div>${reason}</article>`
   }
   const sandbox = entry.request.sandbox ? `<span class="tag">${escapeHtml(entry.request.sandbox)}</span>` : ''
   const rule = entry.request.matchedRule ? `<span class="tag subtle">${escapeHtml(entry.request.matchedRule)}</span>` : ''
   // A worker's request is usually decided by the orchestrator, but the user can
   // always decide it here, and must for unconfined / low-integrity ones.
   const userOnly = entry.request.sandbox === 'unconfined' || entry.request.sandbox === 'low-integrity'
-  const workerNote =
-    state.current?.state.kind === 'worker'
-      ? `<div class="approval-reason">${tr(userOnly ? 'workerApprovalUserOnly' : 'workerApprovalViaOrchestrator')}</div>`
-      : ''
-  return `<article class="approval-card" data-approval-id="${entry.requestId}">
+  const worker = state.current?.state.kind === 'worker'
+  const workerNote = worker ? `<div class="approval-reason">${tr(userOnly ? 'workerApprovalUserOnly' : 'workerApprovalViaOrchestrator')}</div>` : ''
+  // CP-34: everything the decision depends on, on one card.
+  const d = entry.details
+  const facts = d
+    ? `<dl class="approval-facts">
+      <dt>${tr('approvalCwd')}</dt><dd><code>${escapeHtml(d.cwd)}</code></dd>
+      <dt>${tr('approvalEffect')}</dt><dd class="${userOnly ? 'risk' : ''}">${escapeHtml(d.effect)}</dd>
+      ${d.paths.length ? `<dt>${tr('approvalPaths')}</dt><dd>${d.paths.map((p) => `<code>${escapeHtml(p)}</code>`).join(' ')}</dd>` : ''}
+      ${d.network.length ? `<dt>${tr('approvalNetwork')}</dt><dd>${d.network.map((h) => `<code>${escapeHtml(h)}</code>`).join(' ')}</dd>` : ''}
+    </dl>`
+    : ''
+  const persist = !worker && (d?.persistable ?? !userOnly)
+  return `<article class="approval-card" data-approval-id="${entry.requestId}" tabindex="-1">
     <div class="approval-head">${icon('lock', 16)}<strong>${tr('approvalNeeded')}</strong>${sandbox}${rule}</div>
     <pre class="approval-command">${escapeHtml(entry.request.command)}</pre>
     ${entry.request.justification ? `<div class="approval-reason">${escapeHtml(entry.request.justification)}</div>` : ''}
+    ${facts}
     ${workerNote}
-    <input class="approval-input" id="approval-reason-${entry.requestId}" placeholder="${tr('optionalReason')}" autocomplete="off">
+    <input class="approval-input" id="approval-reason-${entry.requestId}" data-approval-reason="${entry.requestId}" placeholder="${tr('denyReasonPlaceholder')}" autocomplete="off">
     <div class="approval-actions">
-      <button class="btn ghost" data-action="approval-deny" data-request-id="${entry.requestId}">${icon('x', 14)} ${tr('deny')}</button>
-      <button class="btn primary" data-action="approval-approve" data-request-id="${entry.requestId}">${icon('check', 14)} ${tr('approve')}</button>
+      <button class="btn ghost" data-action="approval-deny" data-request-id="${entry.requestId}" title="N / Alt+N">${icon('x', 14)} ${tr('deny')} <kbd>N</kbd></button>
+      ${!worker ? `<button class="btn ghost" data-action="approval-approve" data-scope="session" data-request-id="${entry.requestId}" title="S / Alt+S">${tr('approveSession')} <kbd>S</kbd></button>` : ''}
+      ${persist ? `<button class="btn ghost" data-action="approval-approve" data-scope="always" data-request-id="${entry.requestId}" title="A / Alt+A">${tr('approveAlways')} <kbd>A</kbd></button>` : ''}
+      <button class="btn primary" data-action="approval-approve" data-scope="once" data-request-id="${entry.requestId}" title="Y / Alt+Y">${icon('check', 14)} ${tr('approveOnce')} <kbd>Y</kbd></button>
     </div>
   </article>`
 }
@@ -873,13 +979,28 @@ function renderTranscript(): void {
 function renderTranscriptNow(): void {
   const el = document.getElementById('transcript')
   if (!el) return
+  window.queueMicrotask(() => applyFindHighlight())
   const body = state.entries.length === 0 && !state.busy ? renderEmptyState() : state.entries.map(renderEntry).join('')
   const running = state.busy
     ? `<div class="running-row"><span class="tool-spinner"></span><span>${state.connection === 'online' ? tr('working') : `${tr('reconnecting')}…`}</span></div>`
     : ''
+  // CP-34: a focused (or newly arrived) approval card keeps the keyboard
+  // across the re-render that replaces its element.
+  const focusedCard = (document.activeElement as HTMLElement | null)?.closest?.<HTMLElement>('.approval-card[data-approval-id]')?.dataset.approvalId
+  const focusCard = focusedCard ?? approvalToFocus
   el.innerHTML = `<div class="transcript-inner">${body}${running}</div>`
   restoreTranscriptAnchor(el)
+  if (focusCard) {
+    const card = el.querySelector<HTMLElement>(`.approval-card[data-approval-id="${CSS.escape(focusCard)}"]`)
+    const active = document.activeElement
+    const typing = (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) && active.value !== ''
+    if (card && !typing) card.focus({ preventScroll: false })
+    if (card || !state.entries.some((e) => e.kind === 'approval' && e.requestId === focusCard && !e.decision)) approvalToFocus = undefined
+  }
 }
+
+/** CP-34: the approval card to focus after the next transcript render. */
+let approvalToFocus: string | undefined
 
 function workerStatusText(status: WorkerStatus | undefined, blocker?: string | null): string {
   switch (status) {
@@ -1104,7 +1225,7 @@ function renderComposer(force = false): void {
         <select id="effort-select" class="effort-select" title="${tr('effort')}">${effortValues.map((e) => `<option value="${e}" ${(current?.effort ?? '') === e ? 'selected' : ''}>${e ? tr(`effort_${e}`) : tr('effortDefault')}</option>`).join('')}</select>
         <button type="button" class="chip" data-action="sandbox-menu" title="${tr('sandboxTitle')}">${icon('shield', 16)} ${escapeHtml(sandboxModeLabel(current?.sandboxMode ?? config?.sandbox ?? 'unconfined'))}</button>
         <span class="composer-spacer"></span>
-        <span class="context-meter" title="Actual provider usage. This process: ${formatTokens(current?.usage.inputTokens ?? 0)} in / ${formatTokens(current?.usage.outputTokens ?? 0)} out, cache ${formatTokens(cache.hit)} (${cache.rate}%). Last turn: ${formatTokens(current?.usage.lastInputTokens ?? 0)} in / ${formatTokens(current?.usage.lastOutputTokens ?? 0)} out.">in ${formatTokens(current?.usage.inputTokens ?? 0)} / out ${formatTokens(current?.usage.outputTokens ?? 0)} · cache ${formatTokens(cache.hit)} (${cache.rate}%)${current?.usage.lastInputTokens !== undefined ? ` · last ${formatTokens(current.usage.lastInputTokens)}/${formatTokens(current.usage.lastOutputTokens ?? 0)}` : ''}</span>
+        <span class="context-meter" title="Actual provider usage. This process: ${formatTokens(current?.usage.inputTokens ?? 0)} in / ${formatTokens(current?.usage.outputTokens ?? 0)} out, cache ${formatTokens(cache.hit)} (${cache.rate}%). Last turn: ${formatTokens(current?.usage.lastInputTokens ?? 0)} in / ${formatTokens(current?.usage.lastOutputTokens ?? 0)} out.">${statuslineHtml(current)}</span>
         <button type="button" class="icon-btn" data-action="toggle-right" title="Files and diff">${icon('panel', 16)}</button>
         ${state.busy ? `<button type="button" class="chip steer-mode" data-action="toggle-steer-mode" title="${state.steerMode === 'queue' ? tr('steerQueueTitle') : tr('steerTitle')}">${icon('bolt', 14)} ${escapeHtml(steerToggleLabel(state.steerMode, state.locale))}</button>` : ''}
         <button type="button" class="tq-badge" id="tq-badge" data-action="toggle-turn-queue" title="${tr('turnQueueToggle')}" hidden></button>
@@ -1361,6 +1482,7 @@ function renderShell(): void {
           <button class="icon-btn" data-action="open-settings" title="${tr('settings')}">${icon('settings', 16)}</button>
         </div>
       </header>
+      <div class="find-host" id="find-host"></div>
       <div class="transcript" id="transcript"></div>
       <div class="composer-wrap" id="composer-wrap"></div>
     </main>
@@ -1484,14 +1606,170 @@ function renderFilesPanel(): string {
 }
 
 function renderDiffPanel(): string {
-  // WP-23: a compact list of the files the diff touches, above the patch itself.
-  const changed = [...state.diff.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((m) => m[1]!.trim()).filter(Boolean)
-  const list = changed.length
-    ? `<div class="diff-files">${[...new Set(changed)]
-        .map((file) => `<div class="diff-file-row"><span class="diff-file-icon">${icon('file', 13)}</span><code>${escapeHtml(file)}</code><button class="link-btn" data-action="open-file" data-path="${escapeHtml(file)}">${tr('openInEditor')}</button></div>`)
-        .join('')}</div>`
-    : ''
-  return `<div class="files-toolbar"><button class="icon-btn" data-action="refresh-diff" title="Refresh">${icon('refresh', 15)}</button><span class="muted small">changes since the run started</span></div>${state.diffError ? `<div class="notice warn">${escapeHtml(state.diffError)}</div>` : `${list}${renderDiff(state.diff)}`}`
+  // CP-33: files fold, lines carry numbers, and a click on a line number opens
+  // a comment box; the comments go to the composer as one review message.
+  const files = parseUnifiedDiff(state.diff)
+  const comments = state.diffComments.size
+  const toolbar = `<div class="files-toolbar"><button class="icon-btn" data-action="refresh-diff" title="Refresh">${icon('refresh', 15)}</button><span class="muted small">${tr('diffSince')}</span>${
+    files.length > 1
+      ? `<button class="link-btn" data-action="diff-fold-all">${state.diffCollapsed.size === files.length ? tr('diffUnfoldAll') : tr('diffFoldAll')}</button>`
+      : ''
+  }${comments > 0 ? `<button class="btn primary small" data-action="diff-send-comments">${icon('send', 13)} ${tr('diffSendComments')} (${comments})</button>` : ''}</div>`
+  if (state.diffError) return `${toolbar}<div class="notice warn">${escapeHtml(state.diffError)}</div>`
+  if (files.length === 0) return `${toolbar}${renderDiff(state.diff)}`
+  const view = renderDiffFiles(files, {
+    collapsed: state.diffCollapsed,
+    comments: state.diffComments,
+    editing: state.diffEditing,
+    labels: {
+      added: tr('diffAdded'),
+      deleted: tr('diffDeleted'),
+      renamed: tr('diffRenamed'),
+      binary: tr('diffBinary'),
+      comment: tr('diffComment'),
+      save: tr('save'),
+      cancel: tr('cancel'),
+    },
+  })
+  return `${toolbar}<div class="diff-view">${view}</div>`
+}
+
+function rerenderDiff(): void {
+  if (state.right === 'diff') renderRightPanel()
+}
+
+function saveDiffComment(): void {
+  const editing = state.diffEditing
+  if (!editing) return
+  const text = (document.getElementById('diff-comment-input') as HTMLTextAreaElement | null)?.value.trim() ?? ''
+  const key = commentKey(editing)
+  if (text) state.diffComments.set(key, { ...editing, text })
+  else state.diffComments.delete(key)
+  state.diffEditing = undefined
+  rerenderDiff()
+}
+
+function sendDiffComments(): void {
+  const prompt = commentsToPrompt(state.diffComments.values())
+  if (!prompt) return
+  const input = document.getElementById('composer-input') as HTMLTextAreaElement | null
+  if (!input) return
+  input.value = input.value.trim() ? `${input.value.trim()}\n\n${prompt}` : prompt
+  saveComposerDraft(input.value)
+  input.dispatchEvent(new Event('input'))
+  input.focus()
+  state.diffComments.clear()
+  rerenderDiff()
+}
+
+/** CP-33: the find bar over the transcript. */
+function renderFindBar(): void {
+  const host = document.getElementById('find-host')
+  if (!host) return
+  if (!state.findOpen) {
+    host.innerHTML = ''
+    return
+  }
+  const total = state.findHits.length
+  const counter = state.findQuery.trim() ? (total ? `${state.findPos + 1} / ${total}` : tr('findNoMatches')) : ''
+  const existing = document.getElementById('find-input') as HTMLInputElement | null
+  if (existing) {
+    const counterEl = document.getElementById('find-count')
+    if (counterEl) counterEl.textContent = counter
+    return
+  }
+  host.innerHTML = `<div class="find-bar" role="search">${icon('search', 14)}<input id="find-input" value="${escapeHtml(state.findQuery)}" placeholder="${tr('findPlaceholder')}" autocomplete="off"><span class="find-count" id="find-count">${escapeHtml(counter)}</span><button type="button" class="icon-btn" data-action="find-prev" title="Shift+Enter">↑</button><button type="button" class="icon-btn" data-action="find-next" title="Enter / F3">↓</button><button type="button" class="icon-btn" data-action="find-close" title="Esc">${icon('close', 14)}</button></div>`
+  const input = document.getElementById('find-input') as HTMLInputElement | null
+  input?.addEventListener('input', () => {
+    state.findQuery = input.value
+    runFind()
+  })
+}
+
+function openFind(query?: string): void {
+  state.findOpen = true
+  if (query !== undefined) state.findQuery = query
+  renderFindBar()
+  const input = document.getElementById('find-input') as HTMLInputElement | null
+  if (input) {
+    if (query !== undefined) input.value = query
+    input.focus()
+    input.select()
+  }
+  runFind()
+}
+
+function closeFind(): void {
+  state.findOpen = false
+  state.findHits = []
+  state.findPos = -1
+  renderFindBar()
+  applyFindHighlight()
+}
+
+function runFind(): void {
+  state.findHits = searchIndex(buildIndex(state.entries as never), state.findQuery)
+  state.findPos = state.findHits.length > 0 ? 0 : -1
+  renderFindBar()
+  applyFindHighlight(true)
+}
+
+function stepFind(backwards: boolean): void {
+  state.findPos = stepHit(state.findPos, state.findHits.length, backwards)
+  renderFindBar()
+  applyFindHighlight(true)
+}
+
+/** Marks the hits in the rendered transcript; `scroll` brings the current one into view. */
+function applyFindHighlight(scroll = false): void {
+  for (const el of document.querySelectorAll('.search-hit, .search-current')) el.classList.remove('search-hit', 'search-current')
+  if (!state.findOpen) return
+  state.findHits.forEach((hit, i) => {
+    const el = document.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(hit.id)}"]`)
+    if (!el) return
+    el.classList.add('search-hit')
+    if (i === state.findPos) {
+      el.classList.add('search-current')
+      if (scroll) el.scrollIntoView({ block: 'center' })
+    }
+  })
+}
+
+/** CP-33: Esc Esc / `/rewind [turn]`. */
+function openRewind(turn?: number): void {
+  state.rewindTurn = turn
+  state.modal = 'rewind'
+  renderModal()
+}
+
+async function confirmRewind(): Promise<void> {
+  const runId = currentRunId()
+  const turn = state.rewindTurn
+  if (!runId || turn === undefined) return
+  const userEntry = state.entries.find((e): e is Extract<ChatEntry, { kind: 'user' }> => e.kind === 'user' && e.turn === turn)
+  try {
+    const result = await post<{ result: string }>(`/api/sessions/${encodeURIComponent(runId)}/undo`, { toTurn: turn })
+    state.modal = undefined
+    state.rewindTurn = undefined
+    renderModal()
+    toast(result.result.split('\n').at(-1) ?? result.result, 'success')
+    // Like Codex: the rewound message comes back into the composer to edit.
+    const input = document.getElementById('composer-input') as HTMLTextAreaElement | null
+    if (input && userEntry) {
+      input.value = userEntry.text
+      saveComposerDraft(input.value)
+      input.dispatchEvent(new Event('input'))
+      input.focus()
+    }
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+function toggleRaw(): void {
+  state.rawTranscript = !state.rawTranscript
+  renderTranscript()
+  toast(state.rawTranscript ? tr('rawOn') : tr('rawOff'))
 }
 
 function renderBrowserPanel(): string {
@@ -1905,6 +2183,9 @@ function runShortcut(actionId: string): void {
       break
     case 'stopTurn':
       void cancel()
+      break
+    case 'find':
+      openFind()
       break
     default:
       break
@@ -2742,6 +3023,88 @@ function renderModal(): void {
     }
     return
   }
+  if (state.modal === 'rewind') {
+    const turns = state.entries.flatMap((e) => (e.kind === 'user' && e.turn !== undefined ? [{ id: e.id, text: e.text, ts: e.ts, turn: e.turn }] : []))
+    const picked = state.rewindTurn
+    const body =
+      picked !== undefined
+        ? `<p>${escapeHtml(tr('rewindConfirmText').replace('{turn}', String(picked)))}</p><blockquote class="rewind-quote">${escapeHtml(oneLine(turns.find((t) => t.turn === picked)?.text ?? '', 200))}</blockquote>`
+        : turns.length
+          ? `<p class="muted">${tr('rewindHint')}</p>${turns
+              .slice()
+              .reverse()
+              .map((t) => `<button type="button" class="outline-row" data-action="rewind-to" data-turn="${t.turn}"><span class="outline-index">${t.turn}</span><span class="outline-text">${escapeHtml(oneLine(t.text, 90))}</span><span class="outline-time">${escapeHtml(formatRelative(Date.now(), t.ts, state.locale))}</span></button>`)
+              .join('')}`
+          : `<div class="panel-empty">${tr('rewindNoTurns')}</div>`
+    el.innerHTML = `<div class="modal-backdrop" data-action="close-modal"><div class="modal" role="dialog" aria-modal="true" data-modal="rewind">
+      <div class="modal-head"><h2>${icon('refresh', 16)} ${tr('rewindTitle')}</h2><button class="icon-btn" data-action="close-modal">${icon('close', 16)}</button></div>
+      <div class="modal-body">${body}</div>
+      ${picked !== undefined ? `<div class="modal-foot"><button class="btn ghost" data-action="rewind-back">${tr('cancel')}</button><button class="btn primary" data-action="rewind-confirm" id="rewind-confirm">${icon('refresh', 14)} ${tr('rewindConfirm')}</button></div>` : ''}
+    </div></div>`
+    if (picked !== undefined) (document.getElementById('rewind-confirm') as HTMLButtonElement | null)?.focus()
+    return
+  }
+  if (state.modal === 'import') {
+    const view = state.importView
+    const pending = view?.items.filter((i) => i.action !== 'skip') ?? []
+    const kinds = [...new Set(pending.map((i) => i.kind))]
+    const rows = view?.items.length
+      ? view.items
+          .map(
+            (item) => `<details class="import-row import-${escapeHtml(item.action)}"><summary><span class="tag">${escapeHtml(item.action)}</span><span class="tag subtle">${escapeHtml(item.kind)}</span><span>${escapeHtml(item.summary)}</span></summary><code class="muted small">${escapeHtml(item.target)}</code>${item.diff ? `<pre class="import-diff">${escapeHtml(item.diff)}</pre>` : ''}</details>`,
+          )
+          .join('')
+      : `<div class="panel-empty">${tr('importNothing')}</div>`
+    el.innerHTML = `<div class="modal-backdrop" data-action="close-modal"><div class="modal roots-modal" role="dialog" aria-modal="true" data-modal="import">
+      <div class="modal-head"><h2>${icon('external', 16)} ${tr('importTitle')}</h2><button class="icon-btn" data-action="close-modal">${icon('close', 16)}</button></div>
+      <div class="modal-body">
+        <div class="panel-mode-tabs"><button class="right-tab ${view?.source === 'claude' ? 'active' : ''}" data-action="import-source" data-source="claude">Claude Code</button><button class="right-tab ${view?.source === 'dsh' ? 'active' : ''}" data-action="import-source" data-source="dsh">DSH</button></div>
+        <div class="settings-note">${icon('info', 14)} ${tr('importHint')}</div>
+        ${kinds.length ? `<div class="import-kinds">${kinds.map((k) => `<label class="toggle"><input type="checkbox" data-import-kind="${escapeHtml(k)}" ${state.importKinds.has(k) ? 'checked' : ''}> ${escapeHtml(k)}</label>`).join('')}</div>` : ''}
+        <div class="import-list">${rows}</div>
+      </div>
+      <div class="modal-foot"><button class="btn ghost" data-action="close-modal">${tr('cancel')}</button><button class="btn primary" data-action="import-apply" ${pending.some((i) => state.importKinds.has(i.kind)) ? '' : 'disabled'}>${icon('check', 14)} ${tr('importApply')} (${pending.filter((i) => state.importKinds.has(i.kind)).length})</button></div>
+    </div></div>`
+    for (const box of el.querySelectorAll<HTMLInputElement>('input[data-import-kind]')) {
+      box.addEventListener('change', () => {
+        const kind = box.dataset.importKind!
+        if (box.checked) state.importKinds.add(kind)
+        else state.importKinds.delete(kind)
+        renderModal()
+      })
+    }
+    return
+  }
+  if (state.modal === 'worktree') {
+    const view = state.worktrees
+    const nameOf = (p: string) => p.split(/[\\/]/).filter(Boolean).at(-1) ?? p
+    const rows = !view?.repo
+      ? `<div class="panel-empty">${tr('worktreeNoRepo')}</div>`
+      : view.worktrees.length
+        ? view.worktrees
+            .map((w) => {
+              const name = nameOf(w.path)
+              const open = isDesktop() ? `<button class="link-btn" data-action="switch-workspace" data-path="${escapeHtml(w.path)}">${tr('worktreeOpen')}</button>` : `<button class="link-btn" data-action="copy-text" data-text="${escapeHtml(w.path)}">${tr('copyPath')}</button>`
+              return `<div class="worktree-row" data-worktree="${escapeHtml(name)}"><div class="root-main"><strong>${escapeHtml(w.branch ?? name)}</strong><code>${escapeHtml(w.path)}</code></div><div class="worktree-actions">${open}<button class="link-btn" data-action="worktree-apply" data-name="${escapeHtml(name)}">${tr('worktreeApply')}</button><button class="link-btn danger" data-action="worktree-remove" data-name="${escapeHtml(name)}">${tr('worktreeRemove')}</button></div></div>`
+            })
+            .join('')
+        : `<div class="panel-empty">${tr('worktreeNone')}</div>`
+    el.innerHTML = `<div class="modal-backdrop" data-action="close-modal"><div class="modal roots-modal" role="dialog" aria-modal="true" data-modal="worktree">
+      <div class="modal-head"><h2>${icon('git', 16)} ${tr('worktreeTitle')}</h2><button class="icon-btn" data-action="close-modal">${icon('close', 16)}</button></div>
+      <div class="modal-body">
+        <div class="settings-note">${icon('info', 14)} ${tr('worktreeHint')}</div>
+        <div class="root-list">${rows}</div>
+        ${view?.repo ? `<form class="root-form" data-action="worktree-create"><label>${tr('worktreeName')}<input id="worktree-name" placeholder="feature-x" autocomplete="off"></label><div class="root-form-actions"><button type="submit" class="btn primary">${icon('plus', 14)} ${tr('worktreeCreate')}</button></div></form>` : ''}
+      </div>
+    </div></div>`
+    const form = el.querySelector<HTMLFormElement>('form[data-action="worktree-create"]')
+    form?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const name = (document.getElementById('worktree-name') as HTMLInputElement | null)?.value.trim()
+      if (name) void openWorktrees(name)
+    })
+    return
+  }
   if (state.modal === 'hooks') {
     const hooks = state.hooksView?.hooks ?? []
     const rows = hooks.length
@@ -2825,14 +3188,49 @@ function renderModal(): void {
     return
   }
   if (state.modal === 'model') {
-    el.innerHTML = `<div class="modal-backdrop" data-action="close-modal"><div class="modal goal-modal" role="dialog" aria-modal="true">
+    // CP-35: the catalog with capabilities; the session's provider is pickable.
+    const worker = state.current?.state.model ?? state.boot?.config.worker
+    const role = state.boot?.config.worker
+    const current = { provider: worker?.provider ?? role?.provider ?? '', model: worker?.model ?? role?.model ?? '' }
+    const rows = renderModelRows(pickerModels(state.modelCatalog, current.provider, state.modelQuery), current, {
+      tools: tr('capTools'),
+      vision: tr('capVision'),
+      reasoning: tr('capReasoning'),
+      cache: tr('capCache'),
+      current: tr('current'),
+      otherProvider: tr('otherProvider'),
+      context: tr('capContext'),
+    })
+    const mode = role?.toolMode ? `<span class="tag">${tr(role.toolMode === 'native' ? 'toolModeNative' : 'toolModeText')}</span>` : ''
+    const vision = role?.vision !== undefined ? `<span class="tag">${tr(role.vision ? 'capVision' : 'noVision')}</span>` : ''
+    el.innerHTML = `<div class="modal-backdrop" data-action="close-modal"><div class="modal goal-modal model-modal" role="dialog" aria-modal="true" data-modal="model">
       <div class="modal-head"><h2>${icon('cpu', 16)} ${tr('modelTitle')}</h2><button class="icon-btn" data-action="close-modal">${icon('close', 16)}</button></div>
       <div class="modal-body">
         <p class="muted">${tr('modelDesc')}</p>
-        <label class="modal-field">${tr('modelName')}<input id="model-input" value="${escapeHtml(state.boot?.config.worker.model ?? '')}" placeholder="qwen2.5:3b"></label>
+        <div class="model-current"><code>${escapeHtml(current.provider)}/${escapeHtml(current.model)}</code>${mode}${vision}</div>
+        <input id="model-search" class="model-search" value="${escapeHtml(state.modelQuery)}" placeholder="${tr('modelSearch')}" autocomplete="off">
+        <div class="model-list">${rows || `<div class="panel-empty">${tr('noMatches')}</div>`}</div>
+        <label class="modal-field">${tr('modelName')}<input id="model-input" value="${escapeHtml(current.model)}" placeholder="qwen2.5:3b"></label>
       </div>
       <div class="modal-foot"><button class="btn ghost" data-action="close-modal">${tr('cancel')}</button><button class="btn primary" data-action="save-model">${icon('check', 16)} ${tr('switchModel')}</button></div>
     </div></div>`
+    const search = document.getElementById('model-search') as HTMLInputElement | null
+    search?.addEventListener('input', () => {
+      state.modelQuery = search.value
+      const list = document.querySelector('.model-list')
+      if (list) {
+        list.innerHTML =
+          renderModelRows(pickerModels(state.modelCatalog, current.provider, state.modelQuery), current, {
+            tools: tr('capTools'),
+            vision: tr('capVision'),
+            reasoning: tr('capReasoning'),
+            cache: tr('capCache'),
+            current: tr('current'),
+            otherProvider: tr('otherProvider'),
+            context: tr('capContext'),
+          }) || `<div class="panel-empty">${tr('noMatches')}</div>`
+      }
+    })
     return
   }
   if (state.modal === 'goal') {
@@ -2956,7 +3354,10 @@ function renderModal(): void {
         <div class="settings-row"><span>${tr('fontText')}</span><input id="settings-font-text" value="${escapeHtml(loadFonts().text)}" placeholder="Segoe UI Variable"></div>
         <div class="settings-row"><span>${tr('fontCode')}</span><input id="settings-font-code" value="${escapeHtml(loadFonts().code)}" placeholder="Cascadia Code"></div>
         <div class="settings-row"><span>${tr('shortcuts')}</span><button type="button" class="btn ghost" data-action="open-shortcuts">${icon('bolt', 14)} ${tr('editShortcuts')}</button></div>
-        <div class="settings-note">${icon('info', 14)} ${tr('appearanceNote')}</div>
+        <div class="settings-row"><span>${tr('statusline')}</span><div class="statusline-picks">${STATUS_ITEMS.map((item) => `<label class="toggle"><input type="checkbox" data-pref-status="${item}" ${state.prefs.statusline.includes(item) ? 'checked' : ''}> ${tr(`status_${item}`)}</label>`).join('')}</div></div>
+        <div class="settings-row"><span>${tr('codeTheme')}</span><select data-pref="codeTheme">${(['auto', 'github', 'monokai', 'plain'] as const).map((theme) => `<option value="${theme}" ${state.prefs.codeTheme === theme ? 'selected' : ''}>${tr(`codeTheme_${theme}`)}</option>`).join('')}</select></div>
+        <div class="settings-row"><span>${tr('vimMode')}</span><label class="toggle"><input type="checkbox" data-pref="vimMode" ${state.prefs.vimMode ? 'checked' : ''}> ${tr('enabled')}</label></div>
+        <div class="settings-note">${icon('info', 14)} ${tr('appearanceNote')} ${tr('prefsSavedNote')}</div>
       </section>
       <section class="settings-section" data-settings-section="approval">
         <h3>${tr('approvalMode')}</h3>
@@ -3277,14 +3678,28 @@ function handleSessionEvent(data: Record<string, unknown>): void {
       break
     }
     case 'approval/request': {
-      const entry: ChatEntry = { id: `approval-${String(data.requestId)}`, kind: 'approval', runId: currentRunId() ?? '', requestId: String(data.requestId), request: data.request as ApprovalRequest, ts: Date.now() }
+      const entry: ChatEntry = {
+        id: `approval-${String(data.requestId)}`,
+        kind: 'approval',
+        runId: currentRunId() ?? '',
+        requestId: String(data.requestId),
+        request: data.request as ApprovalRequest,
+        ...(data.details ? { details: data.details as ApprovalDetails } : {}),
+        ts: Date.now(),
+      }
       if (!state.entries.some((e) => e.id === entry.id)) state.entries.push(entry)
       renderTranscript()
+      // CP-34: the card takes the keyboard (Y / S / A / N) unless the user is typing.
+      approvalToFocus = entry.requestId
       break
     }
     case 'approval/decision': {
       const entry = state.entries.find((e) => e.kind === 'approval' && e.requestId === data.requestId)
-      if (entry?.kind === 'approval') entry.decision = data.approved === true ? 'approved' : 'denied'
+      if (entry?.kind === 'approval') {
+        entry.decision = data.approved === true ? 'approved' : 'denied'
+        if (typeof data.reason === 'string') entry.reason = data.reason
+        if (data.scope === 'session' || data.scope === 'always') entry.scope = data.scope
+      }
       renderTranscript()
       break
     }
@@ -3918,6 +4333,27 @@ async function runCommand(id: string, args = ''): Promise<void> {
     case 'hooks':
       await openHooks()
       return
+    case 'worktree':
+      await openWorktrees(args || undefined)
+      return
+    case 'import':
+      await openImport(args === 'dsh' ? 'dsh' : 'claude')
+      return
+    case 'find':
+      openFind(args || undefined)
+      return
+    case 'raw':
+      toggleRaw()
+      return
+    case 'rewind': {
+      const turn = args ? Number(args) : undefined
+      if (turn !== undefined && (!Number.isInteger(turn) || turn < 1)) {
+        toast('Usage: /rewind [turn]', 'error')
+        return
+      }
+      openRewind(turn)
+      return
+    }
     case 'doctor':
       await openDoctor()
       return
@@ -3954,6 +4390,66 @@ async function openDetailsSection(section: DetailsSection): Promise<void> {
   block.scrollIntoView({ block: 'start' })
   block.classList.add('flash')
   window.setTimeout(() => block.classList.remove('flash'), 1_200)
+}
+
+/** CP-31: the import wizard: a plan with diffs, nothing written until Apply. */
+async function openImport(source: 'claude' | 'dsh'): Promise<void> {
+  try {
+    const view = await api<NonNullable<typeof state.importView>>(`/api/import?source=${source}`)
+    state.importView = view
+    state.importKinds = new Set(view.items.filter((i) => i.action !== 'skip').map((i) => i.kind))
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+    return
+  }
+  state.modal = 'import'
+  renderModal()
+}
+
+async function applyImportPlan(): Promise<void> {
+  const view = state.importView
+  if (!view) return
+  try {
+    const result = await post<{ written: string[]; failed: string[] }>('/api/import', { source: view.source, kinds: [...state.importKinds] })
+    toast(result.failed.length ? `${tr('importFailed')}: ${result.failed.join('; ')}` : `${tr('importDone')}: ${result.written.length}`, result.failed.length ? 'error' : 'success')
+    await refreshSessions()
+    await openImport(view.source)
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+/** CP-35: the worktree dialog; `/worktree name` creates one first. */
+async function openWorktrees(create?: string): Promise<void> {
+  try {
+    if (create) {
+      const made = await post<{ path: string; branch: string }>('/api/worktrees', { name: create })
+      toast(`${tr('worktreeCreated')}: ${made.branch}`, 'success')
+    }
+    state.worktrees = await api<NonNullable<typeof state.worktrees>>('/api/worktrees')
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+    return
+  }
+  state.modal = 'worktree'
+  renderModal()
+}
+
+async function worktreeAction(action: 'apply' | 'remove', name: string, force = false): Promise<void> {
+  try {
+    if (action === 'apply') {
+      const result = await post<{ applied: string[]; empty: boolean; committed?: boolean }>('/api/worktrees/apply', { name })
+      toast(result.empty ? tr('worktreeNothing') : `${tr('worktreeApplied')}: ${result.applied.join(', ')}`, 'success')
+      if (state.right === 'diff') void loadDiff()
+    } else {
+      await post('/api/worktrees/remove', { name, ...(force ? { force: true } : {}) })
+      toast(tr('worktreeRemoved'), 'success')
+    }
+    state.worktrees = await api<NonNullable<typeof state.worktrees>>('/api/worktrees')
+    if (state.modal === 'worktree') renderModal()
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+  }
 }
 
 async function openHooks(): Promise<void> {
@@ -4446,7 +4942,16 @@ async function setSandboxMode(mode: string): Promise<void> {
 
 function openModel(): void {
   state.modal = 'model'
+  state.modelQuery = ''
   renderModal()
+  if (state.modelCatalog.length === 0) {
+    void api<{ models: CatalogModel[] }>('/api/models')
+      .then((data) => {
+        state.modelCatalog = data.models
+        if (state.modal === 'model') renderModal()
+      })
+      .catch(() => undefined)
+  }
 }
 
 async function saveModel(): Promise<void> {
@@ -4884,12 +5389,12 @@ async function browseWorkspace(): Promise<void> {
   }
 }
 
-async function approve(requestId: string, approved: boolean): Promise<void> {
+async function approve(requestId: string, approved: boolean, scope: 'once' | 'session' | 'always' = 'once'): Promise<void> {
   const runId = currentRunId()
   if (!runId) return
-  const reason = (document.getElementById(`approval-reason-${requestId}`) as HTMLInputElement | null)?.value
+  const reason = (document.getElementById(`approval-reason-${requestId}`) as HTMLInputElement | null)?.value.trim()
   try {
-    await post(`/api/sessions/${encodeURIComponent(runId)}/approval`, { requestId, approved, ...(reason ? { reason } : {}) })
+    await post(`/api/sessions/${encodeURIComponent(runId)}/approval`, { requestId, approved, ...(reason && !approved ? { reason } : {}), ...(approved && scope !== 'once' ? { scope } : {}) })
   } catch (error) {
     toast(error instanceof Error ? error.message : String(error), 'error')
   }
@@ -5008,6 +5513,7 @@ function onDocumentClick(event: MouseEvent): void {
       if (action) {
         state.shortcuts[actionId] = action.defaultKeys
         localStorage.setItem('hy-shortcuts', JSON.stringify(state.shortcuts))
+        void savePrefs({ shortcuts: { ...state.shortcuts } })
         renderModal()
       }
       break
@@ -5236,7 +5742,7 @@ function onDocumentClick(event: MouseEvent): void {
       if (el.dataset.entryId) openEntryDetails(el.dataset.entryId)
       break
     case 'approval-approve':
-      if (el.dataset.requestId) void approve(el.dataset.requestId, true)
+      if (el.dataset.requestId) void approve(el.dataset.requestId, true, el.dataset.scope === 'session' || el.dataset.scope === 'always' ? el.dataset.scope : 'once')
       break
     case 'approval-deny':
       if (el.dataset.requestId) void approve(el.dataset.requestId, false)
@@ -5330,6 +5836,14 @@ function onDocumentClick(event: MouseEvent): void {
     case 'save-model':
       void saveModel()
       break
+    case 'pick-model': {
+      const input = document.getElementById('model-input') as HTMLInputElement | null
+      if (input && el.dataset.model) {
+        input.value = el.dataset.model
+        void saveModel()
+      }
+      break
+    }
     case 'save-title':
       if (el.dataset.runId) void saveTitle(el.dataset.runId)
       break
@@ -5421,6 +5935,74 @@ function onDocumentClick(event: MouseEvent): void {
         renderModal()
         void selectSession(el.dataset.runId)
       }
+      break
+    case 'import-source':
+      if (el.dataset.source === 'claude' || el.dataset.source === 'dsh') void openImport(el.dataset.source)
+      break
+    case 'import-apply':
+      void applyImportPlan()
+      break
+    case 'worktree-apply':
+      if (el.dataset.name) void worktreeAction('apply', el.dataset.name)
+      break
+    case 'worktree-remove':
+      if (el.dataset.name) void worktreeAction('remove', el.dataset.name, event.shiftKey)
+      break
+    case 'copy-text':
+      if (el.dataset.text) void copyText(el.dataset.text).then(() => toast(tr('copied'), 'success'))
+      break
+    case 'diff-fold': {
+      const path = el.dataset.path
+      if (!path) break
+      if (state.diffCollapsed.has(path)) state.diffCollapsed.delete(path)
+      else state.diffCollapsed.add(path)
+      rerenderDiff()
+      break
+    }
+    case 'diff-fold-all': {
+      const files = parseUnifiedDiff(state.diff).map((f) => f.path)
+      if (state.diffCollapsed.size === files.length) state.diffCollapsed.clear()
+      else state.diffCollapsed = new Set(files)
+      rerenderDiff()
+      break
+    }
+    case 'diff-comment': {
+      const path = el.dataset.path
+      const line = Number(el.dataset.line)
+      const side = el.dataset.side === 'old' ? 'old' : 'new'
+      if (!path || !Number.isInteger(line)) break
+      state.diffEditing = { path, side, line }
+      rerenderDiff()
+      ;(document.getElementById('diff-comment-input') as HTMLTextAreaElement | null)?.focus()
+      break
+    }
+    case 'diff-comment-save':
+      saveDiffComment()
+      break
+    case 'diff-comment-cancel':
+      state.diffEditing = undefined
+      rerenderDiff()
+      break
+    case 'diff-send-comments':
+      sendDiffComments()
+      break
+    case 'find-next':
+      stepFind(false)
+      break
+    case 'find-prev':
+      stepFind(true)
+      break
+    case 'find-close':
+      closeFind()
+      break
+    case 'rewind-to':
+      if (el.dataset.turn) openRewind(Number(el.dataset.turn))
+      break
+    case 'rewind-back':
+      openRewind(undefined)
+      break
+    case 'rewind-confirm':
+      void confirmRewind()
       break
     case 'palette-file':
       if (el.dataset.path) {
@@ -5543,8 +6125,109 @@ function onDocumentSubmit(event: Event): void {
   }
 }
 
+let lastEscapeAt = 0
+
+/** CP-34: approval keys. Returns true when the key was used. */
+function approvalKey(event: KeyboardEvent, target: HTMLElement): boolean {
+  // Alt+Y / Alt+S / Alt+A / Alt+N decide the newest pending approval from anywhere.
+  if (event.altKey && !event.ctrlKey && !event.metaKey) {
+    const pending = [...state.entries].reverse().find((e) => e.kind === 'approval' && !e.decision)
+    const key = event.key.toLowerCase()
+    if (!pending || pending.kind !== 'approval' || !['y', 's', 'a', 'n'].includes(key)) return false
+    const card = document.querySelector<HTMLElement>(`.approval-card[data-approval-id="${CSS.escape(pending.requestId)}"]`)
+    if (key === 'n') {
+      event.preventDefault()
+      void approve(pending.requestId, false)
+      return true
+    }
+    const scope = key === 'y' ? 'once' : key === 's' ? 'session' : 'always'
+    if (card && !card.querySelector(`[data-scope="${scope}"]`)) return false
+    event.preventDefault()
+    void approve(pending.requestId, true, scope)
+    return true
+  }
+  if (event.ctrlKey || event.metaKey) return false
+  if (target instanceof HTMLInputElement && target.dataset.approvalReason) {
+    if (event.key !== 'Enter') return false
+    event.preventDefault()
+    void approve(target.dataset.approvalReason, false)
+    return true
+  }
+  const card = target.closest<HTMLElement>('.approval-card[data-approval-id]')
+  if (!card || target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return false
+  const requestId = card.dataset.approvalId!
+  const key = event.key.toLowerCase()
+  const scope = key === 'y' ? 'once' : key === 's' ? 'session' : key === 'a' ? 'always' : undefined
+  if (scope) {
+    if (!card.querySelector(`[data-scope="${scope}"]`)) return false
+    event.preventDefault()
+    void approve(requestId, true, scope)
+    return true
+  }
+  if (key === 'n') {
+    event.preventDefault()
+    void approve(requestId, false)
+    return true
+  }
+  return false
+}
+
 function onDocumentKeydown(event: KeyboardEvent): void {
   const target = event.target as HTMLElement
+  if (approvalKey(event, target)) return
+  // CP-36: Vim-style editing in the composer when enabled in Settings.
+  if (state.prefs.vimMode && target instanceof HTMLTextAreaElement && target.id === 'composer-input' && !event.ctrlKey && !event.altKey && !event.metaKey && !event.isComposing) {
+    const insertWithMenu = state.vim.mode === 'insert' && mentionCount() > 0
+    if (!insertWithMenu) {
+      const result = vimKey(state.vim, event.key, { text: target.value, cursor: target.selectionStart ?? target.value.length })
+      const modeChanged = result.state.mode !== state.vim.mode
+      state.vim = result.state
+      if (result.handled) {
+        event.preventDefault()
+        if (result.edit.text !== target.value) {
+          target.value = result.edit.text
+          saveComposerDraft(target.value)
+        }
+        // A one-character selection stands in for the block cursor in normal mode.
+        target.setSelectionRange(result.edit.cursor, state.vim.mode === 'normal' ? Math.min(result.edit.text.length, result.edit.cursor + 1) : result.edit.cursor)
+        target.classList.toggle('vim-normal', state.vim.mode === 'normal')
+        if (modeChanged) {
+          const meter = document.querySelector('.context-meter')
+          if (meter) meter.innerHTML = statuslineHtml(currentState())
+        }
+        return
+      }
+    }
+  }
+  // CP-33: the find bar. Enter / F3 next, Shift+Enter / Shift+F3 previous, Esc closes.
+  if (target instanceof HTMLInputElement && target.id === 'find-input') {
+    if (event.key === 'Enter' || event.key === 'F3') {
+      event.preventDefault()
+      stepFind(event.shiftKey)
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeFind()
+      return
+    }
+  }
+  if (event.key === 'F3') {
+    event.preventDefault()
+    if (state.findOpen && state.findHits.length > 0) stepFind(event.shiftKey)
+    else openFind()
+    return
+  }
+  // CP-33: Esc Esc (no dialog, nothing to dismiss) opens the rewind picker.
+  if (event.key === 'Escape' && !state.modal && mentionCount() === 0 && !state.findOpen) {
+    const now = Date.now()
+    if (now - lastEscapeAt < 600) {
+      lastEscapeAt = 0
+      if (currentRunId()) openRewind()
+      return
+    }
+    lastEscapeAt = now
+  }
   // WP-61: a focused shortcut input records the next chord instead of running it.
   if (target instanceof HTMLInputElement && target.dataset.shortcut) {
     event.preventDefault()
@@ -5554,6 +6237,7 @@ function onDocumentKeydown(event: KeyboardEvent): void {
     const actionId = target.dataset.shortcut
     state.shortcuts[actionId] = chord
     localStorage.setItem('hy-shortcuts', JSON.stringify(state.shortcuts))
+    void savePrefs({ shortcuts: { ...state.shortcuts } })
     renderModal()
     return
   }
@@ -5660,6 +6344,19 @@ async function init(): Promise<void> {
   } catch {
     // An old engine without matchMedia keeps the light theme.
   }
+  // CP-36: Settings › Appearance preferences are saved as they change.
+  document.addEventListener('change', (event) => {
+    const target = event.target
+    if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return
+    if (target.dataset.prefStatus !== undefined) {
+      const picked = STATUS_ITEMS.filter((item) => document.querySelector<HTMLInputElement>(`[data-pref-status="${item}"]`)?.checked)
+      void savePrefs({ statusline: [...picked] })
+    } else if (target.dataset.pref === 'codeTheme' && target instanceof HTMLSelectElement) {
+      void savePrefs({ codeTheme: target.value as typeof state.prefs.codeTheme })
+    } else if (target.dataset.pref === 'vimMode' && target instanceof HTMLInputElement) {
+      void savePrefs({ vimMode: target.checked })
+    }
+  })
   document.addEventListener('pointerdown', (event) => {
     const target = event.target
     const backdrop = target instanceof Element ? target.closest<HTMLElement>('.modal-backdrop') : null
@@ -5702,6 +6399,7 @@ async function init(): Promise<void> {
     if (!state.roots.some((root) => root.id === state.fileRoot)) state.fileRoot = 'main'
     state.connection = 'online'
     renderShell()
+    await loadPrefs()
     connectGlobal()
     // WP-53: a fresh install starts with the three-step wizard.
     if (boot.onboarding && !boot.onboarding.complete) openOnboarding()

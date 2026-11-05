@@ -14,7 +14,7 @@ export interface TurnResult {
 
 export interface TurnHost {
   /** 	hreadId resumes that run; absent starts a new one. */
-  start(message: string, images: ImageInput[], onEvent: (event: AgentEvent) => void, threadId?: string): Promise<TurnResult>
+  start(message: string, images: ImageInput[], onEvent: (event: AgentEvent, threadId?: string) => void, threadId?: string): Promise<TurnResult>
   /** Aborts a running turn; false when that thread has no turn in flight. */
   cancel?(threadId: string): boolean
   /** Queues a steering message; false when that thread is not running a turn. */
@@ -34,7 +34,7 @@ export function turnStartMethod(host: TurnHost, notify?: (method: string, params
       if (params === null || typeof params !== 'object' || Array.isArray(params)) {
         throw new ProtocolRpcError(ERROR.invalidParams, 'params must be an object')
       }
-      const record = params as { message?: unknown; images?: unknown; threadId?: unknown }
+      const record = params as { message?: unknown; images?: unknown; threadId?: unknown; tag?: unknown }
       const message = typeof record.message === 'string' ? record.message.trim() : ''
       if (message.length === 0) throw new ProtocolRpcError(ERROR.invalidParams, 'message is required')
       if (record.threadId !== undefined && (typeof record.threadId !== 'string' || record.threadId.length === 0)) {
@@ -42,7 +42,19 @@ export function turnStartMethod(host: TurnHost, notify?: (method: string, params
       }
       const threadId = typeof record.threadId === 'string' ? record.threadId : undefined
       const images = Array.isArray(record.images) ? (record.images as ImageInput[]) : []
-      const result = await host.start(message, images, (event) => notify?.('turn/event', { event }), threadId)
+      // CP-27: events name their thread (and echo the caller's `tag`), so one
+      // connection can run several turns at once and tell them apart.
+      const tag = typeof record.tag === 'string' && record.tag.length <= 100 ? { tag: record.tag } : {}
+      const result = await host.start(
+        message,
+        images,
+        (event, thread) => {
+          const where = { ...(thread ? { threadId: thread } : {}), ...tag }
+          if ((event as { type?: string }).type === 'turn/started') notify?.('turn/started', where)
+          else notify?.('turn/event', { ...where, event })
+        },
+        threadId,
+      )
       return { threadId: result.threadId, final: result.final }
     },
   }

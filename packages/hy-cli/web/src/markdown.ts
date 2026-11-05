@@ -1,3 +1,4 @@
+import { highlightCode } from './highlight.js'
 export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -56,7 +57,8 @@ export function renderMarkdown(source: string): string {
         i += 1
       }
       const language = fence[1] ? ` class="language-${escapeHtml(fence[1])}"` : ''
-      out.push(`<pre class="code-block"><code${language}>${escapeHtml(code.join('\n'))}</code></pre>`)
+      // CP-36: comments, strings, numbers and keywords get theme colours.
+      out.push(`<pre class="code-block"><code${language}>${highlightCode(code.join('\n'), fence[1])}</code></pre>`)
       continue
     }
     if (!line.trim()) {

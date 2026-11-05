@@ -1337,3 +1337,96 @@ code, pre { font-family: var(--mono); }
 .tag.doctor-warn { border-color: #c9a227; color: #c9a227; background: transparent; }
 .tag.doctor-fail { border-color: var(--danger, #b4453f); color: var(--danger, #b4453f); background: transparent; }
 .mention-item .slash-desc { margin-left: auto; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* CP-33: diff viewer (fold, line numbers, comments). */
+.diff-view { display: flex; flex-direction: column; gap: 8px; padding: 8px; }
+.diff-file { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--panel-2); }
+.diff-file-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; background: var(--panel-3); color: var(--text); text-align: left; cursor: pointer; font-size: 12px; }
+.diff-file-head code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-fold { width: 12px; color: var(--muted); }
+.diff-badge { padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+.diff-badge-added { color: var(--green); border-color: var(--green); }
+.diff-badge-deleted { color: var(--red); border-color: var(--red); }
+.diff-count { font-family: var(--mono); font-size: 11px; }
+.diff-plus { color: var(--green); }
+.diff-minus { color: var(--red); }
+.diff-body { font-family: var(--mono); font-size: 12px; overflow-x: auto; }
+.diff-hunk-head { padding: 2px 8px; color: var(--muted); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.dl { display: grid; grid-template-columns: 44px 44px 1fr; white-space: pre; }
+.dl-no { padding: 0 6px; border: 0; background: transparent; color: var(--muted); text-align: right; font: inherit; user-select: none; }
+.dl-commentable { cursor: pointer; }
+.dl-commentable:hover { color: var(--accent); }
+.dl-text { padding-right: 8px; }
+.dl-add { background: color-mix(in srgb, var(--green) 14%, transparent); }
+.dl-del { background: color-mix(in srgb, var(--red) 14%, transparent); }
+.dl-note { color: var(--muted); }
+.dl.has-comment .dl-no:first-child { color: var(--accent); font-weight: 600; }
+.dl-comment { margin: 2px 8px 4px 88px; padding: 4px 8px; border-left: 3px solid var(--accent); background: var(--panel-3); font-family: var(--sans, inherit); white-space: pre-wrap; cursor: pointer; }
+.dl-comment-edit { margin: 2px 8px 6px 88px; display: flex; flex-direction: column; gap: 4px; }
+.dl-comment-edit textarea { width: 100%; font: inherit; }
+.dl-comment-edit div { display: flex; gap: 6px; }
+.btn.small { padding: 2px 8px; font-size: 12px; }
+
+/* CP-33: transcript search, raw view. */
+.find-host:empty { display: none; }
+.find-bar { display: flex; align-items: center; gap: 6px; margin: 6px 16px 0; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2); }
+.find-bar input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); outline: none; }
+.find-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.search-hit { outline: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }
+.search-current { outline: 2px solid var(--accent); }
+.raw-message { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; }
+.rewind-quote { margin: 8px 0 0; padding: 6px 10px; border-left: 3px solid var(--accent); color: var(--text-2); }
+
+/* CP-34: approval facts and keyboard hints. */
+.approval-facts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 6px 0; font-size: 12px; }
+.approval-facts dt { color: var(--muted); }
+.approval-facts dd { margin: 0; word-break: break-all; }
+.approval-facts dd.risk { color: var(--red); font-weight: 600; }
+.approval-facts code { margin-right: 4px; }
+.approval-card:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.approval-actions kbd { margin-left: 4px; padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; font-size: 10px; color: var(--muted); }
+.approval-actions { flex-wrap: wrap; }
+
+/* CP-35: model picker and worktrees. */
+.model-current { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.model-search { width: 100%; margin-bottom: 6px; }
+.model-list { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto; margin-bottom: 10px; }
+.model-row { display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2); color: var(--text); text-align: left; cursor: pointer; }
+.model-row:hover:not(:disabled) { border-color: var(--accent); }
+.model-row:disabled { opacity: 0.55; cursor: default; }
+.model-row.active { border-color: var(--accent); }
+.model-main { display: flex; align-items: baseline; gap: 8px; }
+.model-main code { color: var(--muted); font-size: 11px; }
+.model-caps { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.worktree-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-soft); }
+.worktree-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+/* CP-36: statusline, Vim mode, code colours. */
+.status-sep { margin: 0 6px; color: var(--muted); }
+.vim-mode { padding: 0 5px; border-radius: 4px; font-family: var(--mono); font-size: 10px; font-weight: 700; }
+.vim-insert { background: color-mix(in srgb, var(--green) 25%, transparent); }
+.vim-normal { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+#composer-input.vim-normal { caret-color: transparent; }
+.statusline-picks { display: flex; flex-wrap: wrap; gap: 4px 10px; justify-content: flex-end; }
+/* auto follows the light/dark theme with the GitHub palettes. */
+:root[data-code-theme="auto"], :root[data-code-theme="github"] { --tok-kw: #cf222e; --tok-str: #0a3069; --tok-num: #0550ae; --tok-com: #6e7781; --tok-key: #953800; --tok-var: #8250df; }
+:root[data-theme="dark"][data-code-theme="auto"] { --tok-kw: #ff7b72; --tok-str: #a5d6ff; --tok-num: #79c0ff; --tok-com: #8b949e; --tok-key: #ffa657; --tok-var: #d2a8ff; }
+:root[data-code-theme="monokai"] { --tok-kw: #f92672; --tok-str: #e6db74; --tok-num: #ae81ff; --tok-com: #75715e; --tok-key: #a6e22e; --tok-var: #fd971f; }
+:root[data-code-theme="plain"] { --tok-kw: inherit; --tok-str: inherit; --tok-num: inherit; --tok-com: inherit; --tok-key: inherit; --tok-var: inherit; }
+.tok-kw { color: var(--tok-kw, inherit); font-weight: 600; }
+.tok-str { color: var(--tok-str, inherit); }
+.tok-num { color: var(--tok-num, inherit); }
+.tok-com { color: var(--tok-com, inherit); font-style: italic; }
+.tok-key { color: var(--tok-key, inherit); }
+.tok-var { color: var(--tok-var, inherit); }
+.tok-add { color: var(--green); }
+.tok-del { color: var(--red); }
+.tok-meta { color: var(--muted); }
+
+/* CP-31: import wizard. */
+.import-kinds { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 8px 0; }
+.import-list { display: flex; flex-direction: column; gap: 4px; max-height: 380px; overflow-y: auto; }
+.import-row { border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 4px 8px; }
+.import-row summary { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; }
+.import-row.import-skip { opacity: 0.6; }
+.import-diff { margin: 6px 0 0; max-height: 200px; overflow: auto; font-size: 11px; }

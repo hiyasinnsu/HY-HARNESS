@@ -64,6 +64,7 @@ function steps() {
     { name: 'api types', command: ['pnpm', ['check:api']] },
     { name: 'api schema', command: ['pnpm', ['check:api-schema']] },
     { name: 'config schema', command: ['pnpm', ['check:config-schema']] },
+    { name: 'protocol methods', command: ['pnpm', ['check:protocol-methods']] },
     { name: 'protocol types', command: ['node', ['scripts/gen-protocol.mjs', '--check', '--schema', 'target/schema.json']] },
     { name: 'rust: sandbox', command: ['cargo', ['test', '-p', 'hy-sandbox-windows']] },
     { name: 'rust: exec server', command: ['cargo', ['test', '-p', 'hy-exec-server']] },

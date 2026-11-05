@@ -81,6 +81,43 @@ export function resolveServerPath(explicit?: string): string {
   return 'hy-exec-server'
 }
 
+/**
+ * CP-28: how the client reaches the exec server: the child's stdio (the
+ * default, `ExecRpcClient.start`) or a WebSocket to a server started with
+ * `--listen` (`ExecRpcClient.connect`).
+ */
+interface ExecTransport {
+  write(line: string): void
+  end(): void
+  kill(): void
+  /** Resolves when the transport is gone. */
+  exited(): Promise<void>
+}
+
+function childTransport(child: ChildProcessWithoutNullStreams, onLine: (line: string) => void, onExit: (reason: string) => void): ExecTransport {
+  const lines = readline.createInterface({ input: child.stdout })
+  lines.on('line', onLine)
+  child.stderr.on('data', (chunk: Buffer) => {
+    const text = chunk.toString('utf8').trimEnd()
+    if (text) process.stderr.write(`[exec] ${text}\n`)
+  })
+  const done = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+  child.on('exit', (code, signal) => onExit(`hy-exec-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`))
+  return {
+    write: (line) => child.stdin.write(`${line}\n`),
+    end: () => child.stdin.end(),
+    kill: () => child.kill(),
+    exited: () => done,
+  }
+}
+
+interface WebSocketLike {
+  readonly readyState: number
+  send(data: string): void
+  close(): void
+  addEventListener(type: string, listener: (event: { data?: unknown; code?: number }) => void, options?: { once?: boolean }): void
+}
+
 export class ExecRpcClient {
   private nextId = 0
   private readonly pending = new Map<number, Pending>()
@@ -88,22 +125,57 @@ export class ExecRpcClient {
   private readonly ptcHandlers = new Map<string, PtcToolCallHandler>()
   private closed = false
 
-  private constructor(private readonly child: ChildProcessWithoutNullStreams) {
-    const lines = readline.createInterface({ input: child.stdout })
-    lines.on('line', (line) => this.onLine(line))
-    child.stderr.on('data', (chunk: Buffer) => {
-      const text = chunk.toString('utf8').trimEnd()
-      if (text) process.stderr.write(`[exec] ${text}\n`)
+  private transport!: ExecTransport
+
+  private constructor() {}
+
+  private onExit(reason: string): void {
+    this.closed = true
+    const error = new Error(reason)
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer)
+      pending.reject(error)
+      this.pending.delete(id)
+    }
+  }
+
+  private static withChild(child: ChildProcessWithoutNullStreams): ExecRpcClient {
+    const client = new ExecRpcClient()
+    client.transport = childTransport(child, (line) => client.onLine(line), (reason) => client.onExit(reason))
+    return client
+  }
+
+  /**
+   * CP-28: connects to an exec server started elsewhere with
+   * `hy-exec-server --listen ws://IP:PORT --token T` and initializes it.
+   * Without the right token the server refuses the upgrade.
+   */
+  static async connect(url: string, token: string, initParams: InitializeParams): Promise<ExecRpcClient> {
+    const WS = (globalThis as unknown as { WebSocket?: new (url: string) => WebSocketLike }).WebSocket
+    if (!WS) throw new Error('this Node has no global WebSocket (Node 22+)')
+    const target = new URL(url)
+    target.searchParams.set('token', token)
+    const socket = new WS(target.toString())
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener('open', () => resolve(), { once: true })
+      socket.addEventListener('error', () => reject(new Error(`could not connect to the exec server at ${url} (wrong token or not listening)`)), { once: true })
     })
-    child.on('exit', (code, signal) => {
-      this.closed = true
-      const error = new Error(`hy-exec-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`)
-      for (const [id, pending] of this.pending) {
-        clearTimeout(pending.timer)
-        pending.reject(error)
-        this.pending.delete(id)
-      }
+    const client = new ExecRpcClient()
+    let resolveClosed!: () => void
+    const closed = new Promise<void>((resolve) => (resolveClosed = resolve))
+    socket.addEventListener('message', (event) => client.onLine(String(event.data)))
+    socket.addEventListener('close', () => {
+      client.onExit(`the exec server at ${url} closed the connection`)
+      resolveClosed()
     })
+    client.transport = {
+      write: (line) => socket.send(line),
+      end: () => socket.close(),
+      kill: () => socket.close(),
+      exited: () => closed,
+    }
+    await client.request<InitializeResult>('initialize', { ptcNodePath: process.execPath, ...initParams }, GRANT_TIMEOUT_MS)
+    return client
   }
 
   static async start(serverPath: string, initParams: InitializeParams): Promise<ExecRpcClient> {
@@ -119,7 +191,7 @@ export class ExecRpcClient {
       windowsHide: true,
       env: process.env,
     })
-    const client = new ExecRpcClient(child)
+    const client = ExecRpcClient.withChild(child)
     // A confined session grants the workspace here: one walk of the tree (ADR 0001 S-1).
     await client.request<InitializeResult>('initialize', params, GRANT_TIMEOUT_MS)
     return client
@@ -154,7 +226,7 @@ export class ExecRpcClient {
   /** Server-initiated requests: only `ptc/toolCall` (design §3). */
   private async onServerRequest(id: unknown, method: string, params: unknown): Promise<void> {
     const reply = (body: Record<string, unknown>) => {
-      if (!this.closed) this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, ...body }) + '\n')
+      if (!this.closed) this.transport.write(JSON.stringify({ jsonrpc: '2.0', id, ...body }))
     }
     if (method !== 'ptc/toolCall') {
       reply({ error: { code: -32601, message: `client does not implement ${method}` } })
@@ -200,7 +272,7 @@ export class ExecRpcClient {
         this.pending.delete(id)
         clearTimeout(timer)
         if (!this.closed) {
-          this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: '$/cancelRequest', params: { id } }) + '\n')
+          this.transport.write(JSON.stringify({ jsonrpc: '2.0', method: '$/cancelRequest', params: { id } }))
         }
         reject(new ExecRpcError(-32005, 'request cancelled'))
       }
@@ -221,7 +293,7 @@ export class ExecRpcClient {
         },
         timer,
       })
-      this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n')
+      this.transport.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
     })
   }
 
@@ -327,13 +399,13 @@ export class ExecRpcClient {
     } catch {
       // The process may already be gone.
     }
-    this.child.stdin.end()
+    this.transport.end()
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
-        this.child.kill()
+        this.transport.kill()
         resolve()
       }, 2_000)
-      this.child.once('exit', () => {
+      void this.transport.exited().then(() => {
         clearTimeout(timer)
         resolve()
       })

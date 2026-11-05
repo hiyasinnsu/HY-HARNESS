@@ -82,6 +82,18 @@ export class SessionLog {
     return this.writeEvent(type, payload)
   }
 
+  /** CP-31: an event with its original time (imported histories). */
+  appendAt(type: string, payload: unknown, ts: number): SessionEvent {
+    if (!this.hasHeader) {
+      this.hasHeader = true
+      if (!formatHeaders.has(this.file)) {
+        formatHeaders.add(this.file)
+        this.writeEvent('session/format', { format: SESSION_FORMAT_VERSION })
+      }
+    }
+    return this.writeAt(type, payload, ts)
+  }
+
   private writeEvent(type: string, payload: unknown): SessionEvent {
     return this.writeAt(type, payload, Date.now())
   }

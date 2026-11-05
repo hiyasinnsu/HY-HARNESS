@@ -169,9 +169,12 @@ class Client:
             if remaining <= 0:
                 raise Timeout(f"{method}: no answer in {timeout:.0f}s (stderr: {''.join(self._stderr[-5:])})")
             try:
-                message = self._responses.get(timeout=remaining)
+                message = self._responses.get(timeout=min(remaining, 0.5))
             except queue.Empty:
-                raise Timeout(f"{method}: no answer in {timeout:.0f}s") from None
+                # A server that died will never answer: fail now, with its stderr.
+                if self._proc is not None and self._proc.poll() is not None:
+                    raise HarnessError(f"{method}: the server exited ({self._proc.returncode}): {''.join(self._stderr[-5:]).strip()}") from None
+                continue
             if message.get("id") != request_id:
                 # A late answer to an earlier request: keep it for that caller.
                 self._responses.put(message)
@@ -225,6 +228,156 @@ class Client:
     def session_close(self, session_id: str) -> None:
         self.request("session.close", {"sessionId": session_id})
         self._events.pop(session_id, None)
+
+
+class ProtocolClient(Client):
+    """A blocking client for hy-protocol/1 (CP-30), the surface the CLI, the
+    daemon and ACP share. It runs ``hy protocol serve`` over stdio.
+
+        with ProtocolClient(cli="hy", cwd="/repo", args=["--mock"],
+                            on_approval=lambda req: req["command"].startswith("npm test")) as c:
+            c.initialize()
+            result = c.turn("SAY hello", on_event=print)
+            c.set_model("qwen2.5:7b")
+
+    For the resident daemon (named pipe, WebSocket) use the TypeScript SDK
+    (``connectDaemon``); Python's standard library has no WebSocket client.
+    """
+
+    def __init__(self, *args: Any, on_approval: Optional[Callable[[dict], bool]] = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.on_approval = on_approval
+        self._turn_events: "dict[str, Callable[[dict, str], None]]" = {}
+        self._tag = 0
+
+    def _command(self) -> "list[str]":
+        cli = self.cli
+        if cli.endswith(".js"):
+            return [self.node or "node", cli, "protocol", "serve", *self.args]
+        return [cli, "protocol", "serve", *self.args]
+
+    def close(self, timeout: float = 10.0) -> None:
+        if self._proc is None:
+            return
+        try:
+            if self._proc.stdin:
+                self._proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self._proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+        self._proc = None
+
+    def _read_stdout(self) -> None:
+        assert self._proc is not None and self._proc.stdout is not None
+        for line in self._proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            method = message.get("method")
+            if message.get("id") is not None and method is None:
+                self._responses.put(message)
+            elif method == "approval/request":
+                threading.Thread(target=self._answer_approval, args=(message.get("params") or {},), daemon=True).start()
+            elif method == "turn/event":
+                params = message.get("params") or {}
+                callback = self._turn_events.get(params.get("tag", ""))
+                if callback is not None:
+                    try:
+                        callback(params.get("event") or {}, params.get("threadId", ""))
+                    except Exception:
+                        pass
+
+    def _answer_approval(self, params: dict) -> None:
+        approved = False
+        if self.on_approval is not None:
+            try:
+                approved = bool(self.on_approval(params))
+            except Exception:
+                approved = False
+        try:
+            self.request("approval/respond", {"id": params.get("id"), "approved": approved}, timeout=30.0)
+        except Exception:
+            pass
+
+    # -- hy-protocol/1 ----------------------------------------------------
+    def initialize(self) -> ServerInfo:  # type: ignore[override]
+        result = self.request("initialize", {"protocolVersion": "hy-protocol/1"})
+        return ServerInfo(
+            protocol_version=result["protocolVersion"],
+            name=result["serverInfo"]["name"],
+            version=result["serverInfo"]["version"],
+            cwd="",
+            capabilities=result.get("capabilities", {}),
+        )
+
+    def threads(self, limit: Optional[int] = None) -> "list[dict]":
+        return self.request("thread/list", {} if limit is None else {"limit": limit})["threads"]
+
+    def read_thread(self, thread_id: str, offset: Optional[int] = None, limit: Optional[int] = None) -> dict:
+        params: dict = {"threadId": thread_id}
+        if offset is not None:
+            params["offset"] = offset
+        if limit is not None:
+            params["limit"] = limit
+        return self.request("thread/read", params)
+
+    def turn(
+        self,
+        message: str,
+        thread_id: Optional[str] = None,
+        images: Optional[list] = None,
+        on_event: Optional[Callable[[dict, str], None]] = None,
+        timeout: float = 600.0,
+    ) -> dict:
+        """Runs one turn; returns {"threadId", "final"}."""
+        with self._lock:
+            self._tag += 1
+            tag = f"py-{os.getpid()}-{self._tag}"
+        if on_event is not None:
+            self._turn_events[tag] = on_event
+        try:
+            params: dict = {"message": message, "tag": tag}
+            if thread_id:
+                params["threadId"] = thread_id
+            if images:
+                params["images"] = images
+            return self.request("turn/start", params, timeout=timeout)
+        finally:
+            self._turn_events.pop(tag, None)
+
+    def cancel(self, thread_id: str) -> None:  # type: ignore[override]
+        self.request("turn/cancel", {"threadId": thread_id})
+
+    def steer(self, thread_id: str, message: str) -> None:
+        self.request("turn/steer", {"threadId": thread_id, "message": message})
+
+    def status(self, thread_id: str) -> dict:
+        return self.request("turn/status", {"threadId": thread_id})
+
+    def config_get(self) -> dict:
+        return self.request("config/get")
+
+    def config_set(self, key: str, value: Any) -> dict:
+        return self.request("config/set", {"key": key, "value": value})
+
+    def set_model(self, model: str, thread_id: Optional[str] = None) -> dict:
+        params: dict = {"model": model}
+        if thread_id:
+            params["threadId"] = thread_id
+        return self.request("model/set", params)
+
+    def reload_mcp(self) -> dict:
+        return self.request("mcpServer/reload")
+
+    def reload_plugins(self) -> dict:
+        return self.request("plugin/reload")
 
 
 def run(cli: str, message: str, cwd: Optional[str] = None, args: Optional[Iterable[str]] = None) -> str:

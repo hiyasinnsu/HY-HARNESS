@@ -276,7 +276,14 @@ test('web GUI: persistent PTY keeps shell state', { skip: skipReason('pipe') ?? 
     })
     assert.equal(start.status, 200, start.text)
     assert.equal(start.json.running, true)
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    // Wait for the shell's first output (its prompt) rather than a fixed delay:
+    // under a loaded suite ConPTY can take seconds. If it exits, say how.
+    const ready = await waitFor(async () => {
+      const current = await ctx.request(pty)
+      if (!current.json.running) return { exited: current.json }
+      return current.json.output.length > 0 ? { ok: true } : undefined
+    }, 30_000, 200)
+    assert.ok(ready.ok, `the shell exited before its prompt: ${JSON.stringify(ready.exited)}`)
 
     const events = await fetch(`${ctx.base}${pty}/events`, { headers: ctx.auth })
     assert.equal(events.status, 200)
@@ -1473,6 +1480,249 @@ test('CP-32: /api/hooks lists the configured hooks and /api/doctor returns the r
 
     const unauthorized = await fetch(`${ctx.base}/api/doctor`)
     assert.equal(unauthorized.status, 401)
+  } finally {
+    await ctx?.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('CP-33: rewind to a turn restores its files and drops it and every later turn', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 120_000, concurrency: false }, async () => {
+  const dir = fixture()
+  // runServer keeps the state (checkpoints, session log) inside the fixture;
+  // the checkpoints must not track it, as they would not outside a test.
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'localappdata/\nconfig/\n')
+  const ctx = await runServer(dir, { autoApprove: true })
+  try {
+    const runId = await newSession(ctx)
+    await turn(ctx, runId, 'CALL apply_patch {"file":"ONE.md","content":"one"}')
+    await turn(ctx, runId, 'CALL apply_patch {"file":"TWO.md","content":"two"}')
+    const last = await turn(ctx, runId, 'CALL apply_patch {"file":"THREE.md","content":"three"}')
+    assert.deepEqual(last.entries.filter((e) => e.kind === 'user').map((e) => e.turn), [1, 2, 3])
+    for (const name of ['ONE.md', 'TWO.md', 'THREE.md']) assert.ok(fs.existsSync(path.join(dir, name)), name)
+
+    const bad = await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/undo`, { method: 'POST', body: JSON.stringify({ toTurn: 0 }) })
+    assert.equal(bad.status, 400, bad.text)
+
+    const rewound = await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/undo`, { method: 'POST', body: JSON.stringify({ toTurn: 2 }) })
+    assert.equal(rewound.status, 200, rewound.text)
+    assert.match(rewound.json.result, /undid turn 3[\s\S]*undid turn 2/)
+    assert.ok(fs.existsSync(path.join(dir, 'ONE.md')), 'turn 1 is kept')
+    assert.ok(!fs.existsSync(path.join(dir, 'TWO.md')) && !fs.existsSync(path.join(dir, 'THREE.md')), 'turns 2 and 3 are rolled back')
+    const after = await snapshot(ctx, runId)
+    assert.deepEqual(after.entries.filter((e) => e.kind === 'user').map((e) => e.text), ['CALL apply_patch {"file":"ONE.md","content":"one"}'])
+
+    // The next turn is numbered 2 again.
+    const next = await turn(ctx, runId, 'SAY after the rewind')
+    assert.deepEqual(next.entries.filter((e) => e.kind === 'user').map((e) => e.turn), [1, 2])
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+async function pendingApproval(ctx, runId, seen = new Set()) {
+  return waitFor(async () => {
+    const s = await snapshot(ctx, runId)
+    return s.entries.find((e) => e.kind === 'approval' && !e.decision && !seen.has(e.requestId))
+  })
+}
+
+async function settled(ctx, runId) {
+  return waitFor(async () => {
+    const s = await snapshot(ctx, runId)
+    return s.state.busy ? undefined : s
+  })
+}
+
+test('CP-34: the approval card carries cwd, sandbox effect and network targets', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir)
+  try {
+    const runId = await newSession(ctx)
+    await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/turn`, { method: 'POST', body: JSON.stringify({ message: 'CALL shell {"command":"npm install left-pad --prefix vendor/lib"}' }) })
+    const approval = await pendingApproval(ctx, runId)
+    assert.ok(approval.details, JSON.stringify(approval))
+    assert.equal(approval.details.cwd, approval.request.cwd ?? dir)
+    assert.deepEqual(approval.details.network, ['registry.npmjs.org'])
+    assert.deepEqual(approval.details.paths, ['vendor/lib'])
+    assert.ok(approval.details.effect.length > 0)
+    await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/approval`, { method: 'POST', body: JSON.stringify({ requestId: approval.requestId, approved: false }) })
+    await settled(ctx, runId)
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('CP-34: a denial reason reaches the agent', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir)
+  try {
+    const runId = await newSession(ctx)
+    await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/turn`, { method: 'POST', body: JSON.stringify({ message: 'CALL shell {"command":"npm install"}' }) })
+    const approval = await pendingApproval(ctx, runId)
+    const denied = await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/approval`, { method: 'POST', body: JSON.stringify({ requestId: approval.requestId, approved: false, reason: 'use pnpm instead' }) })
+    assert.equal(denied.status, 200, denied.text)
+    const after = await settled(ctx, runId)
+    const tool = after.entries.find((e) => e.kind === 'tool' && e.name === 'shell')
+    assert.equal(tool.status, 'error')
+    assert.match(tool.output, /denied by the user: use pnpm instead/)
+    const card = after.entries.find((e) => e.kind === 'approval')
+    assert.equal(card.reason, 'use pnpm instead')
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('CP-34: "this session" approves the same command again without asking', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 120_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir)
+  try {
+    const runId = await newSession(ctx)
+    const command = 'CALL shell {"command":"npm install"}'
+    await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/turn`, { method: 'POST', body: JSON.stringify({ message: command }) })
+    const first = await pendingApproval(ctx, runId)
+    const approved = await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/approval`, { method: 'POST', body: JSON.stringify({ requestId: first.requestId, approved: true, scope: 'session' }) })
+    assert.equal(approved.status, 200, approved.text)
+    assert.equal(approved.json.remembered, 'session')
+    await settled(ctx, runId)
+    await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/turn`, { method: 'POST', body: JSON.stringify({ message: command }) })
+    const after = await waitFor(async () => {
+      const s = await snapshot(ctx, runId)
+      if (s.state.busy) return undefined
+      return s.entries.filter((e) => e.kind === 'tool' && e.name === 'shell').length === 2 ? s : undefined
+    })
+    assert.equal(after.entries.filter((e) => e.kind === 'approval').length, 1, 'no second prompt')
+    assert.ok(after.entries.some((e) => e.kind === 'notice' && /approved for this session/.test(e.text)))
+    assert.equal(after.entries.find((e) => e.kind === 'approval').scope, 'session')
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('CP-34: "always" is refused for an unconfined command and nothing is written', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir)
+  try {
+    const runId = await newSession(ctx)
+    await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/turn`, { method: 'POST', body: JSON.stringify({ message: 'CALL shell {"command":"npm install"}' }) })
+    const approval = await pendingApproval(ctx, runId)
+    if (approval.request.sandbox === 'unconfined' || approval.request.sandbox === 'low-integrity') {
+      assert.equal(approval.details.persistable, false)
+      const refused = await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/approval`, { method: 'POST', body: JSON.stringify({ requestId: approval.requestId, approved: true, scope: 'always' }) })
+      assert.equal(refused.status, 400, refused.text)
+      assert.match(refused.json.error, /cannot be remembered/)
+      assert.ok(!fs.existsSync(path.join(dir, 'config', 'policy.star')), 'no rule was written')
+    }
+    const bad = await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/approval`, { method: 'POST', body: JSON.stringify({ requestId: approval.requestId, approved: true, scope: 'forever' }) })
+    assert.equal(bad.status, 400, bad.text)
+    // The request is still pending and can be decided once.
+    const once = await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/approval`, { method: 'POST', body: JSON.stringify({ requestId: approval.requestId, approved: false }) })
+    assert.equal(once.status, 200, once.text)
+    await settled(ctx, runId)
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('CP-35: rename, archive, fork and delete a chat; the worker role reports its tool mode', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 120_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir, { autoApprove: true })
+  try {
+    const boot = await ctx.request('/api/bootstrap')
+    assert.ok(['native', 'text'].includes(boot.json.config.worker.toolMode), JSON.stringify(boot.json.config.worker))
+    assert.equal(typeof boot.json.config.worker.vision, 'boolean')
+
+    const runId = await newSession(ctx)
+    await turn(ctx, runId, 'SAY first answer')
+    const id = encodeURIComponent(runId)
+    const renamed = await ctx.request(`/api/sessions/${id}/title`, { method: 'POST', body: JSON.stringify({ title: 'Release checklist' }) })
+    assert.equal(renamed.status, 200, renamed.text)
+    const list = async (archived = false) => (await ctx.request(`/api/sessions${archived ? '?archived=1' : ''}`)).json.sessions
+    assert.equal((await list()).find((s) => s.runId === runId).title, 'Release checklist')
+
+    await ctx.request(`/api/sessions/${id}/archive`, { method: 'POST', body: JSON.stringify({ archived: true }) })
+    assert.ok(!(await list()).some((s) => s.runId === runId), 'archived chats leave the default list')
+    assert.equal((await list(true)).find((s) => s.runId === runId).archived, true)
+    await ctx.request(`/api/sessions/${id}/archive`, { method: 'POST', body: JSON.stringify({ archived: false }) })
+    assert.ok((await list()).some((s) => s.runId === runId))
+
+    const forked = await ctx.request(`/api/sessions/${id}/fork`, { method: 'POST', body: '{}' })
+    assert.equal(forked.status, 201, forked.text)
+    const forkId = forked.json.runId
+    assert.notEqual(forkId, runId)
+    const forkSnapshot = await snapshot(ctx, forkId)
+    assert.ok(forkSnapshot.entries.some((e) => e.kind === 'user' && e.text === 'SAY first answer'), 'the fork carries the conversation')
+
+    const deleted = await ctx.request(`/api/sessions/${encodeURIComponent(forkId)}`, { method: 'DELETE' })
+    assert.ok(deleted.status === 200 || deleted.status === 204, deleted.text)
+    assert.ok(!(await list(true)).some((s) => s.runId === forkId), 'the deleted chat is gone')
+    assert.ok((await list()).some((s) => s.runId === runId), 'the original is untouched')
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('CP-35: worktrees from the GUI API: create, list, apply, remove', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 120_000, concurrency: false }, async () => {
+  const dir = fixture()
+  spawnSync('git', ['config', 'core.autocrlf', 'false'], { cwd: dir })
+  const ctx = await runServer(dir)
+  try {
+    const empty = await ctx.request('/api/worktrees')
+    assert.equal(empty.status, 200, empty.text)
+    assert.equal(empty.json.repo, true)
+    assert.deepEqual(empty.json.worktrees, [])
+
+    assert.equal((await ctx.request('/api/worktrees', { method: 'POST', body: JSON.stringify({}) })).status, 400)
+    const created = await ctx.request('/api/worktrees', { method: 'POST', body: JSON.stringify({ name: 'gui feature' }) })
+    assert.equal(created.status, 201, created.text)
+    assert.equal(created.json.branch, 'hy/gui-feature')
+    const listed = await ctx.request('/api/worktrees')
+    assert.equal(listed.json.worktrees.length, 1)
+    assert.match(listed.json.worktrees[0].branch ?? '', /hy\/gui-feature/)
+
+    fs.writeFileSync(path.join(created.json.path, 'FROM_WORKTREE.md'), '# from the worktree\n')
+    const applied = await ctx.request('/api/worktrees/apply', { method: 'POST', body: JSON.stringify({ name: 'gui-feature' }) })
+    assert.equal(applied.status, 200, applied.text)
+    assert.deepEqual(applied.json.applied, ['FROM_WORKTREE.md'])
+    assert.equal(fs.readFileSync(path.join(dir, 'FROM_WORKTREE.md'), 'utf8'), '# from the worktree\n')
+
+    const removed = await ctx.request('/api/worktrees/remove', { method: 'POST', body: JSON.stringify({ name: 'gui-feature' }) })
+    assert.equal(removed.status, 200, removed.text)
+    assert.deepEqual((await ctx.request('/api/worktrees')).json.worktrees, [])
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('CP-36: GUI preferences are saved in ui-state.json and come back after a restart', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 120_000, concurrency: false }, async () => {
+  const dir = fixture()
+  let ctx = await runServer(dir)
+  try {
+    const initial = await ctx.request('/api/ui-prefs')
+    assert.equal(initial.status, 200, initial.text)
+    assert.deepEqual(initial.json.prefs, { statusline: ['tokens', 'cache', 'last'], codeTheme: 'auto', vimMode: false, shortcuts: {} })
+
+    const saved = await ctx.request('/api/ui-prefs', {
+      method: 'PUT',
+      body: JSON.stringify({ statusline: ['model', 'context', 'nonsense'], codeTheme: 'monokai', vimMode: true, shortcuts: { palette: 'Ctrl+P' } }),
+    })
+    assert.equal(saved.status, 200, saved.text)
+    assert.deepEqual(saved.json.prefs, { statusline: ['model', 'context'], codeTheme: 'monokai', vimMode: true, shortcuts: { palette: 'Ctrl+P' } })
+    // A partial update keeps the other fields.
+    const partial = await ctx.request('/api/ui-prefs', { method: 'PUT', body: JSON.stringify({ vimMode: false }) })
+    assert.equal(partial.json.prefs.codeTheme, 'monokai')
+    assert.equal(partial.json.prefs.vimMode, false)
+
+    await ctx.close()
+    ctx = await runServer(dir)
+    const restored = await ctx.request('/api/ui-prefs')
+    assert.deepEqual(restored.json.prefs, { statusline: ['model', 'context'], codeTheme: 'monokai', vimMode: false, shortcuts: { palette: 'Ctrl+P' } })
   } finally {
     await ctx?.close()
     fs.rmSync(dir, { recursive: true, force: true })

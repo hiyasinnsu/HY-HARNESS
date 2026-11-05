@@ -33,14 +33,14 @@ export interface DeliverableFile {
 }
 
 export type ChatEntry =
-  | { id: string; kind: 'user'; runId: string; text: string; ts: number; images?: number; steering?: boolean }
+  | { id: string; kind: 'user'; runId: string; text: string; ts: number; images?: number; steering?: boolean; turn?: number }
   | { id: string; kind: 'assistant'; runId: string; text: string; ts: number; final?: boolean }
   | { id: string; kind: 'thinking'; runId: string; text: string; ts: number; summary?: string; summaryProvisional?: boolean }
   | ChatToolEntry
   | { id: string; kind: 'plan'; runId: string; plan: ChatPlanStep[]; ts: number }
   | { id: string; kind: 'deliverables'; runId: string; files: DeliverableFile[]; ts: number }
   | { id: string; kind: 'notice'; runId: string; text: string; ts: number; level?: 'info' | 'warn' | 'error' }
-  | { id: string; kind: 'approval'; runId: string; requestId: string; request: unknown; ts: number; decision?: 'approved' | 'denied' }
+  | { id: string; kind: 'approval'; runId: string; requestId: string; request: unknown; ts: number; decision?: 'approved' | 'denied'; details?: unknown; reason?: string; scope?: 'once' | 'session' | 'always' }
   | { id: string; kind: 'question'; runId: string; requestId: string; question: string; ts: number; answer?: string }
 
 interface Action {
@@ -223,6 +223,9 @@ export function projectChat(events: readonly SessionEvent[], runId: string): Cha
   // call id until the result creates the card.
   const denials = new Map<string, string>()
   let previousType = ''
+  // CP-33: the turn a user message opened, so the GUI can rewind to it.
+  let currentTurn = 0
+  let taggedTurn = 0
 
   for (const e of events) {
     if (e.runId !== runId) continue
@@ -233,6 +236,7 @@ export function projectChat(events: readonly SessionEvent[], runId: string): Cha
         const turn = Number(p.turn ?? 0)
         pendingCalls.length = 0
         turnStartIndex.set(turn, entries.length)
+        currentTurn = turn
         break
       }
       case 'turn/undo': {
@@ -240,6 +244,8 @@ export function projectChat(events: readonly SessionEvent[], runId: string): Cha
         pendingCalls.length = 0
         const at = turnStartIndex.get(turn)
         if (at !== undefined) entries.length = at
+        currentTurn = turn - 1
+        taggedTurn = Math.min(taggedTurn, currentTurn)
         break
       }
       case 'user/message': {
@@ -249,7 +255,9 @@ export function projectChat(events: readonly SessionEvent[], runId: string): Cha
           entries.push({ id: `event-${e.seq}`, kind: 'notice', runId, text, ts })
           break
         }
-        entries.push({ id: `msg-${e.seq}`, kind: 'user', runId, text, ts, ...(Number(p.images ?? 0) > 0 ? { images: Number(p.images) } : {}) })
+        const opens = currentTurn > taggedTurn
+        if (opens) taggedTurn = currentTurn
+        entries.push({ id: `msg-${e.seq}`, kind: 'user', runId, text, ts, ...(Number(p.images ?? 0) > 0 ? { images: Number(p.images) } : {}), ...(opens ? { turn: currentTurn } : {}) })
         break
       }
       // WP-21: a steering message keeps the user's text verbatim and is marked

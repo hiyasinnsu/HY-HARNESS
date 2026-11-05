@@ -239,3 +239,6 @@ export async function runOnce(message: string, options: SdkOptions & { onEvent?:
     await client.close()
   }
 }
+
+// CP-30: the hy-protocol/1 client (stdio, daemon pipe, WebSocket).
+export * from './protocol-client.js'

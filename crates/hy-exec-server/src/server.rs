@@ -8,8 +8,7 @@ use std::time::Duration;
 use hy_execpolicy::PolicySet;
 use hy_protocol::*;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{RwLock, mpsc, watch};
 
 use crate::checkpoint::{CheckpointEngine, CheckpointError};
 use crate::cmdline::{self, Shell};
@@ -61,12 +60,10 @@ impl Server {
         }
     }
 
-    /// Reads JSON-RPC lines until EOF, `shutdown` or `exit`.
-    pub async fn run(self: Arc<Self>) {
-        let stdin = tokio::io::stdin();
-        let mut lines = BufReader::new(stdin).lines();
+    /// Reads JSON-RPC messages until the transport closes, `shutdown` or `exit`.
+    pub async fn run(self: Arc<Self>, mut lines: mpsc::UnboundedReceiver<std::io::Result<String>>) {
         loop {
-            match lines.next_line().await {
+            match lines.recv().await.transpose() {
                 Ok(Some(line)) => {
                     if line.trim().is_empty() {
                         continue;
@@ -90,12 +87,12 @@ impl Server {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    tracing::error!(error = %e, "stdin read failed");
+                    tracing::error!(error = %e, "transport read failed");
                     break;
                 }
             }
         }
-        self.peer.fail_all("stdin closed");
+        self.peer.fail_all("the client went away");
     }
 
     fn handle_message(self: &Arc<Self>, msg: RpcMessage) -> bool {

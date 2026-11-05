@@ -2,6 +2,7 @@
 import readline from 'node:readline'
 import type { HarnessConfig } from '../../core/dist/index.js'
 import type { AgentEvent, ExecRpcClient } from '../../core/dist/index.js'
+import type { ProtocolHost } from './protocol-host.js'
 import { Conversation } from './session-app.js'
 
 /**
@@ -22,13 +23,20 @@ export interface AcpMessage {
 
 export interface AcpSession {
   id: string
-  conv: Conversation
+  /** Absent when the session runs on a shared ProtocolHost (CP-30). */
+  conv?: Conversation | undefined
   controller: AbortController | undefined
 }
 
 export interface AcpServerOptions {
   config: HarnessConfig
-  client: ExecRpcClient
+  /** Used when no host is given (each session owns a Conversation). */
+  client?: ExecRpcClient
+  /**
+   * CP-30: run prompts on the hy-protocol/1 host, so ACP sessions are protocol
+   * threads with the same turn engine, busy rules and runtime configuration.
+   */
+  host?: ProtocolHost
   input: NodeJS.ReadableStream
   output: NodeJS.WritableStream
   /** ACP protocol version the server announces. */
@@ -150,32 +158,40 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
     }
   }
 
+  // An editor may offer its own permission UI; when it does not, the
+  // session's approval default decides (--yes, full-auto, policy).
+  const askPermission = async (runId: string, command: string, justification?: string): Promise<boolean> => {
+    if (options.config.autoApprove || options.config.fullAuto) return true
+    try {
+      const answer = await request('session/request_permission', {
+        sessionId: runId,
+        toolCall: { title: command, ...(justification ? { content: justification } : {}) },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+        ],
+      })
+      return answer === 'allow' || (typeof answer === 'object' && answer !== null && (answer as { optionId?: unknown }).optionId === 'allow')
+    } catch {
+      return false
+    }
+  }
+
   const openSession = (runId: string): AcpSession => {
     const existing = sessions.get(runId)
     if (existing) return existing
+    if (options.host) {
+      const session: AcpSession = { id: runId, controller: undefined }
+      sessions.set(runId, session)
+      return session
+    }
+    if (!options.client) throw new Error('an ACP server needs a host or an exec client')
     const conv = Conversation.create(
       options.config,
       options.client,
       runId,
       false,
-      // An editor may offer its own permission UI; when it does not, the
-      // session's approval default decides (--yes, full-auto, policy).
-      async (approval) => {
-        if (options.config.autoApprove || options.config.fullAuto) return true
-        try {
-          const answer = await request('session/request_permission', {
-            sessionId: runId,
-            toolCall: { title: approval.command, ...(approval.justification ? { content: approval.justification } : {}) },
-            options: [
-              { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
-              { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
-            ],
-          })
-          return answer === 'allow' || (typeof answer === 'object' && answer !== null && (answer as { optionId?: unknown }).optionId === 'allow')
-        } catch {
-          return false
-        }
-      },
+      (approval) => askPermission(runId, approval.command, approval.justification),
       (question) => Promise.resolve(question),
       (event) => stream(runId, event),
       { checkpoints: false },
@@ -232,7 +248,9 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
           const controller = new AbortController()
           session.controller = controller
           try {
-            const final = await session.conv.turn(text, images, controller.signal)
+            const final = options.host
+              ? await options.host.runTurn(runId, text, images, (event) => stream(runId, event), (command, justification) => askPermission(runId, command, justification), controller.signal)
+              : await session.conv!.turn(text, images, controller.signal)
             // The turn's answer is streamed in chunks; a non-streaming provider
             // still has to deliver its final text.
             if (final && !streamed.has(runId)) {

@@ -237,8 +237,11 @@ export interface ApprovalOptions {
   guardian?: Guardian
   /** CP-19: a permissionRequest hook may deny before anyone else decides. */
   hooks?: Hooks
-  /** Present only when a user can answer (interactive terminal). */
-  askUser?: (request: ApprovalRequest) => Promise<boolean>
+  /**
+   * Present only when a user can answer (interactive terminal, GUI). CP-34: the
+   * GUI answers with a decision so a denial reason reaches the worker.
+   */
+  askUser?: (request: ApprovalRequest) => Promise<boolean | { approved: boolean; reason?: string }>
 }
 
 /** The approval chain: policy → `--yes` → confined auto → Guardian → user. */
@@ -269,7 +272,9 @@ export function createApprover(options: ApprovalOptions): ApprovalCallback {
       if (!options.askUser) {
         return { approved: false, by: 'user', reason: why ?? 'no user is available to approve it (headless run)' }
       }
-      return { approved: await options.askUser(request), by: 'user' }
+      const answer = await options.askUser(request)
+      if (typeof answer === 'boolean') return { approved: answer, by: 'user' }
+      return { approved: answer.approved, by: 'user', ...(answer.reason ? { reason: answer.reason } : {}) }
     }
     if (request.sandbox !== undefined && USER_ONLY_MODES.has(request.sandbox)) {
       return askUser(`sandbox ${request.sandbox} needs a user approval; Guardian may not approve it`)

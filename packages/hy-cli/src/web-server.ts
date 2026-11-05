@@ -15,6 +15,10 @@ import {
   readEvents,
   metricsSnapshot,
   describeHooks,
+  WorktreeManager,
+  worktreesDir,
+  roleSupportsImages,
+  usesNativeTools,
   resolveServerPath,
   resolveSandboxMode,
   SessionLog,
@@ -56,6 +60,9 @@ import { applyAgentEvent, projectChat, stripPlanPrefix, type ChatEntry } from '.
 import { API_VERSION } from './api-schema.js'
 import { matchContract, validateRequest } from './api-contract.js'
 import { DocumentError, previewDocument } from './documents.js'
+import { approvalKey, describeApproval, rememberAlways, type ApprovalScope } from './approval-view.js'
+import { normalizePrefs, type UiPrefs } from './ui-prefs.js'
+import { applyImport, importPlanView, planImport, type ImportKind } from './import.js'
 import { buildDoctorReport, doctorSandbox, findSecretBinary } from './doctor.js'
 import { applyOnboardingDefaults, OnboardingError, onboardingView, readOnboarding, writeOnboarding } from './onboarding.js'
 import {
@@ -295,6 +302,8 @@ interface UiState {
   generatedTitles: Record<string, { title: string; at: number; source: string }>
   /** Runs whose transcript was deleted; late events must not bring them back. */
   deleted: string[]
+  /** CP-36: statusline, code theme, Vim mode and shortcuts. */
+  prefs?: UiPrefs
 }
 
 interface AutomationSchedule {
@@ -373,7 +382,7 @@ interface WebSession {
   controller?: AbortController | undefined
   entries: ChatEntry[]
   subscribers: Set<http.ServerResponse>
-  pendingApprovals: Map<string, Pending<boolean>>
+  pendingApprovals: Map<string, Pending<boolean | { approved: boolean; reason?: string }>>
   pendingQuestions: Map<string, Pending<string>>
   planMode: boolean
   /** WP-12: the session's live sandbox mode (persisted in the session log). */
@@ -751,6 +760,9 @@ function roleSummary(role: RoleConfig) {
     ...(role.temperature !== undefined ? { temperature: role.temperature } : {}),
     ...(role.pricing !== undefined ? { pricing: role.pricing } : {}),
     nativeTools: role.nativeTools,
+    // CP-35: what the model picker shows for the role in use.
+    toolMode: usesNativeTools(role) ? 'native' : 'text',
+    vision: roleSupportsImages(role),
   }
 }
 
@@ -1055,6 +1067,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
               }),
             )
           : {},
+      prefs: normalizePrefs(parsed.prefs),
     }
   } catch {
     // First launch or an unreadable file: start with no pins/archives.
@@ -1710,11 +1723,23 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     broadcast(session, { type: 'notice', level: view.error ? 'warn' : 'info', text })
   }
 
-  const requestApproval = (session: WebSession, request: ApprovalRequest): Promise<boolean> => {
+  /** CP-34: commands approved "for this session", per chat, until the server stops. */
+  const sessionApprovals = new Map<string, Set<string>>()
+
+  const requestApproval = (session: WebSession, request: ApprovalRequest): Promise<boolean | { approved: boolean; reason?: string }> => {
+    const key = approvalKey(request)
+    if (sessionApprovals.get(session.runId)?.has(key)) {
+      const entry: ChatEntry = { id: `approval-auto-${randomBytes(4).toString('hex')}`, kind: 'notice', runId: session.runId, text: `approved for this session: ${request.command}`, ts: Date.now() }
+      session.entries.push(entry)
+      broadcast(session, { type: 'entry', entry })
+      return Promise.resolve(true)
+    }
     const requestId = `apr-${randomBytes(6).toString('hex')}`
-    session.entries.push({ id: `approval-${requestId}`, kind: 'approval', runId: session.runId, requestId, request, ts: Date.now() })
-    broadcast(session, { type: 'approval/request', requestId, request })
-    return new Promise<boolean>((resolve) => {
+    // CP-34: cwd, sandbox effect, paths and hosts travel with the request.
+    const details = describeApproval(request, config.workspaceRoot)
+    session.entries.push({ id: `approval-${requestId}`, kind: 'approval', runId: session.runId, requestId, request, details, ts: Date.now() })
+    broadcast(session, { type: 'approval/request', requestId, request, details })
+    return new Promise<boolean | { approved: boolean; reason?: string }>((resolve) => {
       const timer = setTimeout(() => {
         session.pendingApprovals.delete(requestId)
         session.entries.push({ id: `approval-timeout-${requestId}`, kind: 'notice', runId: session.runId, text: `approval timed out: ${request.command}`, ts: Date.now(), level: 'warn' })
@@ -2744,7 +2769,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     } else {
       // The live card must hide the same context the projection strips, or a
       // prefixed turn would look different before and after a reload.
-      const entry: ChatEntry = { id: `user-${Date.now()}`, kind: 'user', runId: session.runId, text: stripPlanPrefix(message), ts: Date.now(), ...(images.length > 0 ? { images: images.length } : {}) }
+      const entry: ChatEntry = { id: `user-${Date.now()}`, kind: 'user', runId: session.runId, text: stripPlanPrefix(message), ts: Date.now(), ...(images.length > 0 ? { images: images.length } : {}), turn }
       session.entries.push(entry)
       broadcast(session, { type: 'entry', entry })
     }
@@ -3025,6 +3050,88 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
           json(res, 200, metricsSnapshot({ uptimeSeconds: process.uptime(), sessions: sessions.size, rssBytes: process.memoryUsage().rss }))
           return
         }
+        // CP-31: the import wizard. GET shows the plan (with diffs); POST writes
+        // the kinds the user ticked, recomputing the plan so it matches disk.
+        if (pathname === '/api/import' && method === 'GET') {
+          const source = url.searchParams.get('source')
+          if (source !== 'claude' && source !== 'dsh') {
+            json(res, 400, { error: 'source must be claude or dsh' })
+            return
+          }
+          const items = planImport(source, { workspaceRoot: config.workspaceRoot, stateDir: config.stateDir, userConfigDir: userConfigDir() })
+          json(res, 200, { source, items: importPlanView(items) })
+          return
+        }
+        if (pathname === '/api/import' && method === 'POST') {
+          const body = await readBody()
+          const source = body.source
+          if (source !== 'claude' && source !== 'dsh') {
+            json(res, 400, { error: 'source must be claude or dsh' })
+            return
+          }
+          const kinds = Array.isArray(body.kinds) ? new Set(body.kinds.filter((k): k is ImportKind => typeof k === 'string') as ImportKind[]) : undefined
+          const items = planImport(source, { workspaceRoot: config.workspaceRoot, stateDir: config.stateDir, userConfigDir: userConfigDir() })
+          const result = applyImport(items, kinds)
+          broadcastSessions()
+          json(res, result.failed.length > 0 ? 207 : 200, result)
+          return
+        }
+
+        // CP-36: GUI preferences, kept in ui-state.json across restarts.
+        if (pathname === '/api/ui-prefs' && method === 'GET') {
+          json(res, 200, { prefs: normalizePrefs(uiState.prefs) })
+          return
+        }
+        if (pathname === '/api/ui-prefs' && method === 'PUT') {
+          const body = await readBody()
+          // A partial update keeps the fields it does not name.
+          const prefs = normalizePrefs({ ...normalizePrefs(uiState.prefs), ...body })
+          uiState.prefs = prefs
+          saveUiState()
+          json(res, 200, { prefs })
+          return
+        }
+
+        // CP-35: git worktrees from the GUI (the same manager as `hy worktree`).
+        if (pathname === '/api/worktrees' && method === 'GET') {
+          const manager = new WorktreeManager(config.workspaceRoot, config.stateDir)
+          if (!manager.isRepo()) {
+            json(res, 200, { repo: false, dir: worktreesDir(config.stateDir), worktrees: [] })
+            return
+          }
+          const dir = worktreesDir(config.stateDir)
+          const own = (p: string) => path.resolve(p).toLowerCase().startsWith(path.resolve(dir).toLowerCase() + path.sep)
+          json(res, 200, { repo: true, dir, worktrees: manager.list().filter((w) => own(w.path)) })
+          return
+        }
+        if (
+          (pathname === '/api/worktrees' && method === 'POST') ||
+          (pathname === '/api/worktrees/apply' && method === 'POST') ||
+          (pathname === '/api/worktrees/remove' && method === 'POST')
+        ) {
+          const body = await readBody()
+          const name = typeof body.name === 'string' ? body.name.trim() : ''
+          if (!name) {
+            json(res, 400, { error: 'name is required' })
+            return
+          }
+          const manager = new WorktreeManager(config.workspaceRoot, config.stateDir)
+          try {
+            if (pathname === '/api/worktrees') {
+              json(res, 201, manager.create(name, typeof body.base === 'string' && body.base.trim() ? { base: body.base.trim() } : {}))
+            } else if (pathname === '/api/worktrees/apply') {
+              const result = manager.apply(name, { threeWay: body.threeWay !== false })
+              json(res, result.conflicts.length > 0 ? 409 : 200, result)
+            } else {
+              manager.remove(name, { force: body.force === true })
+              json(res, 200, { removed: name })
+            }
+          } catch (error) {
+            json(res, 400, { error: errorMessage(error) })
+          }
+          return
+        }
+
         // CP-32: `/hooks` and `/doctor` in the GUI.
         if (pathname === '/api/hooks' && method === 'GET') {
           json(res, 200, { hooks: describeHooks(config.hooks) })
@@ -3892,7 +3999,12 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             const body = await readBody()
             const requestId = typeof body.requestId === 'string' ? body.requestId : ''
             const approved = body.approved === true
-            const reason = typeof body.reason === 'string' ? body.reason : undefined
+            const reason = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : undefined
+            const scope: ApprovalScope = body.scope === 'session' || body.scope === 'always' ? body.scope : 'once'
+            if (body.scope !== undefined && body.scope !== 'once' && body.scope !== 'session' && body.scope !== 'always') {
+              json(res, 400, { error: 'scope must be once, session or always' })
+              return
+            }
             if (session.kind === 'worker') {
               // The user is the final authority, also for worker requests the
               // orchestrator may not approve.
@@ -3908,12 +4020,35 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
               json(res, 404, { error: `no pending approval ${requestId}` })
               return
             }
+            // CP-34: remember the approval before resolving, so a refused
+            // "always" (user-only sandbox) leaves the request pending.
+            let remembered: { scope: ApprovalScope; rule?: string } | undefined
+            if (approved && scope !== 'once' && pending.request) {
+              if (scope === 'always') {
+                try {
+                  const policyPath = config.userPolicyPath ?? path.join(userConfigDir(), 'policy.star')
+                  remembered = { scope, rule: rememberAlways(policyPath, pending.request) }
+                } catch (error) {
+                  json(res, 400, { error: errorMessage(error) })
+                  return
+                }
+              } else {
+                remembered = { scope }
+              }
+              const keys = sessionApprovals.get(session.runId) ?? new Set<string>()
+              keys.add(approvalKey(pending.request))
+              sessionApprovals.set(session.runId, keys)
+            }
             session.pendingApprovals.delete(requestId)
-            pending.resolve(approved)
+            pending.resolve(approved ? true : { approved: false, ...(reason ? { reason: `denied by the user: ${reason}` } : {}) })
             const entry = session.entries.find((e) => e.kind === 'approval' && e.requestId === requestId)
-            if (entry?.kind === 'approval') entry.decision = approved ? 'approved' : 'denied'
-            broadcast(session, { type: 'approval/decision', requestId, approved, ...(reason ? { reason } : {}) })
-            json(res, 200, { ok: true })
+            if (entry?.kind === 'approval') {
+              entry.decision = approved ? 'approved' : 'denied'
+              if (reason) entry.reason = reason
+              if (remembered) entry.scope = remembered.scope
+            }
+            broadcast(session, { type: 'approval/decision', requestId, approved, ...(reason ? { reason } : {}), ...(remembered ? { scope: remembered.scope } : {}) })
+            json(res, 200, { ok: true, ...(remembered ? { remembered: remembered.scope } : {}), ...(remembered?.rule ? { rule: remembered.rule } : {}) })
             return
           }
 
@@ -3941,7 +4076,17 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
               return
             }
             const conv = ensureConversation(session)
-            const result = await conv.undo()
+            // CP-33: `{ toTurn }` rewinds several turns at once (Esc Esc).
+            const undoBody = await readBody()
+            if (undoBody.toTurn !== undefined && (!Number.isInteger(undoBody.toTurn) || Number(undoBody.toTurn) < 1)) {
+              json(res, 400, { error: 'toTurn must be a turn number (1 or more)' })
+              return
+            }
+            if (session.busy) {
+              json(res, 409, { error: 'a turn is running; stop it before rewinding' })
+              return
+            }
+            const result = undoBody.toTurn !== undefined ? await conv.rewind(Number(undoBody.toTurn)) : await conv.undo()
             refreshTranscript(session, config.stateDir)
             broadcast(session, { type: 'transcript', entries: session.entries })
             broadcast(session, { type: 'notice', text: result })

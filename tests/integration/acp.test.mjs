@@ -125,3 +125,29 @@ test('an ACP session streams a turn, a tool call and a cancel', { skip: skipReas
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('CP-30: an ACP session is a hy-protocol thread (same host, same log)', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 180_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const acp = client(dir)
+  try {
+    await acp.rpc('initialize', { protocolVersion: 1 })
+    const { sessionId } = (await acp.rpc('session/new', { cwd: dir, mcpServers: [] })).result
+    const done = await acp.rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'SAY via ACP' }] })
+    assert.equal(done.result.stopReason, 'end_turn')
+  } finally {
+    await acp.close()
+  }
+  try {
+    // The protocol server over the same workspace lists and reads that session.
+    const env = { ...process.env, HY_CONFIG_DIR: path.join(dir, 'config'), LOCALAPPDATA: path.join(dir, 'localappdata') }
+    const { spawnSync } = await import('node:child_process')
+    const lines = ['initialize', 'thread/list'].map((method, i) => JSON.stringify({ jsonrpc: '2.0', id: i + 1, method, params: {} })).join('\n')
+    const r = spawnSync(process.execPath, [cli, 'protocol', 'serve', '--cwd', dir, '--mock'], { env, input: `${lines}\n`, encoding: 'utf8', timeout: 60_000 })
+    const listed = r.stdout.trim().split('\n').map((l) => JSON.parse(l)).find((m) => m.id === 2)
+    const thread = listed.result.threads.find((t) => t.threadId.startsWith('acp-'))
+    assert.ok(thread, r.stdout)
+    assert.match(thread.title ?? '', /SAY via ACP/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

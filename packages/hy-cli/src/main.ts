@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -102,6 +102,10 @@ import {
 import { startWebServer } from './web-server.js'
 import { createAcpServer } from './acp.js'
 import { createSdkServer } from './sdk-server.js'
+import { ProtocolHost } from './protocol-host.js'
+import { applyImport, importPlanView, planImport, renderImportPlan, type ImportKind } from './import.js'
+import { defaultPipePath, listenPipe, listenWebSocket, serveStream } from './protocol-transport.js'
+import { DaemonRunningError, claimLock, daemonInfoPath, liveDaemon, newToken, processAlive, readDaemonInfo, stateKey, waitForDaemon, type DaemonInfo } from './daemon.js'
 import {
   downloadRelease,
   loadFeed,
@@ -146,6 +150,8 @@ Usage:
   hy secret list|set <name>|remove <name> DPAPI-protected API keys (value on stdin for set)
   hy worktree list|create <name>|apply <name>|remove <name> [--base <ref>] [--force] [--no-3way]
   hy protocol schema|serve               JSON Schema of the HTTP API, or JSON-RPC over stdio
+  hy serve [start|status|stop] [--daemon] [--ws <port>]  the resident hy-protocol/1 server
+  hy import claude|dsh [--yes] [--json] [--only k1,k2]  bring AGENTS.md, MCP, hooks, skills, prompts, memory or sessions over
   hy doctor [--json]                    diagnostics: workspace, sandbox, providers, MCP
   hy features [list|enable <name>|disable <name>] [--json]
   hy index status|rebuild [options]       full-text session index (FTS5) status or a rebuild
@@ -1277,131 +1283,30 @@ async function protocolCommand(p: Parsed): Promise<number> {
     return 2
   }
   const config = loadConfig(toOverrides(p))
-  const logFile = sessionLogPath(config.stateDir)
-  let opened: Awaited<ReturnType<typeof openClient>> | undefined
-  let server: ProtocolServer
-  const bridge = new ApprovalBridge({ send: (method, params) => server.send(method, params) })
-  const conversations = new Map<string, Conversation>()
-  const turnControllers = new Map<string, AbortController>()
-  const host = {
-    start: async (
-      message: string,
-      images: ImageInput[],
-      onEvent: (event: AgentEvent) => void,
-      threadId?: string,
-    ) => {
-      const runId = threadId ?? newRunId()
-      // Validate before spawning the exec server, so a bad id is a clean -32602.
-      if (
-        threadId !== undefined &&
-        !conversations.has(threadId) &&
-        !listThreads(logFile).some((thread) => thread.threadId === threadId)
-      ) {
-        throw new ProtocolRpcError(ERROR.invalidParams, `unknown thread ${threadId}`)
-      }
-      if (!opened) opened = await openClient(p)
-      let conv = conversations.get(runId)
-      if (!conv) {
-        conv = Conversation.create(
-          opened.config,
-          opened.client,
-          runId,
-          false,
-          (request) =>
-            bridge.ask({
-              command: request.command,
-              ...(request.sandbox !== undefined ? { sandbox: String(request.sandbox) } : {}),
-              ...(request.justification !== undefined ? { justification: request.justification } : {}),
-            }),
-          undefined,
-          onEvent,
-        )
-        conversations.set(runId, conv)
-      }
-      const controller = new AbortController()
-      turnControllers.set(runId, controller)
-      try {
-        const final = await conv.turn(message, images, controller.signal)
-        return { threadId: runId, final }
-      } finally {
-        turnControllers.delete(runId)
-      }
-    },
-    running: (threadId: string) => turnControllers.has(threadId),
-    steer: (threadId: string, message: string) => {
-      const conv = conversations.get(threadId)
-      if (!conv) return false
-      conv.steer(message)
-      return true
-    },
-    cancel: (threadId: string) => {
-      const controller = turnControllers.get(threadId)
-      if (!controller) return false
-      controller.abort()
-      return true
-    },
+  const host = protocolHost(p, config)
+  try {
+    // stdio is a trusted transport (the parent started us): no token.
+    await serveStream(host, process.stdin, (line) => process.stdout.write(`${line}\n`), {
+      log: (line) => console.error(`[hy protocol] ${line}`),
+    })
+  } finally {
+    await host.close()
   }
-  server = new ProtocolServer({
-    methods: {
-      initialize: initializeHandler({ threads: true, turns: true, approvals: true }),
-      'turn/start': turnStartMethod(host, (method, params) => server.send(method, params)),
-      'turn/cancel': turnCancelMethod(host),
-      'turn/steer': turnSteerMethod(host),
-      'turn/status': turnStatusMethod(host),
-      'approval/respond': { request: (params) => bridge.respond(params) },
-      'thread/list': {
-        request: (params) => {
-          const limit = params !== null && typeof params === 'object' ? (params as { limit?: unknown }).limit : undefined
-          if (limit !== undefined && (typeof limit !== 'number' || !Number.isFinite(limit) || limit < 0)) {
-            throw new ProtocolRpcError(ERROR.invalidParams, 'limit must be a non-negative number')
-          }
-          return { threads: listThreads(logFile, limit === undefined ? {} : { limit }) }
-        },
-      },
-      'thread/read': {
-        request: (params) => {
-          const record = params !== null && typeof params === 'object' ? (params as { threadId?: unknown; offset?: unknown; limit?: unknown }) : {}
-          const threadId = record.threadId
-          if (typeof threadId !== 'string' || threadId.length === 0) throw new ProtocolRpcError(ERROR.invalidParams, 'threadId is required')
-          for (const [name, value] of [['offset', record.offset], ['limit', record.limit]] as const) {
-            if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
-              throw new ProtocolRpcError(ERROR.invalidParams, `${name} must be a non-negative number`)
-            }
-          }
-          return readThread(logFile, threadId, {
-            ...(typeof record.offset === 'number' ? { offset: record.offset } : {}),
-            ...(typeof record.limit === 'number' ? { limit: record.limit } : {}),
-          })
-        },
-      },
+  return 0
+}
+
+/** CP-27/29: the shared host; the exec server starts on the first turn. */
+function protocolHost(p: Parsed, config: HarnessConfig): ProtocolHost {
+  return new ProtocolHost({
+    config,
+    overrides: toOverrides(p),
+    openClient: async () => {
+      const opened = await openClient(p)
+      await startServices(opened.config)
+      return opened
     },
-    notify: (method, params) => console.log(JSON.stringify({ jsonrpc: '2.0', method, params })),
     log: (line) => console.error(`[hy protocol] ${line}`),
   })
-  let buffer = ''
-  const handleLine = async (line: string): Promise<void> => {
-    if (line.trim().length === 0) return
-    const result = await server.handle(line)
-    if (result.response !== undefined) process.stdout.write(`${result.response}\n`)
-  }
-  // Lines are handled concurrently: `turn/start` may wait for `approval/respond`,
-  // which arrives as another line on the same stream.
-  const tasks: Array<Promise<void>> = []
-  process.stdin.setEncoding('utf8')
-  for await (const chunk of process.stdin) {
-    buffer += String(chunk)
-    let index: number
-    while ((index = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, index).trim()
-      buffer = buffer.slice(index + 1)
-      if (line.length > 0) tasks.push(handleLine(line))
-    }
-  }
-  if (buffer.trim().length > 0) tasks.push(handleLine(buffer.trim()))
-  await Promise.all(tasks)
-  bridge.denyAll()
-  if (opened) await opened.client.stop()
-  return 0
 }
 /** CP-39: `hy doctor` gathers the facts a support request needs. */
 /** The `hy doctor` report for a loaded config; `client` is asked for the sandbox. */
@@ -1685,10 +1590,7 @@ async function updateCommand(p: Parsed): Promise<number> {
 
 /** `hy serve --sdk`: the JSON-RPC SDK server over stdio (WP-51). */
 async function serveCommand(p: Parsed): Promise<number> {
-  if (!bool(p.flags, 'sdk')) {
-    console.error('hy serve: pass --sdk (the JSON-RPC stdio server)')
-    return 2
-  }
+  if (!bool(p.flags, 'sdk')) return daemonCommand(p)
   const config = loadConfig(toOverrides(p))
   const { client } = await openClient(p)
   try {
@@ -1702,18 +1604,168 @@ async function serveCommand(p: Parsed): Promise<number> {
   }
 }
 
+/**
+ * CP-27: `hy serve [start|status|stop]`, the resident hy-protocol/1 server.
+ *
+ *   hy serve start [--daemon] [--ws <port>] [--host 127.0.0.1] [--allow-remote] [--json]
+ *
+ * One daemon per workspace state directory. `--daemon` detaches and prints the
+ * connection info (pipe, WebSocket URL, token); it is idempotent: a running
+ * daemon is reported instead of started twice.
+ */
+async function daemonCommand(p: Parsed): Promise<number> {
+  const action = p.positional[0] ?? 'start'
+  const config = loadConfig(toOverrides(p))
+  const json = bool(p.flags, 'json')
+  const print = (info: DaemonInfo, note: string) => {
+    if (json) console.log(JSON.stringify({ ...info, note }))
+    else console.log(`${note}: pid ${info.pid}, pipe ${info.pipe}${info.ws ? `, ${info.ws}` : ''}`)
+  }
+  if (action === 'status') {
+    const live = await liveDaemon(config.stateDir)
+    if (!live) {
+      if (json) console.log(JSON.stringify({ running: false }))
+      else console.log('no daemon is running for this workspace')
+      return 1
+    }
+    print(live, 'running')
+    return 0
+  }
+  if (action === 'stop') {
+    const info = readDaemonInfo(config.stateDir)
+    if (!info || !processAlive(info.pid)) {
+      fs.rmSync(daemonInfoPath(config.stateDir), { force: true })
+      console.log('no daemon is running for this workspace')
+      return 0
+    }
+    process.kill(info.pid)
+    for (let i = 0; i < 50 && processAlive(info.pid); i++) await new Promise((resolve) => setTimeout(resolve, 100))
+    fs.rmSync(daemonInfoPath(config.stateDir), { force: true })
+    console.log(`stopped the daemon (pid ${info.pid})`)
+    return 0
+  }
+  if (action !== 'start') {
+    console.error(`hy serve: unknown action ${action}; expected start, status or stop (or --sdk)`)
+    return 2
+  }
+  const already = await liveDaemon(config.stateDir)
+  if (already) {
+    print(already, 'already running')
+    return 0
+  }
+  if (bool(p.flags, 'daemon')) {
+    // Re-run ourselves without --daemon, detached, and wait for the lock.
+    const args = process.argv.slice(2).filter((a) => a !== '--daemon')
+    const child = spawn(process.execPath, [process.argv[1]!, ...args], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      cwd: process.cwd(),
+      env: process.env,
+    })
+    child.unref()
+    const info = await waitForDaemon(config.stateDir)
+    print(info, 'started')
+    return 0
+  }
+  const wsPort = str(p.flags, 'ws')
+  const bindHost = str(p.flags, 'host') ?? '127.0.0.1'
+  const token = newToken()
+  const pipe = defaultPipePath(stateKey(config.stateDir))
+  const host = protocolHost(p, config)
+  const log = (line: string) => console.error(`[hy serve] ${line}`)
+  let pipeServer: import('node:net').Server | undefined
+  let wsServer: import('node:http').Server | undefined
+  let release: (() => void) | undefined
+  try {
+    if (process.platform !== 'win32') fs.rmSync(pipe, { force: true })
+    const info: DaemonInfo = { pid: process.pid, pipe, token, startedAt: Date.now(), version: HARNESS_VERSION, workspace: config.workspaceRoot }
+    if (wsPort !== undefined) {
+      wsServer = await listenWebSocket(host, { port: Number(wsPort), host: bindHost, allowRemote: bool(p.flags, 'allow-remote'), token, log })
+      const address = wsServer.address()
+      const port = typeof address === 'object' && address ? address.port : Number(wsPort)
+      info.ws = `ws://${bindHost.includes(':') ? `[${bindHost}]` : bindHost}:${port}`
+    }
+    release = await claimLock(config.stateDir, info)
+    pipeServer = await listenPipe(host, pipe, { token, log })
+    print(info, 'listening')
+    await new Promise<void>((resolve) => {
+      for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK'] as const) process.once(signal, () => resolve())
+      process.once('disconnect', () => resolve())
+    })
+    return 0
+  } catch (error) {
+    if (error instanceof DaemonRunningError) {
+      print(error.info, 'already running')
+      return 0
+    }
+    console.error(`hy serve: ${error instanceof Error ? error.message : String(error)}`)
+    return 1
+  } finally {
+    release?.()
+    pipeServer?.close()
+    wsServer?.close()
+    await host.close()
+  }
+}
+
+/**
+ * CP-31: `hy import claude|dsh`. Shows every change with its diff and writes
+ * only after `--yes` or a "y" at the prompt; without a terminal and without
+ * `--yes` it is a dry run.
+ */
+async function importCommand(p: Parsed): Promise<number> {
+  const source = p.positional[0]
+  if (source !== 'claude' && source !== 'dsh') {
+    console.error('usage: hy import claude|dsh [--yes] [--json] [--only agents,mcp,hooks,skills,prompts,memory,sessions]')
+    return 2
+  }
+  const config = loadConfig(toOverrides(p))
+  const only = str(p.flags, 'only')
+  const kinds = only ? new Set(only.split(',').map((k) => k.trim()).filter(Boolean) as ImportKind[]) : undefined
+  const items = planImport(source, { workspaceRoot: config.workspaceRoot, stateDir: config.stateDir, userConfigDir: userConfigDir() }).filter((i) => !kinds || kinds.has(i.kind))
+  const pending = items.filter((i) => i.action !== 'skip')
+  if (bool(p.flags, 'json') && !bool(p.flags, 'yes')) {
+    console.log(JSON.stringify({ source, items: importPlanView(items) }, null, 2))
+    return 0
+  }
+  console.log(renderImportPlan(items))
+  if (pending.length === 0) {
+    console.log('\nnothing to write')
+    return 0
+  }
+  let accepted = bool(p.flags, 'yes')
+  if (!accepted && process.stdin.isTTY) {
+    const reader = new LineReader()
+    const answer = await reader.next(`\nWrite ${pending.length} change(s)? [y/N] `)
+    reader.close()
+    accepted = /^y(es)?$/i.test((answer ?? '').trim())
+  }
+  if (!accepted) {
+    console.log('\nnothing written (pass --yes to apply)')
+    return 0
+  }
+  const result = applyImport(items)
+  if (bool(p.flags, 'json')) console.log(JSON.stringify(result, null, 2))
+  else {
+    for (const w of result.written) console.log(`wrote ${w}`)
+    for (const f of result.failed) console.error(`failed: ${f}`)
+  }
+  return result.failed.length === 0 ? 0 : 1
+}
+
 /** `hy acp`: an ACP v1 server over stdio, for editors that speak ACP (WP-50). */
 async function acpCommand(p: Parsed): Promise<number> {
+  // CP-30: ACP sessions run on the same protocol host as `hy protocol serve`
+  // and `hy serve`, so they are ordinary threads.
   const config = loadConfig(toOverrides(p))
-  const { client } = await openClient(p)
+  const host = protocolHost(p, config)
   try {
-    await startServices(config)
-    const server = createAcpServer({ config, client, input: process.stdin, output: process.stdout })
+    const server = createAcpServer({ config, host, input: process.stdin, output: process.stdout })
     await server.run()
     return 0
   } finally {
-    await closeServices()
-    await client.stop()
+    await host.close()
   }
 }
 
@@ -1746,6 +1798,8 @@ async function main(): Promise<number> {
       return acpCommand(parsed)
     case 'serve':
       return serveCommand(parsed)
+    case 'import':
+      return importCommand(parsed)
     case 'review':
       return review(parsed)
     case 'mcp-server':

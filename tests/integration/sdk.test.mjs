@@ -97,3 +97,52 @@ test('the Python package runs an example against the SDK server', { timeout: 180
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('CP-30: the Python ProtocolClient runs a turn over hy-protocol/1', { timeout: 180_000, concurrency: false }, () => {
+  const python = spawnSync('python', ['--version'], { encoding: 'utf8' })
+  if (python.status !== 0) {
+    console.log('python is not available; skipping the example')
+    return
+  }
+  const dir = fixture()
+  try {
+    const run = spawnSync('python', [path.join(repo, 'python', 'examples', 'protocol_run.py'), '--cli', cli, '--cwd', dir, '--mock', 'SAY hello over protocol'], {
+      encoding: 'utf8',
+      env: { ...process.env, ...env(dir) },
+      timeout: 120_000,
+    })
+    assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`)
+    assert.match(run.stdout, /protocol: hy-protocol\/1/)
+    assert.match(run.stdout, /final: hello over protocol/)
+    assert.match(run.stdout, /listed: True/)
+    assert.match(run.stdout, /model: mock-2/)
+    assert.doesNotMatch(run.stdout, /events: 0\b/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('CP-30: the TypeScript ProtocolClient over stdio: events, approvals and runtime config', { timeout: 180_000, concurrency: false }, async () => {
+  const sdkModule = await import(new URL('../../packages/sdk/dist/index.js', import.meta.url).href)
+  const dir = fixture()
+  let client
+  try {
+    const asked = []
+    client = await sdkModule.ProtocolClient.connect(
+      { kind: 'stdio', cli, cwd: dir, args: ['--mock'], env: env(dir) },
+      { onApproval: (req) => (asked.push(req.command), false) },
+    )
+    const events = []
+    const r = await client.turn('CALL shell {"command":"npm install"}', { onEvent: (event) => events.push(event.type) })
+    assert.deepEqual(asked, ['npm install'])
+    assert.match(r.final, /not approved/)
+    assert.ok(events.includes('tool-error'), events.join(','))
+    assert.equal((await client.status(r.threadId)).running, false)
+    const read = await client.readThread(r.threadId)
+    assert.ok(read.total >= 2)
+    assert.equal((await client.setModel('mock-3')).model.model, 'mock-3')
+  } finally {
+    await client?.close()
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+  }
+})

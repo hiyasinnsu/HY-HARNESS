@@ -526,7 +526,7 @@ function childRunner(
   agentId: string,
   readOnly: boolean,
   o: {
-    askUser?: (request: ApprovalRequest) => Promise<boolean>
+    askUser?: (request: ApprovalRequest) => Promise<boolean | { approved: boolean; reason?: string }>
     answer?: (question: string) => Promise<string>
     print: (event: AgentEvent) => void
     sandboxMode: () => SandboxMode
@@ -634,7 +634,7 @@ export function approvals(
   config: HarnessConfig,
   objective: string,
   budget?: Budget4D,
-  askUser?: (request: ApprovalRequest) => Promise<boolean>,
+  askUser?: (request: ApprovalRequest) => Promise<boolean | { approved: boolean; reason?: string }>,
   sessionId?: string,
   hooks?: import('../../core/dist/index.js').Hooks,
 ): { approve: ApprovalCallback; guardian?: Guardian } {
@@ -678,8 +678,8 @@ export async function openClient(overrides: CliOverrides, execServer?: string) {
         .map((root) => root.path),
     ]),
   ]
-  const client = await ExecRpcClient.start(serverPath, {
-    protocolVersion: 1,
+  const init = {
+    protocolVersion: 1 as const,
     workspaceRoot: config.workspaceRoot,
     stateDir: config.stateDir,
     sandbox: config.sandbox,
@@ -691,7 +691,15 @@ export async function openClient(overrides: CliOverrides, execServer?: string) {
     readOnly: config.readOnlySubpaths,
     ...(config.userPolicyPath !== undefined ? { userPolicyPath: config.userPolicyPath } : {}),
     ...(config.projectPolicyPath !== undefined ? { projectPolicyPath: config.projectPolicyPath } : {}),
-  })
+  }
+  // CP-28: an exec server started elsewhere (`hy-exec-server --listen ws://…`).
+  const remote = process.env.HY_EXEC_URL?.trim()
+  if (remote) {
+    const token = process.env.HY_EXEC_TOKEN?.trim()
+    if (!token) throw new Error('HY_EXEC_URL needs HY_EXEC_TOKEN (the token the exec server was started with)')
+    return { config, client: await ExecRpcClient.connect(remote, token, init) }
+  }
+  const client = await ExecRpcClient.start(serverPath, init)
   return { config, client }
 }
 
@@ -1135,7 +1143,7 @@ export class Conversation {
     client: ExecRpcClient,
     runId: string,
     json: boolean,
-    askUser?: (request: ApprovalRequest) => Promise<boolean>,
+    askUser?: (request: ApprovalRequest) => Promise<boolean | { approved: boolean; reason?: string }>,
     answer?: (question: string) => Promise<string>,
     onEvent?: (event: AgentEvent) => void,
     options: ConversationOptions = {},
@@ -1568,6 +1576,24 @@ export class Conversation {
     this.history = rebuildHistory(readEvents(this.log.file), this.runId)
     this.turns -= 1
     return `undid turn ${turn}: restored ${result.restored.length}, deleted ${result.deleted.length} file(s)`
+  }
+
+  /**
+   * CP-33: rewinds to before `toTurn` (Esc Esc in the GUI): undoes the last
+   * turn repeatedly, newest first, so every turn's checkpoint restores the
+   * files it changed. Stops at the first failure and says how far it got.
+   */
+  async rewind(toTurn: number): Promise<string> {
+    if (!Number.isInteger(toTurn) || toTurn < 1) throw new Error('toTurn must be a turn number (1 or more)')
+    if (toTurn > this.turns) return `nothing to rewind: turn ${toTurn} has not run (${this.turns} turn(s) so far)`
+    const results: string[] = []
+    while (this.turns >= toTurn) {
+      const before = this.turns
+      const result = await this.undo()
+      results.push(result)
+      if (this.turns === before) break
+    }
+    return results.join('\n')
   }
 
   async diff(): Promise<string> {

@@ -56,6 +56,7 @@ jobs:
           pnpm check:api
           pnpm check:api-schema
           pnpm check:config-schema
+          pnpm check:protocol-methods
 
       - name: Typecheck TypeScript packages
         run: pnpm typecheck

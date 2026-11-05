@@ -33,6 +33,83 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
   },
   {
     method: "GET",
+    path: "/api/import",
+    summary: "Import plan from Claude Code or DSH, with a diff per change (nothing is written).",
+    response: "ImportPlan",
+    errors: [400],
+    request: {
+    source: { type: "string", required: true },
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/import",
+    summary: "Write the accepted kinds of an import plan.",
+    response: "ImportResult",
+    errors: [400],
+    request: {
+    source: { type: "string", required: true },
+    kinds: { type: "array" },
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/ui-prefs",
+    summary: "GUI preferences (statusline, code theme, Vim mode, shortcuts) from ui-state.json.",
+    response: "UiPrefsResponse",
+  },
+  {
+    method: "PUT",
+    path: "/api/ui-prefs",
+    summary: "Update GUI preferences; fields not named are kept.",
+    response: "UiPrefsResponse",
+    request: {
+    statusline: { type: "array" },
+    codeTheme: { type: "string" },
+    vimMode: { type: "boolean" },
+    shortcuts: { type: "object" },
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/worktrees",
+    summary: "git worktrees the harness created for this workspace (GUI /worktree).",
+    response: "WorktreesResponse",
+  },
+  {
+    method: "POST",
+    path: "/api/worktrees",
+    summary: "Create a worktree on branch hy/<name>.",
+    response: "WorktreeCreated",
+    errors: [400],
+    request: {
+    name: { type: "string", required: true },
+    base: { type: "string" },
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/worktrees/apply",
+    summary: "Move a worktree's changes into the main checkout (and commit them on its branch).",
+    response: "WorktreeApplied",
+    errors: [400, 409],
+    request: {
+    name: { type: "string", required: true },
+    threeWay: { type: "boolean" },
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/worktrees/remove",
+    summary: "Remove a worktree; its branch stays.",
+    errors: [400],
+    request: {
+    name: { type: "string", required: true },
+    force: { type: "boolean" },
+    },
+  },
+  {
+    method: "GET",
     path: "/api/hooks",
     summary: "The configured hooks, flattened (GUI /hooks).",
     response: "HooksResponse",
@@ -212,6 +289,7 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
     requestId: { type: "string", required: true },
     approved: { type: "boolean", required: true },
     reason: { type: "string" },
+    scope: { type: "string" },
     },
   },
   {
@@ -227,8 +305,11 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
   {
     method: "POST",
     path: "/api/sessions/:id/undo",
-    summary: "Roll the last turn back.",
-    errors: [409],
+    summary: "Roll the last turn back, or every turn from toTurn on (rewind).",
+    errors: [400, 409],
+    request: {
+    toTurn: { type: "number" },
+    },
   },
   {
     method: "POST",

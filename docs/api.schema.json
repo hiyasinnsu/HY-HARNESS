@@ -18,6 +18,155 @@
     },
     {
       "method": "GET",
+      "path": "/api/import",
+      "summary": "Import plan from Claude Code or DSH, with a diff per change (nothing is written).",
+      "response": "ImportPlan",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/import",
+      "summary": "Write the accepted kinds of an import plan.",
+      "response": "ImportResult",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "kinds": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "required": [
+          "source"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/ui-prefs",
+      "summary": "GUI preferences (statusline, code theme, Vim mode, shortcuts) from ui-state.json.",
+      "response": "UiPrefsResponse"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/ui-prefs",
+      "summary": "Update GUI preferences; fields not named are kept.",
+      "response": "UiPrefsResponse",
+      "request": {
+        "type": "object",
+        "properties": {
+          "statusline": {
+            "type": "array",
+            "items": {}
+          },
+          "codeTheme": {
+            "type": "string"
+          },
+          "vimMode": {
+            "type": "boolean"
+          },
+          "shortcuts": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/worktrees",
+      "summary": "git worktrees the harness created for this workspace (GUI /worktree).",
+      "response": "WorktreesResponse"
+    },
+    {
+      "method": "POST",
+      "path": "/api/worktrees",
+      "summary": "Create a worktree on branch hy/<name>.",
+      "response": "WorktreeCreated",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "base": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/worktrees/apply",
+      "summary": "Move a worktree's changes into the main checkout (and commit them on its branch).",
+      "response": "WorktreeApplied",
+      "errors": [
+        400,
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "threeWay": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/worktrees/remove",
+      "summary": "Remove a worktree; its branch stays.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "force": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    {
+      "method": "GET",
       "path": "/api/hooks",
       "summary": "The configured hooks, flattened (GUI /hooks).",
       "response": "HooksResponse"
@@ -350,6 +499,9 @@
           },
           "reason": {
             "type": "string"
+          },
+          "scope": {
+            "type": "string"
           }
         },
         "required": [
@@ -385,10 +537,19 @@
     {
       "method": "POST",
       "path": "/api/sessions/:id/undo",
-      "summary": "Roll the last turn back.",
+      "summary": "Roll the last turn back, or every turn from toTurn on (rewind).",
       "errors": [
+        400,
         409
-      ]
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "toTurn": {
+            "type": "number"
+          }
+        }
+      }
     },
     {
       "method": "POST",

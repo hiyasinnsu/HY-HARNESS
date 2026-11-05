@@ -1,4 +1,6 @@
-//! Newline-delimited JSON-RPC 2.0 over stdio, both directions (design §3).
+//! JSON-RPC 2.0 messages, both directions (design §3). The transport (stdio
+//! lines, or WebSocket text frames for CP-28) is a pair of string channels set
+//! up in `main.rs`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -7,7 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use hy_protocol::{RequestId, RpcError, RpcMessage};
 use parking_lot::Mutex;
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
 type Pending = Mutex<HashMap<String, oneshot::Sender<Result<Value, RpcError>>>>;
@@ -21,17 +22,16 @@ pub struct Peer {
 }
 
 impl Peer {
-    /// Spawns the stdout writer task.
-    pub fn start() -> (Self, tokio::task::JoinHandle<()>) {
+    /// Spawns the task that serialises messages into `out` (one JSON text per
+    /// message, no newline; the transport in `main.rs` frames it).
+    pub fn start(out: mpsc::UnboundedSender<String>) -> (Self, tokio::task::JoinHandle<()>) {
         let (tx, mut rx) = mpsc::unbounded_channel::<RpcMessage>();
         let writer = tokio::spawn(async move {
-            let mut out = tokio::io::stdout();
             while let Some(msg) = rx.recv().await {
-                let Ok(mut line) = serde_json::to_vec(&msg) else {
+                let Ok(text) = serde_json::to_string(&msg) else {
                     continue;
                 };
-                line.push(b'\n');
-                if out.write_all(&line).await.is_err() || out.flush().await.is_err() {
+                if out.send(text).is_err() {
                     break;
                 }
             }

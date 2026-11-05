@@ -66,7 +66,7 @@ test('CP-32: palette search matches labels, slash names and descriptions', () =>
 })
 
 test('CP-32: composer completion by slash prefix', () => {
-  assert.deepEqual(slashCompletions('/re').map((c) => c.id).sort(), ['rename', 'resume', 'review'])
+  assert.deepEqual(slashCompletions('/re').map((c) => c.id).sort(), ['rename', 'resume', 'review', 'rewind'])
   assert.deepEqual(slashCompletions('/mem').map((c) => c.id), ['memories'])
   assert.deepEqual(slashCompletions('hello'), [])
   assert.deepEqual(slashCompletions('/rename x'), [])

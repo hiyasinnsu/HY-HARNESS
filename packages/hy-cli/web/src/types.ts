@@ -81,6 +81,9 @@ export interface ModelProfile {
 export interface RoleSummary {
   provider: string
   model: string
+  /** CP-35: native function calling or tools described in the prompt. */
+  toolMode?: 'native' | 'text'
+  vision?: boolean
   baseUrl?: string
   apiKeyEnv?: string
   apiKeySet?: boolean
@@ -263,15 +266,25 @@ export interface DeliverableFile {
   description?: string
 }
 
+/** CP-34: what an approval would do (server: approval-view.ts). */
+export interface ApprovalDetails {
+  cwd: string
+  sandbox: string
+  effect: string
+  paths: string[]
+  network: string[]
+  persistable: boolean
+}
+
 export type ChatEntry =
-  | { id: string; kind: 'user'; runId: string; text: string; ts: number; images?: number; steering?: boolean }
+  | { id: string; kind: 'user'; runId: string; text: string; ts: number; images?: number; steering?: boolean; turn?: number }
   | { id: string; kind: 'assistant'; runId: string; text: string; ts: number; final?: boolean }
   | { id: string; kind: 'thinking'; runId: string; text: string; ts: number; summary?: string; summaryProvisional?: boolean }
   | ChatToolEntry
   | { id: string; kind: 'plan'; runId: string; plan: ChatPlanStep[]; ts: number }
   | { id: string; kind: 'deliverables'; runId: string; files: DeliverableFile[]; ts: number }
   | { id: string; kind: 'notice'; runId: string; text: string; ts: number; level?: 'info' | 'warn' | 'error' }
-  | { id: string; kind: 'approval'; runId: string; requestId: string; request: ApprovalRequest; ts: number; decision?: 'approved' | 'denied' }
+  | { id: string; kind: 'approval'; runId: string; requestId: string; request: ApprovalRequest; ts: number; decision?: 'approved' | 'denied'; details?: ApprovalDetails; reason?: string; scope?: 'once' | 'session' | 'always' }
   | { id: string; kind: 'question'; runId: string; requestId: string; question: string; ts: number; answer?: string }
 
 export interface ApprovalRequest {

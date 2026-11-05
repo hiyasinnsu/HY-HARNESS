@@ -246,3 +246,22 @@ test('CP-18: streamed deltas grow one message and the final replaces it', () => 
   assert.equal(live.length, 1, 'the draft is replaced, not duplicated')
   assert.equal(live[0]?.kind === 'assistant' ? live[0].text : '', 'Hello (final)')
 })
+test('CP-33: a user message carries the turn it opened; undo keeps the numbering right', () => {
+  const events: SessionEvent[] = [
+    ev(1, 'turn/start', { turn: 1 }),
+    ev(2, 'user/message', { content: 'first' }),
+    ev(3, 'assistant/message', { content: '{"final":"one"}' }),
+    ev(4, 'turn/start', { turn: 2 }),
+    ev(5, 'user/message', { content: 'second' }),
+    ev(6, 'user/steer', { content: 'steer within turn 2' }),
+    ev(7, 'assistant/message', { content: '{"final":"two"}' }),
+    ev(8, 'turn/undo', { turn: 2 }),
+    ev(9, 'turn/start', { turn: 2 }),
+    ev(10, 'user/message', { content: 'second again' }),
+  ]
+  const users = projectChat(events, 'run-test').flatMap((e) => (e.kind === 'user' ? [{ text: e.text, turn: e.turn }] : []))
+  assert.deepEqual(users, [
+    { text: 'first', turn: 1 },
+    { text: 'second again', turn: 2 },
+  ])
+})
