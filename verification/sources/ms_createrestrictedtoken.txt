@@ -1,0 +1,126 @@
+Source: https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken
+Fetched: 2026-11-02
+
+ CreateRestrictedToken function (securitybaseapi.h) - Win32 apps | Microsoft Learn
+Table of contents Exit editor mode
+Ask LearnAsk Learn
+Reading modeTable of contentsRead in EnglishAddAdd to PlansEditCopy MarkdownPrint
+Note
+Access to this page requires authorization. You can try signing inor changing directories.
+Access to this page requires authorization. You can try changing directories.
+CreateRestrictedToken function (securitybaseapi.h)
+Feedback
+Summarize this article for me
+The CreateRestrictedTokenfunction creates a new access tokenthat is a restricted version of an existing access token. The restricted token can have disabled security identifiers(SIDs), deleted privileges, and a list of restricting SIDs. For more information, see Restricted Tokens.
+Syntax
+BOOL CreateRestrictedToken(
+  [in]           HANDLE               ExistingTokenHandle,
+  [in]           DWORD                Flags,
+  [in]           DWORD                DisableSidCount,
+  [in, optional] PSID_AND_ATTRIBUTES  SidsToDisable,
+  [in]           DWORD                DeletePrivilegeCount,
+  [in, optional] PLUID_AND_ATTRIBUTES PrivilegesToDelete,
+  [in]           DWORD                RestrictedSidCount,
+  [in, optional] PSID_AND_ATTRIBUTES  SidsToRestrict,
+  [out]          PHANDLE              NewTokenHandle
+);
+Parameters
+[in] ExistingTokenHandle
+A handle to a primaryor impersonation token. The token can also be a restricted token. The handle must have TOKEN_DUPLICATEaccess to the token.
+[in] Flags
+Specifies additional privilege options. This parameter can be zero or a combination of the following values.
+Value
+Meaning
+DISABLE_MAX_PRIVILEGE
+0x1
+Disables all privileges in the new token except the SeChangeNotifyPrivilegeprivilege. If this value is specified, the DeletePrivilegeCountand PrivilegesToDeleteparameters are ignored.
+SANDBOX_INERT
+0x2
+If this value is used, the system does not check AppLockerrules or apply Software Restriction Policies. For AppLocker, this flag disables checks for all four rule collections: Executable, Windows Installer, Script, and DLL.
+When creating a setup program that must run extracted DLLs during installation, use the flag SAFER_TOKEN_MAKE_INERTin the SaferComputeTokenFromLevelfunction.
+A token can be queried for existence of this flag by using GetTokenInformation.
+Windows Server 2008 R2, Windows 7, Windows Server 2008, Windows Vista, Windows Server 2003 and Windows XP:On systems with KB2532445 installed, the caller must be running as LocalSystem or TrustedInstaller or the system ignores this flag. For more information, see You can circumvent AppLocker rules by using an Office macro on a computer that is running Windows 7 or Windows Server 2008 R2.
+Windows Server 2008, Windows Vista, Windows Server 2003 and Windows XP:AppLocker is not supported. AppLocker was introduced in Windows 7 and Windows Server 2008 R2.
+LUA_TOKEN
+0x4
+The new token is a LUA token.
+Windows Server 2003 and Windows XP:This value is not supported.
+WRITE_RESTRICTED
+0x8
+The new token contains restricting SIDs that are considered only when evaluating write access.
+Windows XP with SP2 and later:The value of this constant is 0x4. For an application to be compatible with Windows XP with SP2 and later operating systems, the application should query the operating system by calling the GetVersionExfunction to determine which value should be used.
+Windows Server 2003 and Windows XP with SP1 and earlier:This value is not supported.
+[in] DisableSidCount
+Specifies the number of entries in the SidsToDisablearray.
+[in, optional] SidsToDisable
+A pointer to an array of SID_AND_ATTRIBUTESstructures that specify the deny-only SIDs in the restricted token. The system uses a deny-only SID to deny access to a securable object. The absence of a deny-only SID does not allow access.
+Disabling a SID turns on SE_GROUP_USE_FOR_DENY_ONLYand turns off SE_GROUP_ENABLEDand SE_GROUP_ENABLED_BY_DEFAULT. All other attributes are ignored.
+Deny-only attributes apply to any combination of an existing token's SIDs, including the user SID and group SIDs that have the SE_GROUP_MANDATORY attribute. To get the SIDs associated with the existing token, use the GetTokenInformationfunction with the TokenUser and TokenGroups flags. The function ignores any SIDs in the array that are not also found in the existing token.
+The function ignores the Attributesmember of the SID_AND_ATTRIBUTESstructure.
+This parameter can be NULLif no SIDs are to be disabled.
+[in] DeletePrivilegeCount
+Specifies the number of entries in the PrivilegesToDeletearray.
+[in, optional] PrivilegesToDelete
+A pointer to an array of LUID_AND_ATTRIBUTESstructures that specify the privileges to delete in the restricted token.
+The GetTokenInformationfunction can be used with the TokenPrivileges flag to retrieve the privileges held by the existing token. The function ignores any privileges in the array that are not held by the existing token.
+The function ignores the Attributesmembers of the LUID_AND_ATTRIBUTESstructures.
+This parameter can be NULLif you do not want to delete any privileges.
+If the calling program passes too many privileges in this array, CreateRestrictedTokenreturns ERROR_INVALID_PARAMETER.
+[in] RestrictedSidCount
+Specifies the number of entries in the SidsToRestrictarray.
+[in, optional] SidsToRestrict
+A pointer to an array of SID_AND_ATTRIBUTESstructures that specify a list of restricting SIDs for the new token. If the existing token is a restricted token, the list of restricting SIDs for the new token is the intersection of this array and the list of restricting SIDs for the existing token. No check is performed to remove duplicate SIDs that were placed on the SidsToRestrictparameter. Duplicate SIDs allow a restricted token to have redundant information in the restricting SID list.
+The Attributesmember of the SID_AND_ATTRIBUTESstructure must be zero. Restricting SIDs are always enabled for access checks.
+This parameter can be NULLif you do not want to specify any restricting SIDs.
+[out] NewTokenHandle
+A pointer to a variable that receives a handle to the new restricted token. This handle has the same access rights as ExistingTokenHandle. The new token is the same type, primaryor impersonation, as the existing token. The handle returned in NewTokenHandlecan be duplicated.
+Return value
+If the function succeeds, the return value is nonzero.
+If the function fails, the return value is zero. To get extended error information, call GetLastError.
+Remarks
+The CreateRestrictedTokenfunction can restrict the token in the following ways:
+Apply the deny-only attribute to SIDs in the token so they cannot be used to access secured objects. For more information about the deny-only attribute, see SID Attributes in an Access Token.
+Remove privilegesfrom the token.
+Specify a list of restricting SIDs, which the system uses when it checks the token's access to a securable object. The system performs two access checks: one using the token's enabled SIDs, and another using the list of restricting SIDs. Access is granted only if both access checks allow the requested access rights.
+You can use the restricted token in the CreateProcessAsUserfunction to create a process that has restricted access rights and privileges. If a process calls CreateProcessAsUserusing a restricted version of its own token, the calling process does not need to have the SE_ASSIGNPRIMARYTOKEN_NAMEprivilege.
+You can use the restricted token in the ImpersonateLoggedOnUserfunction.
+Warning
+Applications that use restricted tokens should run the restricted application on desktops other than the default desktop. This is necessary to prevent an attack by a restricted application, using SendMessageor PostMessage, to unrestricted applications on the default desktop. If necessary, switch between desktops for your application purposes.
+Requirements
+Requirement
+Value
+Minimum supported client
+Windows XP [desktop apps only]
+Minimum supported server
+Windows Server 2003 [desktop apps only]
+Target Platform
+Windows
+Header
+securitybaseapi.h (include Windows.h)
+Library
+Advapi32.lib
+DLL
+Advapi32.dll
+See also
+Access Control Overview
+Basic Access Control Functions
+CreateProcessAsUser
+GetTokenInformation
+ImpersonateLoggedOnUser
+IsTokenRestricted
+LUID_AND_ATTRIBUTES
+SID_AND_ATTRIBUTES
+Feedback
+Was this page helpful?
+YesNoNo
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?
+Additional resources
+Last updated on 2021-10-13
+Was this page helpful?
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?

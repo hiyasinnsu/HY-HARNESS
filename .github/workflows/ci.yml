@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-server:
+    name: Build, Lint & Unit/Integration Tests (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + clippy + llvm-tools-preview
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt, llvm-tools-preview
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js 24+
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Rust workspace
+        run: cargo build --workspace
+
+      - name: Run Clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Check wire protocol schema & TS bindings drift
+        run: pnpm check:protocol
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Build TypeScript packages
+        run: pnpm build
+
+      - name: Check generated API types, API schema and config schema drift
+        run: |
+          pnpm check:api
+          pnpm check:api-schema
+          pnpm check:config-schema
+
+      - name: Typecheck TypeScript packages
+        run: pnpm typecheck
+
+      - name: Run Rust unit tests & pure-logic coverage (>= 85%)
+        run: pnpm coverage:rust
+
+      - name: Run TypeScript unit tests & coverage
+        run: pnpm coverage:ts
+
+      - name: Run integration tests
+        run: pnpm test:integration
+
+  windows-10-22h2:
+    name: Windows 10 22H2 Client Sandbox & Benchmark Gate (self-hosted)
+    if: vars.ENABLE_WIN10_SELF_HOSTED == 'true'
+    runs-on: [self-hosted, windows-10-22h2]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Rust & TypeScript
+        run: |
+          cargo build --workspace
+          pnpm build
+
+      - name: Run Windows 10 sandbox & AppContainer integration tests
+        run: |
+          node --test --test-reporter=spec tests/integration/win10-sandbox.test.mjs
+          node --test --test-reporter=spec tests/integration/ptc-appcontainer.test.mjs
+
+      - name: Run 10k-file checkpoint benchmark (< 750ms create, < 500ms rollback)
+        run: pnpm bench:checkpoint

@@ -1,0 +1,87 @@
+Source: https://learn.microsoft.com/en-us/windows/win32/fileio/file-access-rights-constants
+Fetched: 2026-11-02
+
+ File Access Rights Constants (WinNT.h) - Win32 apps | Microsoft Learn
+Table of contents Exit editor mode
+Ask LearnAsk Learn
+Reading modeTable of contentsRead in EnglishAddAdd to PlansEditCopy MarkdownPrint
+Note
+Access to this page requires authorization. You can try signing inor changing directories.
+Access to this page requires authorization. You can try changing directories.
+File Access Rights Constants
+Feedback
+Summarize this article for me
+The valid access rights for files and directories include the DELETE, READ_CONTROL, WRITE_DAC, WRITE_OWNER, and SYNCHRONIZE standard access rights. The following table lists the access rights that are specific to files and directories.
+Constant/value
+Description
+FILE_ADD_FILE
+2
+For a directory, the right to create a file in the directory.
+FILE_ADD_SUBDIRECTORY
+4
+For a directory, the right to create a subdirectory.
+FILE_ALL_ACCESS
+All possible access rights for a file.
+FILE_APPEND_DATA
+4
+For a file object, the right to append data to the file. (For local files, write operations will not overwrite existing data if this flag is specified without FILE_WRITE_DATA.) For a directory object, the right to create a subdirectory (FILE_ADD_SUBDIRECTORY).
+FILE_CREATE_PIPE_INSTANCE
+4
+For a named pipe, the right to create a pipe.
+FILE_DELETE_CHILD
+64 (0x40)
+For a directory, the right to delete a directory and all the files it contains, including read-only files.
+FILE_EXECUTE
+32 (0x20)
+For a native code file, the right to execute the file. This access right given to scripts may cause the script to be executable, depending on the script interpreter.
+FILE_LIST_DIRECTORY
+1
+For a directory, the right to list the contents of the directory.
+FILE_READ_ATTRIBUTES
+128 (0x80)
+The right to read file attributes.
+FILE_READ_DATA
+1
+For a file object, the right to read the corresponding file data. For a directory object, the right to read the corresponding directory data.
+FILE_READ_EA
+8
+The right to read extended file attributes.
+FILE_TRAVERSE
+32 (0x20)
+For a directory, the right to traverse the directory. By default, users are assigned the BYPASS_TRAVERSE_CHECKING privilege, which ignores the FILE_TRAVERSE access right. See the remarks in File Security and Access Rightsfor more information.
+FILE_WRITE_ATTRIBUTES
+256 (0x100)
+The right to write file attributes.
+FILE_WRITE_DATA
+2
+For a file object, the right to write data to the file. For a directory object, the right to create a file in the directory (FILE_ADD_FILE).
+FILE_WRITE_EA
+16 (0x10)
+The right to write extended file attributes.
+STANDARD_RIGHTS_READ
+Includes READ_CONTROL, which is the right to read the information in the file or directory object's security descriptor. This does not include the information in the SACL.
+STANDARD_RIGHTS_WRITE
+Same as STANDARD_RIGHTS_READ.
+Requirements
+Requirement
+Value
+Minimum supported client
+Windows XP [desktop apps only]
+Minimum supported server
+Windows Server 2003 [desktop apps only]
+Header
+WinNT.h (include Windows.h)
+Feedback
+Was this page helpful?
+YesNoNo
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?
+Additional resources
+Last updated on 2021-01-07
+Was this page helpful?
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?

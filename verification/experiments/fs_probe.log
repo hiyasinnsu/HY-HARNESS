@@ -1,0 +1,13 @@
+﻿fsutil hardlink: Error:  Incorrect function.
+icacls: F:\HY-HARNESS\verification\experiments\exfat_probe\a.txt  No permissions are set. All users have full control.
+Successfully processed 1 files; Failed processing 0 files
+fsinfo F: File System Name : exFAT
+fsinfo G: Volume Name : Google Drive
+Volume Serial Number : 0x19831116
+Max Component Length : 256
+File System Name : FAT32
+Is ReadWrite
+Error:  Access is denied.
+Preserves Case of filenames
+Supports Unicode in filenames
+Supports Remote Storage

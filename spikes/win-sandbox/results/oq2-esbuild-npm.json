@@ -1,0 +1,108 @@
+{
+  "measuredAt": "2026-11-02T17:53:35.954Z",
+  "node": "v24.19.0",
+  "fixture": "C:\\Users\\川野創太\\hy-oq2-esbuild\\ws",
+  "esbuildVersion": "0.25.0",
+  "unconfined": {
+    "esbuild-cli": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 95,
+      "sandbox": "unconfined",
+      "passed": true
+    },
+    "esbuild-node-api": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 85,
+      "sandbox": "unconfined",
+      "passed": true
+    },
+    "npm-install-default-cache": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 1383,
+      "sandbox": "unconfined",
+      "passed": true
+    },
+    "npm-install-workspace-cache": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 1218,
+      "sandbox": "unconfined",
+      "passed": true
+    }
+  },
+  "workspaceWrite": {
+    "esbuild-cli": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 241,
+      "sandbox": "workspace-write",
+      "passed": true
+    },
+    "esbuild-node-api": {
+      "exitCode": 1,
+      "timedOut": false,
+      "ms": 61,
+      "sandbox": "workspace-write",
+      "passed": false,
+      "firstError": "Error: spawn EPERM",
+      "tail": "ild\\lib\\main.js:1982:29)\r\n    at Object.build (C:\\Users\\川野創太\\hy-oq2-esbuild\\ws\\node_modules\\esbuild\\lib\\main.js:1880:26)\r\n    at Object.<anonymous> (C:\\Users\\川野創太\\hy-oq2-esbuild\\ws\\build-api.cjs:2:9)\r\n    at Module._compile (node:internal/modules/cjs/loader:1872:14)\r\n    at Object..js (node:internal/modules/cjs/loader:2003:10)\r\n    at Module.load (node:internal/modules/cjs/loader:1594:32)\r\n    at Module._load (node:internal/modules/cjs/loader:1396:12)\r\n    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19) {\r\n  errno: -4048,\r\n  code: 'EPERM',\r\n  syscall: 'spawn'\r\n}\r\n\r\nNode.js v24.19.0"
+    },
+    "npm-install-default-cache": {
+      "exitCode": 1,
+      "timedOut": false,
+      "ms": 1701,
+      "sandbox": "workspace-write",
+      "passed": false,
+      "firstError": "npm error code EPERM",
+      "tail": "tion was rejected by your operating system.\nnpm error It's possible that the file was already in use (by a text editor or antivirus), or that you lack permissions to access it.\nnpm error\nnpm error If you believe this might be a permissions issue, please double-check the permissions of the file and its containing directories, or try running the command again as root/Administrator.\nnpm error Log files were not written due to an error writing to the directory: C:\\Users\\川野創太\\AppData\\Local\\npm-cache\\_logs\nnpm error You can rerun the command with `--loglevel=verbose` to see the logs in your terminal"
+    },
+    "npm-install-workspace-cache": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 1408,
+      "sandbox": "workspace-write",
+      "passed": true
+    }
+  },
+  "lowIntegrity": {
+    "esbuild-cli": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 194,
+      "sandbox": "low-integrity",
+      "passed": true
+    },
+    "esbuild-node-api": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 66,
+      "sandbox": "low-integrity",
+      "passed": true
+    },
+    "npm-install-default-cache": {
+      "exitCode": 1,
+      "timedOut": false,
+      "ms": 1564,
+      "sandbox": "low-integrity",
+      "passed": false,
+      "firstError": "npm error code EPERM",
+      "tail": "tion was rejected by your operating system.\nnpm error It's possible that the file was already in use (by a text editor or antivirus), or that you lack permissions to access it.\nnpm error\nnpm error If you believe this might be a permissions issue, please double-check the permissions of the file and its containing directories, or try running the command again as root/Administrator.\nnpm error Log files were not written due to an error writing to the directory: C:\\Users\\川野創太\\AppData\\Local\\npm-cache\\_logs\nnpm error You can rerun the command with `--loglevel=verbose` to see the logs in your terminal"
+    },
+    "npm-install-workspace-cache": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 1374,
+      "sandbox": "low-integrity",
+      "passed": true
+    }
+  },
+  "revoke": {
+    "durationMs": 15,
+    "failed": 0,
+    "restored": 52,
+    "stripped": 2
+  }
+}

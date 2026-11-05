@@ -1,0 +1,30 @@
+# HY-HARNESS Python SDK
+
+Drive the harness from Python. The client speaks the JSON-RPC 2.0 protocol of
+`hy serve --sdk` over stdio and only uses the standard library (`subprocess`
+plus two threads).
+
+```bash
+pip install -e python          # from the repository root
+python python/examples/run.py --cwd . --mock --yes "Create the demo file"
+```
+
+```python
+from hy_harness import Client
+
+with Client(cli="hy", cwd="C:/work/repo", args=["--yes"]) as client:
+    client.initialize()
+    session = client.session_create()
+    final = client.prompt(session, "Read README.md and summarise it")
+    print(final)
+    client.session_close(session)
+```
+
+- `cli` is either an installed `hy` executable or the path to
+  `packages/hy-cli/dist/main.js` (then `node` is used). `--cli`/`HY_HARNESS_CLI`
+  override it.
+- The server is bound to one workspace: start the client with `cwd` where the
+  `hy` server should run.
+- `prompt(..., on_event=callback)` receives the same events the CLI prints
+  (`tool-start`, `tool`, `tool-error`, `retry`, `status`).
+- `cancel(session)` stops a running prompt; the prompt raises `HarnessError`.

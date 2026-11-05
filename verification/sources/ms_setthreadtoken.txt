@@ -1,0 +1,64 @@
+Source: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadtoken
+Fetched: 2026-11-02
+
+ SetThreadToken function (processthreadsapi.h) - Win32 apps | Microsoft Learn
+Table of contents Exit editor mode
+Ask LearnAsk Learn
+Reading modeTable of contentsRead in EnglishAddAdd to PlansEditCopy MarkdownPrint
+Note
+Access to this page requires authorization. You can try signing inor changing directories.
+Access to this page requires authorization. You can try changing directories.
+SetThreadToken function (processthreadsapi.h)
+Feedback
+Summarize this article for me
+The SetThreadTokenfunction assigns an impersonation tokento a thread. The function can also cause a thread to stop using an impersonation token.
+Syntax
+BOOL SetThreadToken(
+  [in, optional] PHANDLE Thread,
+  [in, optional] HANDLE  Token
+);
+Parameters
+[in, optional] Thread
+A pointer to a handle to the thread to which the function assigns the impersonation token.
+If Threadis NULL, the function assigns the impersonation token to the calling thread.
+[in, optional] Token
+A handle to the impersonation token to assign to the thread. This handle must have been opened with TOKEN_IMPERSONATE access rights. For more information, see Access Rights for Access-Token Objects.
+If Tokenis NULL, the function causes the thread to stop using an impersonation token.
+Return value
+If the function succeeds, the return value is nonzero.
+If the function fails, the return value is zero. To get extended error information, call GetLastError.
+Remarks
+When using the SetThreadTokenfunction to impersonate, you must have the impersonate privileges and make sure that the SetThreadTokenfunction succeeds before calling the RevertToSelffunction.
+Requirements
+Requirement
+Value
+Minimum supported client
+Windows XP [desktop apps | UWP apps]
+Minimum supported server
+Windows Server 2003 [desktop apps | UWP apps]
+Target Platform
+Windows
+Header
+processthreadsapi.h (include Windows.h)
+Library
+Advapi32.lib
+DLL
+Advapi32.dll
+See also
+Access Control Overview
+Basic Access Control Functions
+OpenThreadToken
+Feedback
+Was this page helpful?
+YesNoNo
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?
+Additional resources
+Last updated on 2024-02-22
+Was this page helpful?
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?

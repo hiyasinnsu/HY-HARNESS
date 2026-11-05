@@ -1,0 +1,37 @@
+Source: https://learn.microsoft.com/en-us/windows/win32/secauthz/restricted-tokens
+Fetched: 2026-11-02
+
+ Restricted Tokens - Win32 apps | Microsoft Learn
+Table of contents Exit editor mode
+Ask LearnAsk Learn
+Reading modeTable of contentsRead in EnglishAddAdd to PlansEditCopy MarkdownPrint
+Note
+Access to this page requires authorization. You can try signing inor changing directories.
+Access to this page requires authorization. You can try changing directories.
+Restricted Tokens
+Feedback
+Summarize this article for me
+A restricted token is a primaryor impersonation access tokenthat has been modified by the CreateRestrictedTokenfunction. A processor impersonating thread running in the security contextof a restricted token is restricted in its ability to access securable objects or perform privileged operations. The CreateRestrictedTokenfunction can restrict a token in the following ways:
+Remove privilegesfrom the token.
+Apply the deny-only attribute to SIDs in the token so that they cannot be used to access secured objects. For more information about the deny-only attribute, see SID Attributes in an Access Token.
+Specify a list of restricting SIDs, which can limit access to securable objects.
+The system uses the list of restricting SIDs when it checks the token's access to a securable object. When a restricted process or thread tries to access a securable object, the system performs two access checks: one using the token's enabled SIDs, and another using the list of restricting SIDs. Access is granted only if both access checks allow the requested access rights. For more information about access checks, see How DACLs Control Access to an Object.
+You can use a restricted primary tokenin a call to the CreateProcessAsUserfunction. Typically, the process that calls CreateProcessAsUsermust have the SE_ASSIGNPRIMARYTOKEN_NAME privilege, which is usually held only by system code or by services running in the LocalSystem account. However, if the CreateProcessAsUsercall specifies a restricted version of the caller's primary token, this privilege is not required. This enables ordinary applications to create restricted processes.
+You can also use a restricted primary or impersonation tokenin the ImpersonateLoggedOnUserfunction.
+To determine whether a token has a list of restricting SIDs, call the IsTokenRestrictedfunction.
+Note
+Applications that use restricted tokens should run the restricted application on desktops other than the default desktop. This is necessary to prevent an attack by a restricted application, using SendMessageor PostMessage, to unrestricted applications on the default desktop. If necessary, switch between desktops for your application purposes.
+Feedback
+Was this page helpful?
+YesNoNo
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?
+Additional resources
+Last updated on 2021-01-07
+Was this page helpful?
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?

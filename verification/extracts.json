@@ -1,0 +1,750 @@
+{
+  "title": "HY-HARNESS design_draft_rev3 / refinement_notes の一次ソース裏取り",
+  "verified_on": "2026-11-02",
+  "legend": {
+    "確認": "一次ソースの記述で裏付けられた",
+    "実測": "ローカル実験（experiments/）で裏付けられた",
+    "修正": "裏取りの結果、Rev 3 の記述を訂正した",
+    "推論": "直接の記述はなく設計上の推論。指定のフェーズ／スパイクで実測する"
+  },
+  "items": [
+    {
+      "id": "R-1a",
+      "verdict": "確認",
+      "claim": "Rev 2 では子シェルが書けるのは .hy-harness/tmp のみ。一方 DSH の workspace-write はワークスペース配下への書き込みを許す",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 186,
+          "quote": "child shell processes receive write DACL + Low Mandatory Integrity ACE only on `.hy-harness/tmp`"
+        },
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 9,
+          "quote": "`workspace-write` (writes under the workspace root plus a backend-defined temp area)"
+        }
+      ]
+    },
+    {
+      "id": "R-1b",
+      "verdict": "確認",
+      "claim": "ハードリンクは全リンクで同じ実体を共有し、pnpm は node_modules をストアからハードリンクする。全ハードリンク拒否は pnpm を壊す",
+      "evidence": [
+        {
+          "source": "sources/ms_hardlinks.txt",
+          "line": 17,
+          "quote": "Any changes made to a hard-linked file are instantly visible to applications that access it through the links that reference it."
+        },
+        {
+          "source": "sources/pnpm_motivation.txt",
+          "line": 38,
+          "quote": "All remaining dependencies are fetched and hard linked from the store to `node_modules`."
+        },
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 13,
+          "quote": "because NTFS ACLs belong to file objects, a granted workspace hard link still grants an external alias…Rejecting all hard links would reject ordinary pnpm workspaces"
+        }
+      ]
+    },
+    {
+      "id": "R-1c",
+      "verdict": "推論",
+      "claim": "ハードリンク（nNumberOfLinks>1）に ACE を付けずにスキップすれば別名経由の越境を防げる。所要時間は Phase 1 S-1 で実測",
+      "evidence": [
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 43,
+          "quote": "EAGER full-tree workspace propagation (`SetNamedSecurityInfoW` walks every descendant immediately — tens of seconds on large workspaces), paid once per workspace per machine"
+        }
+      ]
+    },
+    {
+      "id": "R-2a",
+      "verdict": "確認",
+      "claim": "0xC0000142 は制限 SID に logon SID と Everyone を残すことで回避される。CREATE_NO_WINDOW / CREATE_NEW_CONSOLE の子は落ちる。Rev 2 は WinSta0/デスクトップ DACL で解決するとしていた",
+      "evidence": [
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 13,
+          "quote": "Logon SID + Everyone are keep-alive invariants (early DLL init dies with 0xC0000142 and CNG crashes pwsh with 0xE0434352 without them)"
+        },
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 43,
+          "quote": "children created with `CREATE_NO_WINDOW` or `CREATE_NEW_CONSOLE` die with `STATUS_DLL_INIT_FAILED`"
+        },
+        {
+          "source": "../design_draft.md",
+          "line": 185,
+          "quote": "grants `WINSTA_READATTRIBUTES | WINSTA_ACCESSGLOBALATOMS` on `WinSta0`"
+        }
+      ]
+    },
+    {
+      "id": "R-2b",
+      "verdict": "確認",
+      "claim": "libuv の EPERM の原因: libuv は既定 SD（Everyone は読み取りのみ）で名前付きパイプを作り、書き込み権限付きで名前で開き直す。WRITE_RESTRICTED では書き込み判定に制限 SID も必要なので拒否される。親側のパイプ DACL では直せない",
+      "evidence": [
+        {
+          "source": "sources/libuv_pipe.txt",
+          "line": 248,
+          "quote": "pipeHandle = CreateNamedPipeA(name,…PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 65536, 65536, 0,…NULL);",
+          "span": 3
+        },
+        {
+          "source": "sources/libuv_pipe.txt",
+          "line": 310,
+          "quote": "client_access |= GENERIC_WRITE;"
+        },
+        {
+          "source": "sources/libuv_pipe.txt",
+          "line": 329,
+          "quote": "client_pipe = CreateFileA(pipe_name,"
+        },
+        {
+          "source": "sources/ms_createnamedpipe.txt",
+          "line": 121,
+          "quote": "The ACLs in the default security descriptor for a named pipe grant full control to the LocalSystem account, administrators, and the creator owner. They also grant read access to members of the Everyone group and the anonymous account."
+        },
+        {
+          "source": "sources/ms_createrestrictedtoken.txt",
+          "line": 50,
+          "quote": "The new token contains restricting SIDs that are considered only when evaluating write access."
+        },
+        {
+          "source": "sources/ms_restricted_tokens.txt",
+          "line": 18,
+          "quote": "Access is granted only if both access checks allow the requested access rights."
+        },
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 13,
+          "quote": "named pipes keep the Win32 layer's owner/SYSTEM/Admins-full, Everyone/ANONYMOUS-read-only template, so piped grandchild stdio remains denied"
+        }
+      ]
+    },
+    {
+      "id": "R-2c",
+      "verdict": "推論",
+      "claim": "Jest（既定 child_process）と Vitest（既定 pool=forks）は Windows で名前付きパイプの IPC を使うので影響を受ける見込み。Rust std の子プロセス stdio は別経路（NtCreateNamedPipeFile + 相対オープン）なので cargo は影響を受けない可能性がある。S-2 で実測",
+      "evidence": [
+        {
+          "source": "sources/jest_worker.txt",
+          "line": 71,
+          "quote": "By default, `jest-worker` will use `child_process` threads to spawn new Node.js processes."
+        },
+        {
+          "source": "sources/vitest_config_pool.txt",
+          "line": 12,
+          "quote": "- **Default:** `'forks'`"
+        },
+        {
+          "source": "sources/node_net.txt",
+          "line": 216,
+          "quote": "The node:netmodule supports IPC with named pipes on Windows"
+        },
+        {
+          "source": "sources/libuv_process_stdio.txt",
+          "line": 248,
+          "quote": "err = uv__create_stdio_pipe_pair(loop,"
+        },
+        {
+          "source": "sources/rust_std_child_pipe.txt",
+          "line": 64,
+          "quote": "Note that we specifically do *not* use `CreatePipe` here because…Instead, we use `NtCreateNamedPipeFile` to create the",
+          "span": 3
+        }
+      ]
+    },
+    {
+      "id": "R-3",
+      "verdict": "確認",
+      "claim": "親ディレクトリの FILE_DELETE_CHILD は制限 SID の同意なしに子の削除を許すため、Low ラベルと Everyone への FILE_DELETE_CHILD 拒否が必要",
+      "evidence": [
+        {
+          "source": "sources/ms_file_access_rights.txt",
+          "line": 33,
+          "quote": "For a directory, the right to delete a directory and all the files it contains, including read-only files."
+        },
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 13,
+          "quote": "which no restricting SID has to co-sign, so `cmd /c del` deleted files outside the workspace wherever the caller's ambient SIDs hold Modify"
+        },
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 13,
+          "quote": "each grant also DENIES `FILE_DELETE_CHILD` to the world SID"
+        },
+        {
+          "source": "sources/ms_mic.txt",
+          "line": 15,
+          "quote": "a principal with a low integrity level cannot write to an object with a medium integrity level"
+        }
+      ]
+    },
+    {
+      "id": "R-4a",
+      "verdict": "実測",
+      "claim": "git add -u は既存の未追跡ファイルを捕捉できない。一時インデックスでの add -A は捕捉できる",
+      "evidence": [
+        {
+          "source": "experiments/git_checkpoint.log",
+          "line": 2,
+          "quote": "[E2] add -u captures .env.local: 0"
+        },
+        {
+          "source": "experiments/git_checkpoint.log",
+          "line": 3,
+          "quote": "[E2] add -A captures .env.local: 1"
+        }
+      ]
+    },
+    {
+      "id": "R-4b",
+      "verdict": "実測",
+      "claim": "Rev 2 のロールバック（本物のインデックスへの read-tree + checkout-index -f -a）は、未追跡ファイルを戻せず、無関係なファイルの mtime を変え、未ステージの変更をステージ済みにしてしまう",
+      "evidence": [
+        {
+          "source": "experiments/git_checkpoint.log",
+          "line": 4,
+          "quote": "[E3] rev2: .env.local restored: no"
+        },
+        {
+          "source": "experiments/git_checkpoint.log",
+          "line": 5,
+          "quote": "[E3] rev2: f10 mtime changed: yes"
+        },
+        {
+          "source": "experiments/git_checkpoint.log",
+          "line": 7,
+          "quote": "[E3] rev2: f2 unstaged change became staged: yes"
+        },
+        {
+          "source": "sources/git_checkout_index.txt",
+          "line": 152,
+          "quote": "forces overwrite of existing files"
+        },
+        {
+          "source": "sources/cargo_fingerprint.txt",
+          "line": 24,
+          "quote": "Filesystem mtime tracking is also used to check if a unit is dirty."
+        }
+      ]
+    },
+    {
+      "id": "R-4c",
+      "verdict": "実測",
+      "claim": "Rev 3 のロールバック（diff-tree + 変更パスだけ checkout-index + ユーザーのインデックス復元）は、全項目を復元し、無関係なファイル・HEAD・ステージ状態を保つ",
+      "evidence": [
+        {
+          "source": "experiments/git_checkpoint.log",
+          "line": 8,
+          "quote": "[E4] diff-tree changes: M .env.local;M f3.txt;A new.txt;"
+        },
+        {
+          "source": "experiments/git_checkpoint.log",
+          "line": 9,
+          "quote": "[E4] .env.local restored: yes…[E4] f3 restored: yes…[E4] new.txt deleted: yes…[E4] f10 mtime unchanged: yes…[E4] node_modules untouched: yes…[E4] user staged f1 preserved: yes…[E4] f2 still unstaged: yes…[E4] HEAD unchanged: yes",
+          "span": 7
+        }
+      ]
+    },
+    {
+      "id": "R-4d",
+      "verdict": "実測",
+      "claim": "commit-tree は作成者情報が未設定だと失敗する",
+      "evidence": [
+        {
+          "source": "experiments/git_checkpoint.log",
+          "line": 1,
+          "quote": "[E1] commit-tree failed without identity: Author identity unknown"
+        },
+        {
+          "source": "sources/git_commit_tree.txt",
+          "line": 184,
+          "quote": "author name, email and date…committer name and email and the commit time.",
+          "span": 1
+        }
+      ]
+    },
+    {
+      "id": "R-4e",
+      "verdict": "修正",
+      "claim": "GIT_ATTR_SOURCE + core.autocrlf=false でバイト単位で同一に保存される（実測）。ただし --attr-source が入ったのは Git 2.41 で、Rev 3 の『≥ 2.40』は誤り → ≥ 2.41 に訂正",
+      "evidence": [
+        {
+          "source": "experiments/git_checkpoint.log",
+          "line": 16,
+          "quote": "[E5] default config stores raw bytes: no"
+        },
+        {
+          "source": "experiments/git_checkpoint.log",
+          "line": 17,
+          "quote": "[E5] GIT_ATTR_SOURCE+autocrlf=false stores raw bytes: yes"
+        },
+        {
+          "source": "sources/git_main.txt",
+          "line": 313,
+          "quote": "Read gitattributes from <tree-ish>instead of the worktree. See gitattributes[5]. This is equivalent to setting the GIT_ATTR_SOURCEenvironment variable."
+        },
+        {
+          "source": "sources/git_relnotes_2_41.txt",
+          "line": 119,
+          "quote": "\"git --attr-source=<tree> cmd $args\" is a new way to have any"
+        }
+      ]
+    },
+    {
+      "id": "R-4f",
+      "verdict": "推論",
+      "claim": "checkout-index -f -a は 10,000 ファイルで 500 ms を超える。Phase 8 の bench:checkpoint で実測",
+      "evidence": []
+    },
+    {
+      "id": "R-5",
+      "verdict": "確認",
+      "claim": "Rev 2 ではリポジトリ内の .hy-harness/config.json で baseUrl と apiKeyEnv を指定できた（API キー流出の経路）",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 108,
+          "quote": "Configuration is resolved in precedence order: CLI flags > environment variables > `.hy-harness/config.json` > built-in defaults."
+        },
+        {
+          "source": "../design_draft.md",
+          "line": 114,
+          "quote": "apiKeyEnv?: string;…baseUrl?: string;",
+          "span": 1
+        }
+      ]
+    },
+    {
+      "id": "R-6",
+      "verdict": "確認",
+      "claim": "Rev 2 の Grader は、モデルが更新できる Rationale Ledger を判定材料として受け取る",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 29,
+          "quote": "Provide a model-updatable Capped Rationale Ledger"
+        },
+        {
+          "source": "../design_draft.md",
+          "line": 195,
+          "quote": "Invokes the `grader` role model in a read-only context with the original Objective, active `Rationale Ledger`"
+        }
+      ]
+    },
+    {
+      "id": "M-1",
+      "verdict": "確認",
+      "claim": "Rev 2 の bash ツールはシェルを定義していない。DSH は同じトークン形状で pwsh executor を使う",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 166,
+          "quote": "`bash({ command: string, cwd?: string, timeoutMs?: number })"
+        },
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 51,
+          "quote": "The [pwsh executor decision](../../archived/feature/2026-08-01-pwsh-tool-and-executor.md) owns the pwsh-sandbox/tool-pwsh dialect split this rung consumes."
+        }
+      ]
+    },
+    {
+      "id": "M-2",
+      "verdict": "確認",
+      "claim": "複合判定の文字集合が §3 とリスク表で食い違う。cmd の ^ や %、PowerShell の --% や @ も特殊文字。.bat の引数エスケープは Rust 1.77.2 で修正された",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 181,
+          "quote": "(`&`, `|`, `;`, `` ` ``, `$(`, `>`, `<`)"
+        },
+        {
+          "source": "../design_draft.md",
+          "line": 234,
+          "quote": "any command string containing `[&|;`$()<>]`"
+        },
+        {
+          "source": "sources/ms_cmd.txt",
+          "line": 103,
+          "quote": "The ampersand &, pipe |, and parentheses ( )are special characters that must be preceded by the escape character ^or quotation marks"
+        },
+        {
+          "source": "sources/ps_about_parsing.txt",
+          "line": 200,
+          "quote": "The only interpretation it performs is to substitute values for environment variables that use standard Windows notation, such as %USERPROFILE%."
+        },
+        {
+          "source": "sources/ps_about_splatting.txt",
+          "line": 17,
+          "quote": "Splatting is a method of passing a collection of parameter values to a command as a unit."
+        },
+        {
+          "source": "sources/rust_cve_2024_24576.txt",
+          "line": 15,
+          "quote": "The fix will be included in Rust 1.77.2"
+        }
+      ]
+    },
+    {
+      "id": "M-4",
+      "verdict": "確認",
+      "claim": "Rev 2 はツール呼び出しなしの応答をすべて完了宣言とみなす",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 193,
+          "quote": "signals `claim_complete` either by finishing a turn with zero tool calls"
+        }
+      ]
+    },
+    {
+      "id": "M-5",
+      "verdict": "確認",
+      "claim": "Rev 2 の Ledger は上限超過時に最も古いエントリを黙って削除する",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 159,
+          "quote": "the entry with the lowest `updatedAtStep` (`least-recently-updated`) is evicted from the active map"
+        }
+      ]
+    },
+    {
+      "id": "M-6",
+      "verdict": "確認",
+      "claim": "append-only なのに『イベントを破棄』と書いている。tool/call が二重。Gemini は thought signature の、DeepSeek は tools 使用時に reasoning_content の返送が必要",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 63,
+          "quote": "discards Round 1's uncommitted session events"
+        },
+        {
+          "source": "../design_draft.md",
+          "line": 152,
+          "quote": "\"tool/call\": { callId: string; name: string; args: unknown; stepIndex: number };"
+        },
+        {
+          "source": "sources/gemini_thinking.txt",
+          "line": 725,
+          "quote": "Thought signatures are encrypted representations of the model's internal reasoning. They are required to maintain reasoning continuity across multi-turn interactions."
+        },
+        {
+          "source": "sources/deepseek_thinking.txt",
+          "line": 54,
+          "quote": "If the request carries the toolsparameter: the reasoning_contentof all previous turns should be passed back to the API"
+        }
+      ]
+    },
+    {
+      "id": "M-7",
+      "verdict": "確認",
+      "claim": "Rev 2 の不変条件は『⟺』",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 81,
+          "quote": "'Model-visible ⟺ logged'"
+        }
+      ]
+    },
+    {
+      "id": "M-8",
+      "verdict": "修正",
+      "claim": "【訂正】Rev 3 の『bytes/4 は日本語で 1.5〜2 倍少なく見積もる』は一次ソースで裏付けられない。DeepSeek の公式比では、英語は少なめ（0.25 vs 0.3）、中国語は多め（3 byte/4 = 0.75 vs 0.6）に見積もる。偏りはプロバイダーごとに違うので、プロバイダー別の係数に改める",
+      "evidence": [
+        {
+          "source": "sources/deepseek_token_usage.txt",
+          "line": 13,
+          "quote": "1 English character ≈ 0.3 token.…1 Chinese character ≈ 0.6 token.…The actual number of tokens processed each time is based on the model's return",
+          "span": 2
+        },
+        {
+          "source": "sources/gemini_tokens.txt",
+          "line": 36,
+          "quote": "For Gemini models, a token is equivalent to about 4 characters."
+        },
+        {
+          "source": "../design_draft.md",
+          "line": 135,
+          "quote": "estimateTokens(text) = Math.ceil(Buffer.byteLength(text, \"utf8\") / 4)"
+        }
+      ]
+    },
+    {
+      "id": "M-9",
+      "verdict": "確認",
+      "claim": "Rev 2 のロール設定にはコンテキスト窓も単価もないが、75% という基準はコンテキスト窓に対する比率",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 113,
+          "quote": "model: string;…apiKeyEnv?: string;…baseUrl?: string;",
+          "span": 2
+        },
+        {
+          "source": "../design_draft.md",
+          "line": 124,
+          "quote": "compactionTriggerRatio: number;// default: 0.75 (75% of model context window)"
+        }
+      ]
+    },
+    {
+      "id": "M-10",
+      "verdict": "確認",
+      "claim": "Rev 2 の RPC メソッドにキャンセルがない。-32001〜-32006 は JSON-RPC が実装定義サーバーエラー用に予約した範囲に収まる",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 177,
+          "quote": "Methods: `exec/command`, `job/status`, `job/wait`, `job/kill`, `patch/apply`, `checkpoint/create`, `checkpoint/rollback`, `policy/evaluate`, `ptc/run`."
+        },
+        {
+          "source": "sources/jsonrpc_spec.txt",
+          "line": 120,
+          "quote": "-32000 to -32099"
+        }
+      ]
+    },
+    {
+      "id": "M-11a",
+      "verdict": "確認",
+      "claim": "ReplaceFileW は置き換え先の ACL を保持し、置き換え先に DELETE と書き込み権限を要する（→ ACE を付けていないハードリンクファイルは、偽装した書き込みスレッドからは置き換えられない）",
+      "evidence": [
+        {
+          "source": "sources/ms_replacefile.txt",
+          "line": 37,
+          "quote": "The function attempts to open this file with the SYNCHRONIZE, GENERIC_READ, GENERIC_WRITE, DELETE, and WRITE_DACaccess rights so that it can preserve all attributes and ACLs."
+        }
+      ]
+    },
+    {
+      "id": "M-11b",
+      "verdict": "推論",
+      "claim": "ReplaceFileW で置き換えるとハードリンクは切り離され、外部の別名は元の内容を保つ（直接の記述なし。Phase 2 のテストで実測）。偽装時のアクセス判定はスレッドのトークンで行われる",
+      "evidence": [
+        {
+          "source": "sources/ms_setthreadtoken.txt",
+          "line": 14,
+          "quote": "The SetThreadTokenfunction assigns an impersonation tokento a thread."
+        },
+        {
+          "source": "sources/ms_client_impersonation.txt",
+          "line": 14,
+          "quote": "Impersonationis the ability of a thread to execute using different security information than the process that owns the thread."
+        }
+      ]
+    },
+    {
+      "id": "M-13",
+      "verdict": "確認",
+      "claim": "Rev 2 は環境変数を除外リスト方式で取り除く",
+      "evidence": [
+        {
+          "source": "../design_draft.md",
+          "line": 184,
+          "quote": "Strips sensitive host environment variables (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `AWS_*`, `GITHUB_TOKEN`)"
+        }
+      ]
+    },
+    {
+      "id": "M-14",
+      "verdict": "確認",
+      "claim": "--allow-net は v25.0.0 で追加された。v24 の --permission はネットワークを制限しない。Node 自身が『seat belt』で悪意あるコードへの保証はないとしている。Node 26 は Active LTS。stripTypeScriptTypes は RC",
+      "evidence": [
+        {
+          "source": "sources/node_cli.txt",
+          "line": 502,
+          "quote": "--allow-net#…Added in: v25.0.0",
+          "span": 1
+        },
+        {
+          "source": "sources/node_permissions_v24.txt",
+          "line": 106,
+          "quote": "When starting Node.js with --permission, the ability to access the file system through the fsmodule, spawn processes, use node:worker_threads, use native addons, use WASI, and enable the runtime inspector will be restricted."
+        },
+        {
+          "source": "sources/node_permissions.txt",
+          "line": 92,
+          "quote": "It does not provide security guarantees in the presence of malicious code."
+        },
+        {
+          "source": "sources/node_release.txt",
+          "line": 12,
+          "quote": "| [26.x][] | **Active LTS**      | [Lithium][]  | 2026-05-05     | 2026-10-28"
+        },
+        {
+          "source": "sources/node_module.txt",
+          "line": 250,
+          "quote": "Added in: v23.2.0, v22.13.0History…Stability: 1.2 - Release candidate",
+          "span": 6
+        }
+      ]
+    },
+    {
+      "id": "M-18",
+      "verdict": "確認",
+      "claim": "GitHub ホスト型の Windows ランナーは Server 2022/2025 と Windows 11 Arm だけで、Windows 10 はない",
+      "evidence": [
+        {
+          "source": "sources/gh_runner_images.txt",
+          "line": 40,
+          "quote": "| Windows Server 2025<br>"
+        },
+        {
+          "source": "sources/gh_runner_images.txt",
+          "line": 41,
+          "quote": "| Windows Server 2022<br>"
+        },
+        {
+          "source": "sources/gh_runner_images.txt",
+          "line": 42,
+          "quote": "| Windows 11 Arm64<br>"
+        }
+      ]
+    },
+    {
+      "id": "M-19",
+      "verdict": "確認",
+      "claim": "ワークスペースに付けた ACE は常駐する変更として残る（後始末が必要）",
+      "evidence": [
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 43,
+          "quote": "standing workspace security-descriptor mutations (the reuse cache, plus inert residue when a workspace is renamed)"
+        }
+      ]
+    },
+    {
+      "id": "W-1",
+      "verdict": "確認",
+      "claim": "CreateProcessAsUserW: 呼び出し元のトークンを制限したものなら SE_ASSIGNPRIMARYTOKEN は不要。JOB_LIST は Windows 10 以降、HANDLE_LIST で継承するハンドルを限定できる。SidsToDisable は deny-only",
+      "evidence": [
+        {
+          "source": "sources/ms_createprocessasuser.txt",
+          "line": 34,
+          "quote": "If hTokenis a restricted version of the caller's primary token, the SE_ASSIGNPRIMARYTOKEN_NAMEprivilege is not required."
+        },
+        {
+          "source": "sources/ms_updateprocthreadattribute.txt",
+          "line": 79,
+          "quote": "PROC_THREAD_ATTRIBUTE_JOB_LIST…Supported in Windows 10 and newer",
+          "span": 2
+        },
+        {
+          "source": "sources/ms_updateprocthreadattribute.txt",
+          "line": 37,
+          "quote": "PROC_THREAD_ATTRIBUTE_HANDLE_LIST…a pointer to a list of handles to be inherited by the child process.",
+          "span": 1
+        },
+        {
+          "source": "sources/ms_createrestrictedtoken.txt",
+          "line": 56,
+          "quote": "specify the deny-only SIDs in the restricted token"
+        }
+      ]
+    },
+    {
+      "id": "W-2",
+      "verdict": "確認",
+      "claim": "LUA_TOKEN を付けるとビルトイン Administrator がプロセスを起動できない。MXC は Windows 11 24H2 以降。AppContainer には既定の読み取り権限がない",
+      "evidence": [
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 57,
+          "quote": "with that flag, the built-in Administrator user cannot start any process"
+        },
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 31,
+          "quote": "sets the product floor at Windows 11 24H2 (build 26100)"
+        },
+        {
+          "source": "sources/dsh_note_sandbox_win.txt",
+          "line": 35,
+          "quote": "An AppContainer token carries no ambient read access"
+        }
+      ]
+    },
+    {
+      "id": "W-3",
+      "verdict": "確認",
+      "claim": "ConPTY は Windows 10 1809 以降。Windows 10 のサポートは 2025-10-14 に終了",
+      "evidence": [
+        {
+          "source": "sources/ms_createpseudoconsole.txt",
+          "line": 54,
+          "quote": "Windows 10 October 2018 Update (version 1809)"
+        },
+        {
+          "source": "sources/ms_win10_lifecycle.txt",
+          "line": 10,
+          "quote": "Windows 10 will reach end of support on October 14, 2025."
+        }
+      ]
+    },
+    {
+      "id": "W-4",
+      "verdict": "修正",
+      "claim": "【改善】ファイルシステムの判定は名前の比較ではなく FILE_PERSISTENT_ACLS フラグで行うべき。exFAT と FAT32 は ACL もハードリンクも持たない。F: は exFAT、G: は FAT32 と表示されることを実測で確認",
+      "evidence": [
+        {
+          "source": "sources/ms_getvolumeinformation.txt",
+          "line": 61,
+          "quote": "The specified volume preserves and enforces access control lists (ACL). For example, the NTFS file system preserves and enforces ACLs, and the FAT file system does not."
+        },
+        {
+          "source": "sources/ms_fs_comparison.txt",
+          "line": 60,
+          "quote": "Hard links…Yes…No…Yes…No",
+          "span": 4
+        },
+        {
+          "source": "sources/ms_fs_comparison.txt",
+          "line": 178,
+          "quote": "Access control lists…Yes…No…No…No",
+          "span": 4
+        },
+        {
+          "source": "experiments/fs_probe.log",
+          "line": 1,
+          "quote": "fsutil hardlink: Error: Incorrect function."
+        },
+        {
+          "source": "experiments/fs_probe.log",
+          "line": 4,
+          "quote": "fsinfo F: File System Name : exFAT"
+        },
+        {
+          "source": "experiments/fs_probe.log",
+          "line": 8,
+          "quote": "File System Name : FAT32"
+        }
+      ]
+    },
+    {
+      "id": "W-5",
+      "verdict": "修正",
+      "claim": "【注記】cordis の npm 上の latest タグは 4.0.0-rc.12（RC）。『正確なバージョンで固定』は RC に依存することになる点を明記する",
+      "evidence": [
+        {
+          "source": "sources/cordis_npm.txt",
+          "line": 4,
+          "quote": "cordis-4.0.0-rc.12.tgz"
+        }
+      ]
+    },
+    {
+      "id": "U-1",
+      "verdict": "推論",
+      "claim": "未検証のまま残る設計判断: ポリシーは境界ではない（M-3）、ReadBeforeEdit のハッシュ化（M-12）、予算のクランプ（M-15）、改ざんチェック（M-16）、フェーズの並べ替え（M-17）、.git への拒否 ACE（R-3 の後半）。いずれも一次ソースの事実ではなく設計判断なので、各フェーズの終了条件テストで検証する",
+      "evidence": []
+    }
+  ]
+}

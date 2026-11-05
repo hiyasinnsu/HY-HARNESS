@@ -1,0 +1,37 @@
+[package]
+name = "hy-exec-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+encoding_rs = "0.8.35"
+globset = "0.4.21"
+hex = "0.4.3"
+hy-execpolicy = { version = "0.1.0", path = "../hy-execpolicy" }
+hy-sandbox-windows = { version = "0.1.0", path = "../hy-sandbox-windows" }
+hy-protocol = { version = "0.1.0", path = "../hy-protocol" }
+parking_lot = "0.13.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-util = "0.7.20"
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+] }

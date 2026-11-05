@@ -1,0 +1,52 @@
+Source: https://learn.microsoft.com/en-us/windows/win32/fileio/hard-links-and-junctions
+Fetched: 2026-11-02
+
+ Hard Links and Junctions - Win32 apps | Microsoft Learn
+Table of contents Exit editor mode
+Ask LearnAsk Learn
+Reading modeTable of contentsRead in EnglishAddAdd to PlansEditCopy MarkdownPrint
+Note
+Access to this page requires authorization. You can try signing inor changing directories.
+Access to this page requires authorization. You can try changing directories.
+Hard links and junctions
+Feedback
+Summarize this article for me
+The NTFS file system supports three types of file links: hard links, junctions, and symbolic links. This article is an overview of hard links and junctions. For information about symbolic links, see Create symbolic links.
+Hard links
+A hard linkis the file-system representation of a file by which more than one path references a single file in the same volume. To create a hard link, use the CreateHardLinkAfunction.
+Any changes made to a hard-linked file are instantly visible to applications that access it through the links that reference it. The attributes on the file are reflected in every hard link to that file, and changes to that file's attributes propagate to all the hard links. However, the directory entry size and attribute information of the file are visiblyupdated only at the link through which the change was made. For example, if you clear the read-only attribute flag on a particular hard link so you can delete that hard link, and there are multiple hard links to the file, the other hard links display that the read-only attribute is still set, which isn't true. To change the file back to the read-only state, you must set the read-only flag on the file from one of its remaining hard links.
+For example, in a system where C:and D:are local drives and Z:is a network drive mapped to \\fred\share, the following references are permitted as a hard link:
+C:\dira\ethel.txtlinked to C:\dirb\dirc\lucy.txt
+D:\dir1\tinker.txtlinked to D:\dir2\dirx\bell.txt
+C:\diry\bob.baklinked to C:\dir2\mina.txt
+This is because all the links are files on the same volume. Hard links can't reference directories, only files, and they can't reference files on different volumes.
+The following references aren't permitted:
+C:\diralinked to C:\dirb
+C:\dira\ethel.txtlinked to D:\dirb\lucy.txt
+C:\dira\ethel.txtlinked to Z:\dirb\lucy.txt
+To delete a hard link, use the DeleteFileAfunction. You can delete hard links in any order regardless of the order in which they're created.
+Junctions
+A junction(also called a soft link) differs from a hard link in that the storage objects it references are separate directories. A junction can also link directories located on different local volumes on the same computer. Otherwise, junctions operate identically to hard links. Junctions are implemented through reparse points.
+Assuming the same conditions in the Hard Links section, the following references are permitted as junctions:
+C:\diralinked to C:\dirb\dirc
+C:\dirxlinked to D:\diry
+The following references aren't permitted because they reference mapped network volumes, or they directly reference files:
+C:\dira\one.txtlinked to C:\dirb\two.txt
+C:\dir1linked to Z:\dir2
+Related content
+Create symbolic links
+Reparse points
+Feedback
+Was this page helpful?
+YesNoNo
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?
+Additional resources
+Last updated on 2025-07-08
+Was this page helpful?
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?

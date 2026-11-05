@@ -1,0 +1,236 @@
+Source: https://nodejs.org/docs/latest-v24.x/api/permissions.html
+Fetched: 2026-11-02
+
+      Permissions | Node.js v24.22.2 Documentation         Skip to content
+ Node.js
+About this documentation
+Usage and example
+Assertion testing
+Asynchronous context tracking
+Async hooks
+Buffer
+C++ addons
+C/C++ addons with Node-API
+C++ embedder API
+Child processes
+Cluster
+Command-line options
+Console
+Crypto
+Debugger
+Deprecated APIs
+Diagnostics Channel
+DNS
+Domain
+Environment Variables
+Errors
+Events
+File system
+Globals
+HTTP
+HTTP/2
+HTTPS
+Inspector
+Internationalization
+Iterable Streams API
+Modules: CommonJS modules
+Modules: ECMAScript modules
+Modules: node:moduleAPI
+Modules: Packages
+Modules: TypeScript
+Net
+OS
+Path
+Performance hooks
+Permissions
+Process
+Punycode
+Query strings
+Readline
+REPL
+Report
+Single executable applications
+SQLite
+Stream
+String decoder
+Test runner
+Timers
+TLS/SSL
+Trace events
+TTY
+UDP/datagram
+URL
+Utilities
+V8
+VM
+WASI
+Web Crypto API
+Web Streams API
+Worker threads
+Zlib
+Code repository and issue tracker
+ Table of contents
+Permissions
+Process-based permissions
+Permission Model
+Runtime API
+permission.has(scope[, reference])
+permission.drop(scope[, reference])
+Audit Mode
+File System Permissions
+Configuration file support
+Using the Permission Model with npx
+Permission Model constraints
+process._debugProcess() and cross-process Inspector activation
+Limitations and Known Issues
+Permissions#
+Permissions can be used to control what system resources the Node.js process has access to or what actions the process can take with those resources.
+Process-based permissionscontrol the Node.js process's access to resources. The resource can be entirely allowed or denied, or actions related to it can be controlled. For example, file system reads can be allowed while denying writes. This feature does not protect against malicious code. According to the Node.js Security Policy, Node.js trusts any code it is asked to run.
+The permission model implements a "seat belt" approach, which prevents trusted code from unintentionally changing files or using resources that access has not explicitly been granted to. It does not provide security guarantees in the presence of malicious code. Malicious code can bypass the permission model and execute arbitrary code without the restrictions imposed by the permission model.
+If you find a potential security vulnerability, please refer to our Security Policy.
+Process-based permissions#
+Permission Model#
+ History
+Version
+Changes
+v23.5.0, v22.13.0
+This feature is no longer experimental.
+v20.0.0
+Added in: v20.0.0
+Stability: 2- Stable
+The Node.js Permission Model is a mechanism for restricting access to specific resources during execution. The API exists behind a flag --permissionwhich when enabled, will restrict access to all available permissions.
+The available permissions are documented by the --permissionflag.
+The Permission Model has two operational modes:
+Enforce mode(default when using --permission): Access is denied and an ERR_ACCESS_DENIEDerror is thrown for any operation the process has not been granted permission to perform.
+Audit mode(when using --permission-audit): Permission checks are performed and violations are published through the diagnostics channel, but access is notdenied. Execution continues normally. This mode is useful for discovering what permissions your application requires before deploying with enforce mode.
+When starting Node.js with --permission, the ability to access the file system through the fsmodule, spawn processes, use node:worker_threads, use native addons, use WASI, and enable the runtime inspector will be restricted.
+$ node --permission index.js
+Error: Access to this API has been restricted
+    at node:internal/main/run_main_module:23:47 {
+  code: 'ERR_ACCESS_DENIED',
+  permission: 'FileSystemRead',
+  resource: '/home/user/index.js'
+} copy
+Allowing access to spawning a process and creating worker threads can be done using the --allow-child-processand --allow-workerrespectively.
+To allow native addons when using permission model, use the --allow-addonsflag. For WASI, use the --allow-wasiflag.
+To allow use of OpenSSL STORE loaders, for example to load a private key from a <URL>passed to crypto.createPrivateKey(), use the --allow-openssl-storeflag. This flag grants broad authority to configured OpenSSL STORE loaders, which may access files, devices, tokens, or the network. Access performed by a loader is not constrained by the fs.reador fs.writepermission scopes.
+Runtime API#
+When enabling the Permission Model through the --permissionor --permission-auditflags, a new property permissionis added to the processobject. This property contains the following functions:
+permission.has(scope[, reference])#
+API call to check permissions at runtime (permission.has())
+process.permission.has('fs.write'); // true
+process.permission.has('fs.write', '/home/rafaelgss/protected-folder'); // true
+process.permission.has('fs.read'); // true
+process.permission.has('fs.read', '/home/rafaelgss/protected-folder'); // false copy
+permission.drop(scope[, reference])#
+API call to drop permissions at runtime. This operation is irreversible.
+When called without a reference, the entire scope is dropped. When called with a reference, only the permission for that specific resource is revoked. Dropping a permission only affects future access checks. It does not close or revoke access to resources that are already open, such as file descriptors, child processes, or worker threads. Applications are responsible for closing or terminating those resources when they are no longer needed.
+You can only drop the exact resource that was explicitly granted. The reference passed to drop()must match the original grant. If a permission was granted using a wildcard (*), only the entire scope can be dropped (by calling drop()without a reference). If a directory was granted (e.g. --allow-fs-read=/my/folder), you cannot drop individual files inside it - you must drop the same directory that was originally granted.
+const fs = require('node:fs');
+// Read config at startup while we still have permission
+const config = fs.readFileSync('/etc/myapp/config.json', 'utf8');
+// Drop read access to /etc/myapp after initialization
+process.permission.drop('fs.read', '/etc/myapp');
+// This will now return false
+process.permission.has('fs.read', '/etc/myapp/config.json'); // false
+// Drop child process permission entirely
+process.permission.drop('child'); copy
+Audit Mode#
+The --permission-auditflag enables audit mode for the Permission Model. In audit mode, permission checks are performed but access is notdenied — no ERR_ACCESS_DENIEDerror is thrown. Instead, each permission violation is published through the node:diagnostics_channelmodule, allowing the application to observe and log which operations would be denied under enforce mode. Execution continues normally.
+Audit mode is useful for discovering what permissions your application requires before deploying with --permission. It can also be combined with the --allow-fs-read, --allow-fs-write, --allow-child-process, --allow-worker, --allow-addons, and --allow-wasiflags to audit a subset of permissions while granting others.
+When a permission check fails in audit mode, a message is published to the diagnostics channel corresponding to the denied scope. The channel names are:
+node:permission-model:fs— File System (read and write)
+node:permission-model:child— Child Process
+node:permission-model:worker— Worker Threads
+node:permission-model:inspector— Inspector
+node:permission-model:wasi— WASI
+node:permission-model:addon— Native Addons
+Each message is an object with the following properties:
+permission <string>The name of the denied permission scope.
+resource <string>The resource that access was denied to (e.g. a file path).
+const diagnostics_channel = require('node:diagnostics_channel');
+diagnostics_channel.channel('node:permission-model:fs').subscribe((msg) => {
+  console.log(`Permission denied: ${msg.permission} on ${msg.resource}`);
+});
+// Running with --permission-audit, this publishes a diagnostics channel
+// message but does not throw
+const fs = require('node:fs');
+fs.readFileSync('/etc/passwd'); copy
+If both --permissionand --permission-auditare specified, --permissiontakes precedence and the Permission Model runs in enforce mode.
+File System Permissions#
+The Permission Model, by default, restricts access to the file system through the node:fsmodule. It does not guarantee that users will not be able to access the file system through other means, such as through the node:sqlitemodule.
+To allow access to the file system, use the --allow-fs-readand --allow-fs-writeflags:
+$ node --permission --allow-fs-read=* --allow-fs-write=* index.js
+Hello world! copy
+By default the entrypoints of your application are included in the allowed file system read list. For example:
+$ node --permission index.js copy
+index.jswill be included in the allowed file system read list
+$ node -r /path/to/custom-require.js --permission index.js copy
+/path/to/custom-require.jswill be included in the allowed file system read list.
+index.jswill be included in the allowed file system read list.
+The valid arguments for both flags are:
+*- To allow all FileSystemReador FileSystemWriteoperations, respectively.
+Relative paths to the current working directory.
+Absolute paths.
+Example:
+--allow-fs-read=*- It will allow all FileSystemReadoperations.
+--allow-fs-write=*- It will allow all FileSystemWriteoperations.
+--allow-fs-write=/tmp/- It will allow FileSystemWriteaccess to the /tmp/folder.
+--allow-fs-read=/tmp/ --allow-fs-read=/home/.gitignore- It allows FileSystemReadaccess to the /tmp/folder andthe /home/.gitignorepath.
+Wildcards are supported too:
+--allow-fs-read=/home/test*will allow read access to everything that matches the wildcard. e.g: /home/test/file1or /home/test2
+After passing a wildcard character (*) all subsequent characters will be ignored. For example: /home/*.jswill work similar to /home/*.
+When the permission model is initialized, it will automatically add a wildcard (*) if the specified directory exists. For example, if /home/test/filesexists, it will be treated as /home/test/files/*. However, if the directory does not exist, the wildcard will not be added, and access will be limited to /home/test/files. If you want to allow access to a folder that does not exist yet, make sure to explicitly include the wildcard: /my-path/folder-do-not-exist/*.
+Some node:fsoperations act on an already-open file descriptor rather than a path, so they cannot be tied to a --allow-fs-reador --allow-fs-writegrant. When the permission model is enabled these operations are disabled and throw ERR_ACCESS_DENIED, regardless of how the descriptor was obtained. This applies both to the top-level node:fsfunctions and to the equivalent FileHandlemethods, and currently includes fsync/fdatasync, fchmod, and fchown(and their synchronous variants).
+Configuration file support#
+In addition to passing permission flags on the command line, they can also be declared in a Node.js configuration file when using the experimental [--experimental-config-file][] flag. Permission options must be placed inside the permissiontop-level object.
+Example node.config.json:
+{
+  "permission": {
+    "allow-fs-read": ["./foo"],
+    "allow-fs-write": ["./bar"],
+    "allow-child-process": true,
+    "allow-worker": true,
+    "allow-addons": false,
+    "allow-openssl-store": false
+  }
+} copy
+Run with the configuration file:
+$ node --permission --experimental-default-config-file app.js copy
+Using the Permission Model with npx#
+If you're using npxto execute a Node.js script, you can enable the Permission Model by passing the --node-optionsflag. For example:
+npx --node-options="--permission" package-name copy
+This sets the NODE_OPTIONSenvironment variable for all Node.js processes spawned by npx, without affecting the npxprocess itself.
+FileSystemRead Error with npx
+The above command will likely throw a FileSystemReadinvalid access error because Node.js requires file system read access to locate and execute the package. To avoid this:
+Using a Globally Installed PackageGrant read access to the global node_modulesdirectory by running:
+npx --node-options="--permission --allow-fs-read=$(npm prefix -g)" package-name copy
+Using the npxCacheIf you are installing the package temporarily or relying on the npxcache, grant read access to the npm cache directory:
+npx --node-options="--permission --allow-fs-read=$(npm config get cache)" package-name copy
+Any arguments you would normally pass to node(e.g., --allow-*flags) can also be passed through the --node-optionsflag. This flexibility makes it easy to configure permissions as needed when using npx.
+Permission Model constraints#
+There are constraints you need to know before using this system:
+The model does not inherit to a worker thread.
+When using the Permission Model the following features will be restricted:
+Native modules
+Child process
+Worker Threads
+Inspector protocol
+File system access
+WASI
+OpenSSL STORE loaders
+The Permission Model is initialized after the Node.js environment is set up. However, certain flags such as --env-fileor --openssl-configare designed to read files before environment initialization. As a result, such flags are not subject to the rules of the Permission Model. The same applies for V8 flags that can be set via runtime through v8.setFlagsFromString.
+Files that Node.js itself creates, writes, or reads at a location selected by an operator flag may not be consistently checked against the Permission Model, in particular when the flag accepts a template or pattern that expands to several paths. For example, trace files rotated by --trace-event-file-pattern(${rotation}) can be written even when the expanded path is not covered by --allow-fs-write. Because the location is chosen by the operator, gaps like this are treated as regular bugs rather than vulnerabilities. Please report them through the regular issue tracker.
+OpenSSL engines cannot be requested at runtime when the Permission Model is enabled, affecting the built-in crypto, https, and tls modules.
+Run-Time Loadable Extensions cannot be loaded when the Permission Model is enabled, affecting the sqlite module.
+Using existing file descriptors via the node:fsmodule bypasses the Permission Model.
+process._debugProcess() and cross-process Inspector activation#
+The kInspectorpermission scope restricts the current process from opening its own V8 Inspector. However, process._debugProcess(pid) — which sends an OS-level signal (SIGUSR1 on POSIX, a remote thread on Windows) to an external process — is not gated by the kInspectorscope or any other Permission Model scope.
+A sandboxed process running under --permission with no additional grants can call process._debugProcess(pid) to force another Node.js process to open its V8 Inspector. The target process does not need to be running under --permission for this to work — any Node.js process running on the same host under the same OS user can be signaled.
+This is consistent with the Node.js threat model: Node.js trusts the OS environment in which it runs. Cross-process signaling is an operating-system-level capability; restricting it is the responsibility of the operator (for example, using OS-level process isolation, separate OS users per process, or seccomp/AppArmor profiles on Linux).
+Developers relying on --permission to sandbox untrusted code should be aware that:
+process._debugProcess() is callable from any sandboxed process with no grants.
+If a target Node.js process is running on the same host under the same OS user, it can be forced to open its Inspector via this API.
+To prevent this, run sandboxed and target processes under different OS users, or use OS-level isolation mechanisms outside of Node.js.
+Limitations and Known Issues#
+Symbolic links will be followed even to locations outside of the set of paths that access has been granted to. Relative symbolic links may allow access to arbitrary files and directories. When starting applications with the permission model enabled, you must ensure that no paths to which access has been granted contain relative symbolic links.

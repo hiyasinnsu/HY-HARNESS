@@ -1,0 +1,42 @@
+Source: https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control
+Fetched: 2026-11-02
+
+ Mandatory Integrity Control - Win32 apps | Microsoft Learn
+Table of contents Exit editor mode
+Ask LearnAsk Learn
+Reading modeTable of contentsRead in EnglishAddAdd to PlansEditCopy MarkdownPrint
+Note
+Access to this page requires authorization. You can try signing inor changing directories.
+Access to this page requires authorization. You can try changing directories.
+Mandatory Integrity Control mechanism
+Feedback
+Summarize this article for me
+Mandatory Integrity Control (MIC) provides a mechanism for controlling access to securable objects. This mechanism is in addition to discretionary access control and evaluates access before access checks against an object's discretionary access control list(DACL) are evaluated.
+MIC uses integrity levels and mandatory policy to evaluate access. Security principalsand securable objects are assigned integrity levels that determine their levels of protection or access. For example, a principal with a low integrity level cannot write to an object with a medium integrity level, even if that object's DACL allows write access to the principal.
+Windows defines four integrity levels: low, medium, high, and system. Standard users receive medium, elevated users receive high. Processes you start and objects you create receive your integrity level (medium or high) or low if the executable file's level is low; system services receive system integrity. Objects that lack an integrity label are treated as medium by the operating system; this prevents low-integrity code from modifying unlabeled objects. Additionally, Windows ensures that processes running with a low integrity level cannot obtain access to a process which is associated with an app container.
+Integrity Labels
+Integrity labels specify the integrity levels of securable objects and security principals. Integrity labels are represented by integrity SIDs. The integrity SID for a securable object is stored in its system access control list(SACL). The SACL contains a SYSTEM_MANDATORY_LABEL_ACE access control entry(ACE) that in turn contains the integrity SID. Any object without an integrity SID is treated as if it had medium integrity.
+The integrity SID for a security principal is stored in its access token. An access token may contain one or more integrity SIDs.
+For detailed information about the defined integrity SIDs, see Well-known SIDs.
+Process Creation
+When a user attempts to launch an executable file, the new process is created with the minimum of the user integrity level and the file integrity level. This means that the new process will never execute with higher integrity than the executable file. If the administrator user executes a low integrity program, the token for the new process functions with the low integrity level. This helps protect a user who launches untrustworthy code from malicious acts performed by that code. The user data, which is at the typical user integrity level, is write-protected against this new process.
+Mandatory Policy
+The SYSTEM_MANDATORY_LABEL_ACEACE in the SACL of a securable object contains an access mask that specifies the access that principals with integrity levels lower than the object are granted. The values defined for this access mask are SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, SYSTEM_MANDATORY_LABEL_NO_READ_UP, and SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP. By default, the system creates every object with an access mask of SYSTEM_MANDATORY_LABEL_NO_WRITE_UP.
+Every access token also specifies a mandatory policy that is set by the Local Security Authority(LSA) when the token is created. This policy is specified by a TOKEN_MANDATORY_POLICYstructure associated with the token. This structure can be queried by calling the GetTokenInformationfunction with the value of the TokenInformationClassparameter set to TokenMandatoryPolicy.
+Related content
+Security principals
+Discretionary access control list (DACL)
+Feedback
+Was this page helpful?
+YesNoNo
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?
+Additional resources
+Last updated on 2025-07-08
+Was this page helpful?
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?

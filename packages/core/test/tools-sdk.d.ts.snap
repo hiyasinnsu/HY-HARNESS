@@ -1,0 +1,34 @@
+declare namespace tools {
+  type Job = { jobId: string; command: string; state: 'running' | 'exited' | 'killed'; exitCode?: number | null; outputBytes: number }
+  type NoteCount = { entries: number; tokens: number }
+  /** Read a workspace file (read before editing). Added roots use root:path. */
+  function readFile(args: { path: string; startLine?: number; endLine?: number }): Promise<{ content: string; totalLines: number; truncated: boolean }>
+  /** Diff, or file + content. Read existing files first. Added roots: whole-file content with root. */
+  function applyPatch(args: { patch: string } | { file: string; content: string; root?: string }): Promise<{ appliedFiles: string[]; created: string[]; deleted: string[]; warnings: string[] }>
+  /** Run a command; after foregroundWaitMs it becomes a job. root: workspace root ID (default main). Windows: PowerShell, not grep/head/find. */
+  function shell(args: { command: string; root?: string; cwd?: string; foregroundWaitMs?: number; hardTimeoutMs?: number; persistent?: boolean; stdinPipe?: boolean }): Promise<{ status: 'completed' | 'backgrounded'; exitCode?: number | null; stdout: string; stderr: string; jobId?: string | null; gap?: string }>
+  namespace search {
+    /** Glob paths (skips .git/node_modules/.hy-harness). root:* = all roots. */
+    function glob(args: { pattern: string; root?: string; maxResults?: number }): Promise<{ files: string[]; truncated: boolean }>
+    /** Regex lines; optional glob. root:* = all roots. */
+    function grep(args: { pattern: string; root?: string; glob?: string; ignoreCase?: boolean; maxResults?: number }): Promise<{ matches: { path: string; line: number; text: string }[]; truncated: boolean; filesSearched: number }>
+  }
+  namespace jobs {
+    /** State of a background job. */
+    function status(args: { jobId: string }): Promise<Job>
+    /** A page of a job's output from offset. */
+    function output(args: { jobId: string; offset?: number; maxBytes?: number }): Promise<{ data: string; nextOffset: number; totalBytes: number; eof: boolean }>
+    /** Wait up to timeoutMs for a job to finish. */
+    function wait(args: { jobId: string; timeoutMs?: number }): Promise<Job>
+    /** Kill a job and its process tree. */
+    function kill(args: { jobId: string }): Promise<Job>
+  }
+  namespace rationale {
+    /** A note that survives compaction (max 12 / ~1500 tokens). */
+    function upsert(args: { key: string; rule: string; rationale?: string }): Promise<NoteCount>
+    /** Replace oldKey with a new note. */
+    function supersede(args: { oldKey: string; newKey: string; rule: string; rationale?: string }): Promise<NoteCount>
+    /** Delete a note. */
+    function remove(args: { key: string }): Promise<NoteCount>
+  }
+}

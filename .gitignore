@@ -1,0 +1,10 @@
+/target/
+node_modules/
+dist/
+/release/
+*.tsbuildinfo
+/.hy-harness/state/
+/.refs/
+
+# Local build / packaging / integration run logs
+/*.log

@@ -1,0 +1,56 @@
+appId: com.hy-harness.desktop
+productName: HY-HARNESS
+# A fixed file name: the app replaces the running exe in place, so the name must
+# not change between releases. The version lives in the app (sidebar, bootstrap)
+# and in the signed release feed, not in the file name.
+artifactName: HY-HARNESS.${ext}
+
+directories:
+  output: release
+  buildResources: build
+
+# The main process imports packages/*/dist with relative paths, so keep the
+# repository layout instead of bundling a second entry point.
+files:
+  - package.json
+  - packages/desktop/dist/**/*
+  - packages/desktop/preload.cjs
+  - packages/desktop/update.mjs
+  - packages/desktop/update.ps1
+  - packages/desktop/update-register.ps1
+  - packages/desktop/assets/**/*
+  - packages/core/dist/**/*
+  - packages/seams/dist/**/*
+  - packages/hy-cli/dist/**/*
+  - packages/hy-cli/prompts/**/*
+  - packages/hy-cli/web/**/*
+  - "!**/*.test.*"
+  - "!**/*.map"
+
+# Native modules (node-pty) and the MCP executables need real files, not asar.
+asar: false
+npmRebuild: false
+electronFuses:
+  runAsNode: true
+
+extraResources:
+  - from: target/release/hy-exec-server.exe
+    to: hy-exec-server.exe
+  # CP-08: DPAPI helper for `hy secret` and for resolving stored keys.
+  - from: target/release/hy-secret.exe
+    to: hy-secret.exe
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: portable
+      arch:
+        - x64
+  requestedExecutionLevel: asInvoker
+
+# Some locked-down Windows hosts (AppLocker / endpoint policy / Google Drive
+# sync roots) refuse to start the external 7za.exe that electron-builder uses
+# for the portable payload. A portable build with useZip embeds win-unpacked
+# directly through makensis instead, so packaging needs no 7z child process.
+portable:
+  useZip: true

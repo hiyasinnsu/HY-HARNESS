@@ -1,0 +1,1250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hy-harness.local/api.schema.json",
+  "title": "HY-HARNESS HTTP API",
+  "version": "hy-api/1",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/health",
+      "summary": "Liveness probe.",
+      "response": "HealthResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/metrics",
+      "summary": "Process metrics: uptime, open sessions, RSS.",
+      "response": "MetricsResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/bootstrap",
+      "summary": "Config summary, sandbox status, plugins and features.",
+      "response": "Bootstrap"
+    },
+    {
+      "method": "GET",
+      "path": "/api/events",
+      "summary": "Server-wide SSE stream (sessions, automation).",
+      "response": "Sse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/models",
+      "summary": "Model catalog plus the roles in use.",
+      "response": "ModelsResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/onboarding",
+      "summary": "First-run wizard state (workspace, sandbox, model).",
+      "response": "OnboardingResponse"
+    },
+    {
+      "method": "POST",
+      "path": "/api/onboarding/complete",
+      "summary": "Finish the first-run wizard and apply its choices.",
+      "response": "OnboardingResponse",
+      "errors": [
+        400,
+        500
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "complete": {
+            "type": "boolean"
+          },
+          "skip": {
+            "type": "boolean"
+          },
+          "sandbox": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/update",
+      "summary": "Check the signed release feed (never runs on its own).",
+      "response": "UpdateCheck",
+      "errors": [
+        502
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "feed": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/update/fetch",
+      "summary": "Download and verify the newest signed release.",
+      "response": "UpdateFetch",
+      "errors": [
+        409,
+        502
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "feed": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/search",
+      "summary": "Full-text search over the session log.",
+      "response": "SearchResponse",
+      "request": {
+        "type": "object",
+        "properties": {
+          "q": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "cwd": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "q"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/references",
+      "summary": "@ reference candidates: files plus earlier chats.",
+      "response": "ReferencesResponse",
+      "request": {
+        "type": "object",
+        "properties": {
+          "q": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "exclude": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/open-in",
+      "summary": "Programs that can open a file on this machine.",
+      "response": "OpenInResponse"
+    },
+    {
+      "method": "POST",
+      "path": "/api/open-in",
+      "summary": "Open a workspace file in a detected program.",
+      "errors": [
+        400,
+        403,
+        404
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "path"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions",
+      "summary": "Session list (optionally filtered by ?search).",
+      "response": "SessionList"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions",
+      "summary": "Create a chat session.",
+      "response": "SessionCreated",
+      "errors": [
+        400
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id",
+      "summary": "One session: entries and state.",
+      "response": "SessionSnapshot"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/sessions/:id",
+      "summary": "Delete a chat and its log.",
+      "errors": [
+        404,
+        409
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/events",
+      "summary": "Session SSE stream.",
+      "response": "Sse"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/turn",
+      "summary": "Start a turn (or reserve one with queue:true).",
+      "response": "TurnAccepted",
+      "errors": [
+        400,
+        403,
+        409,
+        413
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "mimeType",
+                "data"
+              ],
+              "properties": {
+                "mimeType": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "queue": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/steer",
+      "summary": "Send a message into the running turn.",
+      "response": "SteerAccepted",
+      "errors": [
+        400,
+        403,
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "mimeType",
+                "data"
+              ],
+              "properties": {
+                "mimeType": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "message"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/cancel",
+      "summary": "Cancel the running turn.",
+      "response": "Ok"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/approval",
+      "summary": "Approve or deny a pending tool call.",
+      "errors": [
+        400,
+        404
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "approved": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "requestId",
+          "approved"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/answer",
+      "summary": "Answer `ask_user`.",
+      "errors": [
+        400,
+        404
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "answer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "requestId",
+          "answer"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/undo",
+      "summary": "Roll the last turn back.",
+      "errors": [
+        409
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/compact",
+      "summary": "Compact the conversation now."
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/plan-mode",
+      "summary": "Turn plan mode on or off.",
+      "errors": [
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "on": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/sandbox",
+      "summary": "Switch this session sandbox mode (grants when confined).",
+      "errors": [
+        400,
+        403,
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/effort",
+      "summary": "Set reasoning effort.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "effort": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/model",
+      "summary": "Switch the session model.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/title",
+      "summary": "Rename a chat.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/title/generate",
+      "summary": "Generate a chat name with the model (heuristic fallback).",
+      "response": "GeneratedTitle",
+      "errors": [
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/pin",
+      "summary": "Pin or unpin a chat.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "pinned": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/archive",
+      "summary": "Archive or unarchive a chat.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/status",
+      "summary": "Text status of the session.",
+      "response": "TextResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/plan",
+      "summary": "The todo list and plan mode.",
+      "response": "PlanResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/stats",
+      "summary": "Measured timings: steps, LLM/tool time, first answer.",
+      "response": "StatsResponse"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/fork",
+      "summary": "Copy this chat into a new one and continue there.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "upToSeq": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/feedback",
+      "summary": "Rate an answer (stored locally, never sent).",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "rating": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "entryId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rating"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/feedback",
+      "summary": "Feedback recorded for this chat.",
+      "response": "FeedbackResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/notes",
+      "summary": "Ledger notes as text.",
+      "response": "TextResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/diff",
+      "summary": "Diff since the run started.",
+      "response": "DiffResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/jobs",
+      "summary": "Background jobs of the session.",
+      "response": "JobsResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/trajectory",
+      "summary": "Recent session events.",
+      "response": "TrajectoryResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/subagents",
+      "summary": "Subagent transcripts (log-derived).",
+      "response": "SubagentsResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/subagents/:child",
+      "summary": "One subagent transcript.",
+      "response": "SubagentResponse",
+      "errors": [
+        400
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/agents",
+      "summary": "Background subagents (WP-22).",
+      "response": "AgentsResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/agents/:agent",
+      "summary": "One background subagent.",
+      "errors": [
+        404
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/agents/:agent/message",
+      "summary": "Follow-up to a background subagent.",
+      "errors": [
+        400,
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/agents/:agent/interrupt",
+      "summary": "Stop a background subagent.",
+      "errors": [
+        404,
+        409
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/agents/:agent/close",
+      "summary": "Close a background subagent.",
+      "errors": [
+        404,
+        409
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/document",
+      "summary": "Preview a PDF, image or (converted) Office document.",
+      "response": "FileResponse",
+      "errors": [
+        404,
+        415,
+        422
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/reveal",
+      "summary": "Show a presented file in the OS file manager.",
+      "errors": [
+        400,
+        404
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/review",
+      "summary": "Run a read-only review of the changes.",
+      "errors": [
+        400,
+        409
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/export",
+      "summary": "Markdown transcript export.",
+      "response": "ExportResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/goal",
+      "summary": "Current long-running goal.",
+      "response": "GoalResponse"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/goal",
+      "summary": "Create, edit, pause, resume or clear the goal.",
+      "errors": [
+        400,
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "objective": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "goal_id": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/mcp",
+      "summary": "MCP tools available to the session.",
+      "response": "McpResponse"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/mcp-call",
+      "summary": "Call an automation MCP tool directly.",
+      "errors": [
+        400,
+        403
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "server": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          },
+          "args": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "server",
+          "tool"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/plugins",
+      "summary": "Plugin tools of the session.",
+      "response": "PluginsResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/memory",
+      "summary": "Workspace memory entries.",
+      "response": "MemoryResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/skills",
+      "summary": "Skill catalog as text.",
+      "response": "TextResponse"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/terminal",
+      "summary": "Run one terminal command in the GUI panel.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/pty",
+      "summary": "PTY status.",
+      "response": "PtyStatus"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/:id/pty/events",
+      "summary": "PTY output stream.",
+      "response": "Sse"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/pty/start",
+      "summary": "Start the GUI shell.",
+      "errors": [
+        500
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "cols": {
+            "type": "number"
+          },
+          "rows": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/pty/input",
+      "summary": "Type into the GUI shell.",
+      "errors": [
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "data"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/pty/resize",
+      "summary": "Resize the GUI shell.",
+      "errors": [
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "cols": {
+            "type": "number"
+          },
+          "rows": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/pty/clear",
+      "summary": "Clear the GUI shell buffer.",
+      "errors": [
+        409
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/:id/pty/stop",
+      "summary": "Stop the GUI shell."
+    },
+    {
+      "method": "GET",
+      "path": "/api/turn-queue",
+      "summary": "Queued turns of one session.",
+      "response": "TurnQueueView",
+      "errors": [
+        400
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/turn-queue",
+      "summary": "Reserve a turn while another runs.",
+      "errors": [
+        400,
+        409,
+        413
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "mimeType",
+                "data"
+              ],
+              "properties": {
+                "mimeType": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "runId",
+          "message"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/turn-queue/cancel",
+      "summary": "Cancel one queued turn (or all).",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/turn-queue/resume",
+      "summary": "Resume a paused queue.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/turn-queue/resolve",
+      "summary": "Resolve an uncertain queued turn.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/orchestration",
+      "summary": "Orchestration state and workers.",
+      "response": "OrchestrationView"
+    },
+    {
+      "method": "POST",
+      "path": "/api/orchestration/start",
+      "summary": "Start orchestration.",
+      "errors": [
+        400,
+        409
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/orchestration/stop",
+      "summary": "Stop orchestration."
+    },
+    {
+      "method": "GET",
+      "path": "/api/automation",
+      "summary": "Schedules, webhooks and runs.",
+      "response": "AutomationData"
+    },
+    {
+      "method": "POST",
+      "path": "/api/automation/schedules",
+      "summary": "Create a schedule.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "objective": {
+            "type": "string"
+          },
+          "cron": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "objective"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/automation/webhooks",
+      "summary": "Create a webhook.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "objective": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "objective"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/ralph",
+      "summary": "Start a ralph job.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "objective": {
+            "type": "string"
+          },
+          "verifyCmds": {
+            "type": "array",
+            "items": {}
+          },
+          "cwd": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "objective"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/workspace/roots",
+      "summary": "Workspace roots.",
+      "response": "RootsResponse"
+    },
+    {
+      "method": "POST",
+      "path": "/api/workspace/roots",
+      "summary": "Add a workspace root.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "writable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/files/search",
+      "summary": "Find files by name.",
+      "response": "FileSearchResponse"
+    },
+    {
+      "method": "GET",
+      "path": "/api/files/tree",
+      "summary": "List a directory.",
+      "response": "FileTreeResponse",
+      "errors": [
+        400
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/files",
+      "summary": "Read one file.",
+      "response": "FileResponse",
+      "errors": [
+        400,
+        413,
+        415
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/settings",
+      "summary": "User config and active settings.",
+      "response": "SettingsResponse"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/settings",
+      "summary": "Save settings.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "roles": {
+            "type": "object"
+          },
+          "sandboxMode": {
+            "type": "string"
+          },
+          "autoApprove": {
+            "type": "boolean"
+          },
+          "fullAuto": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/plugins",
+      "summary": "Plugin catalog.",
+      "response": "PluginCatalog"
+    },
+    {
+      "method": "POST",
+      "path": "/api/plugins/reload",
+      "summary": "Reload plugin modules."
+    },
+    {
+      "method": "POST",
+      "path": "/api/webhooks/:id",
+      "summary": "Trigger a webhook (no session token; the path secret is the credential).",
+      "errors": [
+        404
+      ]
+    }
+  ]
+}

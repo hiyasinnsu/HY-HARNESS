@@ -1,0 +1,4 @@
+{"v":1,"seq":1,"ts":1730000000000,"sessionId":"fixture","runId":"run-fixture","type":"session/start","payload":{"createdAt":1730000000000,"kind":"chat"}}
+{"v":1,"seq":2,"ts":1730000001000,"sessionId":"fixture","runId":"run-fixture","type":"turn/start","payload":{"turn":1}}
+{"v":1,"seq":3,"ts":1730000002000,"sessionId":"fixture","runId":"run-fixture","type":"turn/end","payload":{"outcome":"completed"}}
+{"v":1,"seq":4,"ts":1730000003

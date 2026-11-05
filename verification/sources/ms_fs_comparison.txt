@@ -1,0 +1,251 @@
+Source: https://learn.microsoft.com/en-us/windows/win32/fileio/filesystem-functionality-comparison
+Fetched: 2026-11-02
+
+ File System Functionality Comparison - Win32 apps | Microsoft Learn
+Table of contents Exit editor mode
+Ask LearnAsk Learn
+Reading modeTable of contentsRead in EnglishAddAdd to PlansEditCopy MarkdownPrint
+Note
+Access to this page requires authorization. You can try signing inor changing directories.
+Access to this page requires authorization. You can try changing directories.
+File System Functionality Comparison
+Feedback
+Summarize this article for me
+The following tables list functionality and feature support comparisons for the four main Windows file systems, NTFS, exFAT, UDF, and FAT32:
+Functionality
+Limits
+Journaling and Change Log
+Block Allocation Features
+Security
+Compression
+Quotas
+Single-Instance Store
+Related topics
+Functionality
+Feature
+NTFS
+exFAT
+UDF
+FAT32
+Creation time stamps
+Yes
+Yes
+Yes
+Yes
+Last access time stamps
+No (see note below)
+Yes
+Yes
+Yes (date only)
+Last change time stamps
+Yes
+Yes
+Yes
+Yes
+Last archive time stamps
+No
+No
+No
+No
+Case-sensitive
+Yes (option)
+No
+Yes
+No
+Case-preserving
+Yes
+Yes
+Yes
+Yes
+Hard links
+Yes
+No
+Yes
+No
+Soft links
+Yes
+No
+No
+No
+Sparse files
+Yes
+No
+Yes
+No
+Named streams
+Yes
+No
+Yes
+No
+Oplocks
+Yes
+Yes
+Yes
+Yes
+Extended attributes
+Yes
+No
+Yes (on-disk only)
+No
+Alternate data streams
+Yes
+No
+Yes
+No
+Mount points
+Yes
+No
+No
+No
+Windows Server 2003 and Windows XP:The NTFS last access time stamp field is updated.
+Limits
+Feature
+NTFS
+exFAT
+UDF
+FAT32
+Maximum file name length
+255 Unicode characters
+255 Unicode characters
+127 Unicode or 254 ASCII characters
+255 Unicode characters
+Maximum path name length
+32,760 Unicode characters with each path component no more than 255 characters
+32,760 Unicode characters with each path component no more than 255 characters
+32,760 Unicode characters with each path component no more than 255 characters
+32,760 Unicode characters with each path component no more than 255 characters
+Maximum file size
+2^64–1 bytes
+2^64–1 bytes
+2^64–1 bytes
+4 GiB
+Maximum volume size
+16 TB (4 KB Cluster Size) or 256TB (64 KB Cluster Size)
+2^32–1 clusters (Maximum cluster size = 2^25–1)
+2^32 blocks
+2^32 blocks
+Journaling and Change Log
+Feature
+NTFS
+exFAT
+UDF
+FAT32
+Metadata-only journaling
+Yes
+No
+No
+No
+File change log
+Yes
+No
+No
+No
+Block Allocation Features
+Feature
+NTFS
+exFAT
+UDF
+FAT32
+Tail packing
+Yes (small files are made resident in the MFT stream descriptor)
+No
+No
+No
+Extents
+Yes
+No
+Yes
+No
+Variable block size
+No (set by the volume)
+No
+No
+No
+Security
+Feature
+NTFS
+exFAT
+UDF
+FAT32
+Track file owner
+Yes
+No
+No
+No
+POSIX file permissions
+No (available in POSIX subsystem feature)
+No
+Yes
+No
+Access control lists
+Yes
+No
+No
+No
+File system level encryption
+Yes
+No
+No
+No
+Checksum/ECC
+No
+Metadata
+Metadata
+No
+Compression
+Feature
+NTFS
+exFAT
+UDF
+FAT32
+Built-in compression
+Yes
+No
+No
+No
+Quotas
+Feature
+NTFS
+exFAT
+UDF
+FAT32
+User-level disk space
+Yes
+No
+No
+No
+Directory-level disk space
+No (see note below)
+No
+No
+No
+NoteThe directory-level disk space quotas feature on NTFS is available through the File Server Resource Manager.
+Single-Instance Store
+Feature
+NTFS
+exFAT
+UDF
+FAT32
+File level
+No (see note below)
+No
+No
+No
+NoteSingle-instance store for NTFS is available as part of the Single Instance Storage feature in Windows Server.
+Related topics
+About File Management
+Single-Instance Store and SIS Backup
+Feedback
+Was this page helpful?
+YesNoNo
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?
+Additional resources
+Last updated on 2023-03-27
+Was this page helpful?
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?

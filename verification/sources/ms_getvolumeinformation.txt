@@ -1,0 +1,209 @@
+Source: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationw
+Fetched: 2026-11-02
+
+ GetVolumeInformationW function (fileapi.h) - Win32 apps | Microsoft Learn
+Table of contents Exit editor mode
+Ask LearnAsk Learn
+Reading modeTable of contentsRead in EnglishAddAdd to PlansEditCopy MarkdownPrint
+Note
+Access to this page requires authorization. You can try signing inor changing directories.
+Access to this page requires authorization. You can try changing directories.
+GetVolumeInformationW function (fileapi.h)
+Feedback
+Summarize this article for me
+Retrieves information about the file system and volume associated with the specified root directory.
+To specify a handle when retrieving this information, use the GetVolumeInformationByHandleWfunction.
+To retrieve the current compression state of a file or directory, use FSCTL_GET_COMPRESSION.
+Syntax
+BOOL GetVolumeInformationW(
+  [in, optional]  LPCWSTR lpRootPathName,
+  [out, optional] LPWSTR  lpVolumeNameBuffer,
+  [in]            DWORD   nVolumeNameSize,
+  [out, optional] LPDWORD lpVolumeSerialNumber,
+  [out, optional] LPDWORD lpMaximumComponentLength,
+  [out, optional] LPDWORD lpFileSystemFlags,
+  [out, optional] LPWSTR  lpFileSystemNameBuffer,
+  [in]            DWORD   nFileSystemNameSize
+);
+Parameters
+[in, optional] lpRootPathName
+A pointer to a string that contains the root directory of the volume to be described.
+If this parameter is NULL, the root of the current directory is used. A trailing backslash is required. For example, specify \\MyServer\MyShare as "\\MyServer\MyShare\", or the C drive as "C:\".
+[out, optional] lpVolumeNameBuffer
+A pointer to a buffer that receives the name of a specified volume. The buffer size is specified by the nVolumeNameSizeparameter.
+[in] nVolumeNameSize
+The length of a volume name buffer, in TCHARs. The maximum buffer size is MAX_PATH+1.
+This parameter is ignored if the volume name buffer is not supplied.
+[out, optional] lpVolumeSerialNumber
+A pointer to a variable that receives the volume serial number.
+This parameter can be NULLif the serial number is not required.
+This function returns the volume serial number that the operating system assigns when a hard disk is formatted. To programmatically obtain the hard disk's serial number that the manufacturer assigns, use the Windows Management Instrumentation (WMI) Win32_PhysicalMediaproperty SerialNumber.
+[out, optional] lpMaximumComponentLength
+A pointer to a variable that receives the maximum length, in TCHARs, of a file name component that a specified file system supports.
+A file name component is the portion of a file name between backslashes.
+The value that is stored in the variable that *lpMaximumComponentLengthpoints to is used to indicate that a specified file system supports long names. For example, for a FAT file system that supports long names, the function stores the value 255, rather than the previous 8.3 indicator. Long names can also be supported on systems that use the NTFS file system.
+[out, optional] lpFileSystemFlags
+A pointer to a variable that receives flags associated with the specified file system.
+This parameter can be one or more of the following flags. However, FILE_FILE_COMPRESSIONand FILE_VOL_IS_COMPRESSEDare mutually exclusive.
+Value
+Meaning
+FILE_CASE_SENSITIVE_SEARCH
+0x00000001
+The specified volume supports case-sensitive file names.
+FILE_CASE_PRESERVED_NAMES
+0x00000002
+The specified volume supports preserved case of file names when it places a name on disk.
+FILE_UNICODE_ON_DISK
+0x00000004
+The specified volume supports Unicode in file names as they appear on disk.
+FILE_PERSISTENT_ACLS
+0x00000008
+The specified volume preserves and enforces access control lists (ACL). For example, the NTFS file system preserves and enforces ACLs, and the FAT file system does not.
+FILE_FILE_COMPRESSION
+0x00000010
+The specified volume supports file-based compression.
+FILE_VOLUME_QUOTAS
+0x00000020
+The specified volume supports disk quotas.
+FILE_SUPPORTS_SPARSE_FILES
+0x00000040
+The specified volume supports sparse files.
+FILE_SUPPORTS_REPARSE_POINTS
+0x00000080
+The specified volume supports reparse points.
+ReFS:ReFS supports reparse points but does not index them so FindFirstVolumeMountPointand FindNextVolumeMountPointwill not function as expected.
+FILE_SUPPORTS_REMOTE_STORAGE
+0x00000100
+The file system supports remote storage.
+FILE_RETURNS_CLEANUP_RESULT_INFO
+0x00000200
+On a successful cleanup operation, the file system returns information that describes additional actions taken during cleanup, such as deleting the file. File system filters can examine this information in their post-cleanup callback.
+FILE_SUPPORTS_POSIX_UNLINK_RENAME
+0x00000400
+The file system supports POSIX-style delete and rename operations.
+FILE_VOLUME_IS_COMPRESSED
+0x00008000
+The specified volume is a compressed volume, for example, a DoubleSpace volume.
+FILE_SUPPORTS_OBJECT_IDS
+0x00010000
+The specified volume supports object identifiers.
+FILE_SUPPORTS_ENCRYPTION
+0x00020000
+The specified volume supports the Encrypted File System (EFS). For more information, see File Encryption.
+FILE_NAMED_STREAMS
+0x00040000
+The specified volume supports named streams.
+FILE_READ_ONLY_VOLUME
+0x00080000
+The specified volume is read-only.
+FILE_SEQUENTIAL_WRITE_ONCE
+0x00100000
+The specified volume supports a single sequential write.
+FILE_SUPPORTS_TRANSACTIONS
+0x00200000
+The specified volume supports transactions. For more information, see About KTM.
+FILE_SUPPORTS_HARD_LINKS
+0x00400000
+The specified volume supports hard links. For more information, see Hard Links and Junctions.
+Windows Server 2008, Windows Vista, Windows Server 2003 and Windows XP:This value is not supported until Windows Server 2008 R2 and Windows 7.
+FILE_SUPPORTS_EXTENDED_ATTRIBUTES
+0x00800000
+The specified volume supports extended attributes. An extended attribute is a piece of application-specific metadata that an application can associate with a file and is not part of the file's data.
+Windows Server 2008, Windows Vista, Windows Server 2003 and Windows XP:This value is not supported until Windows Server 2008 R2 and Windows 7.
+FILE_SUPPORTS_OPEN_BY_FILE_ID
+0x01000000
+The file system supports open by FileID. For more information, see FILE_ID_BOTH_DIR_INFO.
+Windows Server 2008, Windows Vista, Windows Server 2003 and Windows XP:This value is not supported until Windows Server 2008 R2 and Windows 7.
+FILE_SUPPORTS_USN_JOURNAL
+0x02000000
+The specified volume supports update sequence number (USN) journals. For more information, see Change Journal Records.
+Windows Server 2008, Windows Vista, Windows Server 2003 and Windows XP:This value is not supported until Windows Server 2008 R2 and Windows 7.
+FILE_SUPPORTS_INTEGRITY_STREAMS
+0x04000000
+The file system supports integrity streams.
+FILE_SUPPORTS_BLOCK_REFCOUNTING
+0x08000000
+The specified volume supports sharing logical clusters between files on the same volume. The file system reallocates on writes to shared clusters. Indicates that FSCTL_DUPLICATE_EXTENTS_TO_FILEis a supported operation.
+FILE_SUPPORTS_SPARSE_VDL
+0x10000000
+The file system tracks whether each cluster of a file contains valid data (either from explicit file writes or automatic zeros) or invalid data (has not yet been written to or zeroed). File systems that use sparse valid data length (VDL) do not store a valid data length and do not require that valid data be contiguous within a file.
+FILE_DAX_VOLUME
+0x20000000
+The specified volume is a direct access (DAX) volume.
+Note:This flag was introduced in Windows 10, version 1607.
+FILE_SUPPORTS_GHOSTING
+0x40000000
+The file system supports ghosting.
+[out, optional] lpFileSystemNameBuffer
+A pointer to a buffer that receives the name of the file system, for example, the FAT file system or the NTFS file system. The buffer size is specified by the nFileSystemNameSizeparameter.
+[in] nFileSystemNameSize
+The length of the file system name buffer, in TCHARs. The maximum buffer size is MAX_PATH+1.
+This parameter is ignored if the file system name buffer is not supplied.
+Return value
+If all the requested information is retrieved, the return value is nonzero.
+If not all the requested information is retrieved, the return value is zero. To get extended error information, call GetLastError.
+Remarks
+When a user attempts to get information about a floppy drive that does not have a floppy disk, or a CD-ROM drive that does not have a compact disc, the system displays a message box for the user to insert a floppy disk or a compact disc, respectively. To prevent the system from displaying this message box, call the SetErrorModefunction with SEM_FAILCRITICALERRORS.
+The FILE_VOL_IS_COMPRESSEDflag is the only indicator of volume-based compression. The file system name is not altered to indicate compression, for example, this flag is returned set on a DoubleSpace volume. When compression is volume-based, an entire volume is compressed or not compressed.
+The FILE_FILE_COMPRESSIONflag indicates whether a file system supports file-based compression. When compression is file-based, individual files can be compressed or not compressed.
+The FILE_FILE_COMPRESSIONand FILE_VOL_IS_COMPRESSEDflags are mutually exclusive. Both bits cannot be returned set.
+The maximum component length value that is stored in lpMaximumComponentLengthis the only indicator that a volume supports longer-than-normal FAT file system (or other file system) file names. The file system name is not altered to indicate support for long file names.
+The GetCompressedFileSizefunction obtains the compressed size of a file. The GetFileAttributesfunction can determine whether an individual file is compressed.
+Symbolic link behavior
+If the path points to a symbolic link, the function returns volume information for the target.
+Starting with Windows 8 and Windows Server 2012, this function is supported by the following technologies.
+Technology
+Supported
+Server Message Block (SMB) 3.0 protocol
+No
+SMB 3.0 Transparent Failover (TFO)
+No
+SMB 3.0 with Scale-out File Shares (SO)
+No
+Cluster Shared Volume File System (CsvFS)
+Yes
+Resilient File System (ReFS)
+Yes
+SMB does not support volume management functions.
+Transacted Operations
+If the volume supports file system transactions, the function returns FILE_SUPPORTS_TRANSACTIONSin lpFileSystemFlags.
+Note
+The fileapi.hheader defines GetVolumeInformationas an alias that automatically selects the ANSI or Unicode version of this function based on the definition of the UNICODE preprocessor constant. Mixing usage of the encoding-neutral alias with code that is not encoding-neutral can lead to mismatches that result in compilation or runtime errors. For more information, see Conventions for Function Prototypes.
+Requirements
+Requirement
+Value
+Minimum supported client
+Windows XP [desktop apps | UWP apps]
+Minimum supported server
+Windows Server 2003 [desktop apps | UWP apps]
+Target Platform
+Windows
+Header
+fileapi.h (include Windows.h)
+Library
+Kernel32.lib
+DLL
+Kernel32.dll
+See also
+About KTM
+File Encryption
+GetCompressedFileSize
+GetFileAttributes
+GetVolumeInformationByHandleW
+SetErrorMode
+SetVolumeLabel
+Volume Management Functions
+Feedback
+Was this page helpful?
+YesNoNo
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?
+Additional resources
+Last updated on 2023-04-24
+Was this page helpful?
+Need help with this topic?
+Want to try using Ask Learn to clarify or guide you through this topic?
+Ask LearnAsk Learn
+Suggest a fix?

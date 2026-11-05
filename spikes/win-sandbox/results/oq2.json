@@ -1,0 +1,215 @@
+{
+  "date": "2026-11-02T11:27:42.737Z",
+  "node": "v24.19.0",
+  "os": "Windows_NT 10.0.19045",
+  "versions": {
+    "jest": "30.5.2",
+    "vitest": "5.0.5",
+    "vite": "8.3.5",
+    "esbuild": null,
+    "rolldown": "1.2.16",
+    "tinypool": null,
+    "jest-worker": "30.5.1"
+  },
+  "unconfined": {
+    "jest-workers": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 2102,
+      "sandbox": "unconfined",
+      "tests": "4 passed, 4 total",
+      "passed": true
+    },
+    "jest-runInBand": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 1211,
+      "sandbox": "unconfined",
+      "tests": "4 passed, 4 total",
+      "passed": true
+    },
+    "jest-workerThreads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 1184,
+      "sandbox": "unconfined",
+      "tests": "4 passed, 4 total",
+      "passed": true
+    },
+    "vitest-forks": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 955,
+      "sandbox": "unconfined",
+      "tests": "4 passed (4)",
+      "passed": true
+    },
+    "vitest-threads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 958,
+      "sandbox": "unconfined",
+      "tests": "4 passed (4)",
+      "passed": true
+    },
+    "vitest-vmThreads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 915,
+      "sandbox": "unconfined",
+      "tests": "4 passed (4)",
+      "passed": true
+    },
+    "npx-vitest-threads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 2335,
+      "sandbox": "unconfined",
+      "tests": "4 passed (4)",
+      "passed": true
+    }
+  },
+  "workspace-write": {
+    "jest-workers": {
+      "exitCode": 1,
+      "timedOut": false,
+      "ms": 345,
+      "sandbox": "workspace-write",
+      "tests": null,
+      "passed": false,
+      "firstError": "Error: spawn EPERM",
+      "tail": ":9)\n    at fork (node:child_process:174:10)\n    at ChildProcessWorker.initialize (C:\\Users\\川野創太\\hy-oq2-fixture\\ws\\node_modules\\jest-worker\\build\\index.js:773:49)\n    at new ChildProcessWorker (C:\\Users\\川野創太\\hy-oq2-fixture\\ws\\node_modules\\jest-worker\\build\\index.js:735:10)\n    at WorkerPool.createWorker (C:\\Users\\川野創太\\hy-oq2-fixture\\ws\\node_modules\\jest-worker\\build\\index.js:422:12)\n    at new BaseWorkerPool (C:\\Users\\川野創太\\hy-oq2-fixture\\ws\\node_modules\\jest-worker\\build\\index.js:487:27)\n    at new WorkerPool (C:\\Users\\川野創太\\hy-oq2-fixture\\ws\\node_modules\\jest-worker\\build\\index.js:410:1)\n    at new Worker (C:\\Users\\川野創太\\hy-oq2-fixture\\ws\\node_modules\\jest-worker\\build\\index.js:1855:26)\n    at WorkerPool.get (C:\\Users\\川野創太\\hy-oq2-fixture\\ws\\node_modules\\jest-haste-map\\build\\index.js:1285:20)"
+    },
+    "jest-runInBand": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 1421,
+      "sandbox": "workspace-write",
+      "tests": "4 passed, 4 total",
+      "passed": true
+    },
+    "jest-workerThreads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 965,
+      "sandbox": "workspace-write",
+      "tests": "4 passed, 4 total",
+      "passed": true
+    },
+    "vitest-forks": {
+      "exitCode": 1,
+      "timedOut": false,
+      "ms": 10431,
+      "sandbox": "workspace-write",
+      "tests": null,
+      "passed": false,
+      "firstError": "[vitest-pool]: Failed to terminate forks worker for test files C:/Users/川野創太/hy-oq2-fixture/ws/vt/s2.test.mjs. Error: The child process was torn down or never initialized. This is a bug in Vitest.",
+      "tail": "1TqnEahn.js:5253:23\n ❯ Pool.schedule node_modules/vitest/dist/chunks/index.1TqnEahn.js:5921:18\n ❯ Pool.run node_modules/vitest/dist/chunks/index.1TqnEahn.js:5877:8\n ❯ node_modules/vitest/dist/chunks/index.1TqnEahn.js:6167:17\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\nSerialized Error: { errno: -4048, code: 'EPERM', syscall: 'spawn' }\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n[vitest-pool]: Timeout terminating forks worker for test files C:/Users/川野創太/hy-oq2-fixture/ws/vt/s2.test.mjs.\n[vitest-pool]: Timeout terminating forks worker for test files C:/Users/川野創太/hy-oq2-fixture/ws/vt/s1.test.mjs.\n[vitest-pool]: Timeout terminating forks worker for test files C:/Users/川野創太/hy-oq2-fixture/ws/vt/s4.test.mjs.\n[vitest-pool]: Timeout terminating forks worker for test files C:/Users/川野創太/hy-oq2-fixture/ws/vt/s3.test.mjs."
+    },
+    "vitest-threads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 655,
+      "sandbox": "workspace-write",
+      "tests": "4 passed (4)",
+      "passed": true
+    },
+    "vitest-vmThreads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 729,
+      "sandbox": "workspace-write",
+      "tests": "4 passed (4)",
+      "passed": true
+    },
+    "npx-vitest-threads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 2567,
+      "sandbox": "workspace-write",
+      "tests": "4 passed (4)",
+      "passed": true
+    }
+  },
+  "low-integrity": {
+    "jest-workers": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 1714,
+      "sandbox": "low-integrity",
+      "tests": "4 passed, 4 total",
+      "passed": true
+    },
+    "jest-runInBand": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 957,
+      "sandbox": "low-integrity",
+      "tests": "4 passed, 4 total",
+      "passed": true
+    },
+    "jest-workerThreads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 951,
+      "sandbox": "low-integrity",
+      "tests": "4 passed, 4 total",
+      "passed": true
+    },
+    "vitest-forks": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 716,
+      "sandbox": "low-integrity",
+      "tests": "4 passed (4)",
+      "passed": true
+    },
+    "vitest-threads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 692,
+      "sandbox": "low-integrity",
+      "tests": "4 passed (4)",
+      "passed": true
+    },
+    "vitest-vmThreads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 836,
+      "sandbox": "low-integrity",
+      "tests": "4 passed (4)",
+      "passed": true
+    },
+    "npx-vitest-threads": {
+      "exitCode": 0,
+      "timedOut": false,
+      "ms": 2506,
+      "sandbox": "low-integrity",
+      "tests": "4 passed (4)",
+      "passed": true
+    }
+  },
+  "workspace-write-defaults": {
+    "jest-default": {
+      "exitCode": 1,
+      "ms": 313,
+      "sandbox": "workspace-write",
+      "tests": null,
+      "eperm": true
+    },
+    "vitest-default": {
+      "exitCode": 1,
+      "ms": 10431,
+      "sandbox": "workspace-write",
+      "tests": "no tests",
+      "eperm": true
+    },
+    "npm-test-vitest": {
+      "exitCode": 1,
+      "ms": 12332,
+      "sandbox": "workspace-write",
+      "tests": "no tests",
+      "eperm": true
+    }
+  }
+}

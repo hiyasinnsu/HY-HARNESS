@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/hy-protocol", "crates/hy-execpolicy", "crates/hy-sandbox-windows", "crates/hy-exec-server"]
+exclude = ["spikes/win-sandbox"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+[profile.release]
+debug = 1

@@ -1,0 +1,25 @@
+{
+  "name": "HY-HARNESS",
+  "short_name": "HY",
+  "description": "Local coding agent GUI served by hy web",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fff9fc",
+  "theme_color": "#fff9fc",
+  "icons": [
+    {
+      "src": "/HY_icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/HY_icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

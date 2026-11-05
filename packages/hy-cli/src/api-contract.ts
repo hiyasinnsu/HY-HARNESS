@@ -1,0 +1,205 @@
+/**
+ * WP-43: the HTTP API contract (a lightweight stand-in for DSH's Typert).
+ *
+ * Every route the web server answers is declared here once. `scripts/gen-api-types.mjs`
+ * turns this table into `web/src/api.gen.ts` for the client, `pnpm check:api`
+ * fails when the generated file drifts, and `validateRequest` gives the server a
+ * typed 400 instead of a 500 when a body has the wrong shape.
+ */
+export type FieldType = 'string' | 'number' | 'boolean' | 'object' | 'array' | 'images'
+
+export interface FieldSpec {
+  type: FieldType
+  required?: boolean
+  description?: string
+}
+
+export interface RouteContract {
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE'
+  /** `:name` segments are parameters. */
+  path: string
+  summary: string
+  /** Body fields; a wrong type is a 400. Missing required fields keep the route's own message. */
+  request?: Record<string, FieldSpec>
+  /** Response shape, for the generated client types. */
+  response?: string
+  /** Non-200 statuses the route can answer. */
+  errors?: readonly number[]
+}
+
+const body = (fields: Record<string, FieldSpec>, errors: readonly number[] = [400]): Pick<RouteContract, 'request' | 'errors'> => ({
+  request: fields,
+  errors,
+})
+
+/** The routes the web server answers, in the order the server matches them. */
+export const API_ROUTES: readonly RouteContract[] = [
+  // ----- general -----
+  { method: 'GET', path: '/api/health', summary: 'Liveness probe.', response: 'HealthResponse' },
+  { method: 'GET', path: '/api/metrics', summary: 'Process metrics: uptime, open sessions, RSS.', response: 'MetricsResponse' },
+  { method: 'GET', path: '/api/bootstrap', summary: 'Config summary, sandbox status, plugins and features.', response: 'Bootstrap' },
+  { method: 'GET', path: '/api/events', summary: 'Server-wide SSE stream (sessions, automation).', response: 'Sse' },
+  { method: 'GET', path: '/api/models', summary: 'Model catalog plus the roles in use.', response: 'ModelsResponse' },
+  { method: 'GET', path: '/api/onboarding', summary: 'First-run wizard state (workspace, sandbox, model).', response: 'OnboardingResponse' },
+  { method: 'POST', path: '/api/onboarding/complete', summary: 'Finish the first-run wizard and apply its choices.', request: { complete: { type: 'boolean' }, skip: { type: 'boolean' }, sandbox: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, baseUrl: { type: 'string' } }, response: 'OnboardingResponse', errors: [400, 500] },
+  { method: 'GET', path: '/api/update', summary: 'Check the signed release feed (never runs on its own).', request: { feed: { type: 'string' }, channel: { type: 'string' } }, response: 'UpdateCheck', errors: [502] },
+  { method: 'POST', path: '/api/update/fetch', summary: 'Download and verify the newest signed release.', request: { feed: { type: 'string' }, channel: { type: 'string' } }, response: 'UpdateFetch', errors: [409, 502] },
+  { method: 'GET', path: '/api/search', summary: 'Full-text search over the session log.', request: { q: { type: 'string', required: true }, limit: { type: 'number' }, cwd: { type: 'string' } }, response: 'SearchResponse' },
+  { method: 'GET', path: '/api/references', summary: '@ reference candidates: files plus earlier chats.', request: { q: { type: 'string' }, root: { type: 'string' }, exclude: { type: 'string' } }, response: 'ReferencesResponse' },
+  { method: 'GET', path: '/api/open-in', summary: 'Programs that can open a file on this machine.', response: 'OpenInResponse' },
+  { method: 'POST', path: '/api/open-in', summary: 'Open a workspace file in a detected program.', request: { target: { type: 'string', required: true }, path: { type: 'string', required: true }, root: { type: 'string' } }, errors: [400, 403, 404] },
+
+  // ----- sessions -----
+  { method: 'GET', path: '/api/sessions', summary: 'Session list (optionally filtered by ?search).', response: 'SessionList' },
+  { method: 'POST', path: '/api/sessions', summary: 'Create a chat session.', response: 'SessionCreated', errors: [400] },
+  { method: 'GET', path: '/api/sessions/:id', summary: 'One session: entries and state.', response: 'SessionSnapshot' },
+  { method: 'DELETE', path: '/api/sessions/:id', summary: 'Delete a chat and its log.', errors: [404, 409] },
+  { method: 'GET', path: '/api/sessions/:id/events', summary: 'Session SSE stream.', response: 'Sse' },
+  { method: 'POST', path: '/api/sessions/:id/turn', summary: 'Start a turn (or reserve one with queue:true).', request: { message: { type: 'string', required: true }, images: { type: 'images' }, queue: { type: 'boolean' } }, response: 'TurnAccepted', errors: [400, 403, 409, 413] },
+  { method: 'POST', path: '/api/sessions/:id/steer', summary: 'Send a message into the running turn.', request: { message: { type: 'string', required: true }, images: { type: 'images' } }, response: 'SteerAccepted', errors: [400, 403, 409] },
+  { method: 'POST', path: '/api/sessions/:id/cancel', summary: 'Cancel the running turn.', response: 'Ok' },
+  { method: 'POST', path: '/api/sessions/:id/approval', summary: 'Approve or deny a pending tool call.', request: { requestId: { type: 'string', required: true }, approved: { type: 'boolean', required: true }, reason: { type: 'string' } }, errors: [400, 404] },
+  { method: 'POST', path: '/api/sessions/:id/answer', summary: 'Answer `ask_user`.', request: { requestId: { type: 'string', required: true }, answer: { type: 'string', required: true } }, errors: [400, 404] },
+  { method: 'POST', path: '/api/sessions/:id/undo', summary: 'Roll the last turn back.', errors: [409] },
+  { method: 'POST', path: '/api/sessions/:id/compact', summary: 'Compact the conversation now.' },
+  { method: 'POST', path: '/api/sessions/:id/plan-mode', summary: 'Turn plan mode on or off.', request: { on: { type: 'boolean' } }, errors: [409] },
+  { method: 'POST', path: '/api/sessions/:id/sandbox', summary: 'Switch this session sandbox mode (grants when confined).', request: { mode: { type: 'string', required: true } }, errors: [400, 403, 409] },
+  { method: 'POST', path: '/api/sessions/:id/effort', summary: 'Set reasoning effort.', request: { effort: { type: 'string' } }, errors: [400] },
+  { method: 'POST', path: '/api/sessions/:id/model', summary: 'Switch the session model.', request: { model: { type: 'string', required: true }, provider: { type: 'string' }, baseUrl: { type: 'string' } }, errors: [400] },
+  { method: 'POST', path: '/api/sessions/:id/title', summary: 'Rename a chat.', request: { title: { type: 'string', required: true } }, errors: [400] },
+  { method: 'POST', path: '/api/sessions/:id/title/generate', summary: 'Generate a chat name with the model (heuristic fallback).', request: { from: { type: 'string' } }, response: 'GeneratedTitle', errors: [409] },
+  { method: 'POST', path: '/api/sessions/:id/pin', summary: 'Pin or unpin a chat.', request: { pinned: { type: 'boolean' } } },
+  { method: 'POST', path: '/api/sessions/:id/archive', summary: 'Archive or unarchive a chat.', request: { archived: { type: 'boolean' } } },
+  { method: 'GET', path: '/api/sessions/:id/status', summary: 'Text status of the session.', response: 'TextResponse' },
+  { method: 'GET', path: '/api/sessions/:id/plan', summary: 'The todo list and plan mode.', response: 'PlanResponse' },
+  { method: 'GET', path: '/api/sessions/:id/stats', summary: 'Measured timings: steps, LLM/tool time, first answer.', response: 'StatsResponse' },
+  { method: 'POST', path: '/api/sessions/:id/fork', summary: 'Copy this chat into a new one and continue there.', request: { upToSeq: { type: 'number' } }, errors: [400] },
+  { method: 'POST', path: '/api/sessions/:id/feedback', summary: 'Rate an answer (stored locally, never sent).', request: { rating: { type: 'string', required: true }, category: { type: 'string' }, note: { type: 'string' }, entryId: { type: 'string' } }, errors: [400] },
+  { method: 'GET', path: '/api/sessions/:id/feedback', summary: 'Feedback recorded for this chat.', response: 'FeedbackResponse' },
+  { method: 'GET', path: '/api/sessions/:id/notes', summary: 'Ledger notes as text.', response: 'TextResponse' },
+  { method: 'GET', path: '/api/sessions/:id/diff', summary: 'Diff since the run started.', response: 'DiffResponse' },
+  { method: 'GET', path: '/api/sessions/:id/jobs', summary: 'Background jobs of the session.', response: 'JobsResponse' },
+  { method: 'GET', path: '/api/sessions/:id/trajectory', summary: 'Recent session events.', response: 'TrajectoryResponse' },
+  { method: 'GET', path: '/api/sessions/:id/subagents', summary: 'Subagent transcripts (log-derived).', response: 'SubagentsResponse' },
+  { method: 'GET', path: '/api/sessions/:id/subagents/:child', summary: 'One subagent transcript.', response: 'SubagentResponse', errors: [400] },
+  { method: 'GET', path: '/api/sessions/:id/agents', summary: 'Background subagents (WP-22).', response: 'AgentsResponse' },
+  { method: 'GET', path: '/api/sessions/:id/agents/:agent', summary: 'One background subagent.', errors: [404] },
+  { method: 'POST', path: '/api/sessions/:id/agents/:agent/message', summary: 'Follow-up to a background subagent.', request: { message: { type: 'string', required: true } }, errors: [400, 409] },
+  { method: 'POST', path: '/api/sessions/:id/agents/:agent/interrupt', summary: 'Stop a background subagent.', errors: [404, 409] },
+  { method: 'POST', path: '/api/sessions/:id/agents/:agent/close', summary: 'Close a background subagent.', errors: [404, 409] },
+  { method: 'GET', path: '/api/sessions/:id/document', summary: 'Preview a PDF, image or (converted) Office document.', response: 'FileResponse', errors: [404, 415, 422] },
+  { method: 'POST', path: '/api/sessions/:id/reveal', summary: 'Show a presented file in the OS file manager.', request: { path: { type: 'string', required: true } }, errors: [400, 404] },
+  { method: 'POST', path: '/api/sessions/:id/review', summary: 'Run a read-only review of the changes.', errors: [400, 409] },
+  { method: 'GET', path: '/api/sessions/:id/export', summary: 'Markdown transcript export.', response: 'ExportResponse' },
+  { method: 'GET', path: '/api/sessions/:id/goal', summary: 'Current long-running goal.', response: 'GoalResponse' },
+  { method: 'POST', path: '/api/sessions/:id/goal', summary: 'Create, edit, pause, resume or clear the goal.', request: { objective: { type: 'string' }, action: { type: 'string' }, goal_id: { type: 'string' }, revision: { type: 'number' } }, errors: [400, 409] },
+  { method: 'GET', path: '/api/sessions/:id/mcp', summary: 'MCP tools available to the session.', response: 'McpResponse' },
+  { method: 'POST', path: '/api/sessions/:id/mcp-call', summary: 'Call an automation MCP tool directly.', request: { server: { type: 'string', required: true }, tool: { type: 'string', required: true }, args: { type: 'object' } }, errors: [400, 403] },
+  { method: 'GET', path: '/api/sessions/:id/plugins', summary: 'Plugin tools of the session.', response: 'PluginsResponse' },
+  { method: 'GET', path: '/api/sessions/:id/memory', summary: 'Workspace memory entries.', response: 'MemoryResponse' },
+  { method: 'GET', path: '/api/sessions/:id/skills', summary: 'Skill catalog as text.', response: 'TextResponse' },
+  { method: 'POST', path: '/api/sessions/:id/terminal', summary: 'Run one terminal command in the GUI panel.', request: { command: { type: 'string', required: true } }, errors: [400] },
+
+  // ----- persistent terminal (pty) -----
+  { method: 'GET', path: '/api/sessions/:id/pty', summary: 'PTY status.', response: 'PtyStatus' },
+  { method: 'GET', path: '/api/sessions/:id/pty/events', summary: 'PTY output stream.', response: 'Sse' },
+  { method: 'POST', path: '/api/sessions/:id/pty/start', summary: 'Start the GUI shell.', request: { cols: { type: 'number' }, rows: { type: 'number' } }, errors: [500] },
+  { method: 'POST', path: '/api/sessions/:id/pty/input', summary: 'Type into the GUI shell.', request: { data: { type: 'string', required: true } }, errors: [409] },
+  { method: 'POST', path: '/api/sessions/:id/pty/resize', summary: 'Resize the GUI shell.', request: { cols: { type: 'number' }, rows: { type: 'number' } }, errors: [409] },
+  { method: 'POST', path: '/api/sessions/:id/pty/clear', summary: 'Clear the GUI shell buffer.', errors: [409] },
+  { method: 'POST', path: '/api/sessions/:id/pty/stop', summary: 'Stop the GUI shell.' },
+
+  // ----- turn queue -----
+  { method: 'GET', path: '/api/turn-queue', summary: 'Queued turns of one session.', response: 'TurnQueueView', errors: [400] },
+  { method: 'POST', path: '/api/turn-queue', summary: 'Reserve a turn while another runs.', request: { runId: { type: 'string', required: true }, id: { type: 'string' }, message: { type: 'string', required: true }, images: { type: 'images' } }, errors: [400, 409, 413] },
+  { method: 'POST', path: '/api/turn-queue/cancel', summary: 'Cancel one queued turn (or all).', request: { runId: { type: 'string', required: true }, id: { type: 'string' } }, errors: [400] },
+  { method: 'POST', path: '/api/turn-queue/resume', summary: 'Resume a paused queue.', request: { runId: { type: 'string', required: true } }, errors: [400] },
+  { method: 'POST', path: '/api/turn-queue/resolve', summary: 'Resolve an uncertain queued turn.', request: { runId: { type: 'string', required: true }, id: { type: 'string' }, action: { type: 'string' } }, errors: [400] },
+
+  // ----- orchestration · automation · ralph -----
+  { method: 'GET', path: '/api/orchestration', summary: 'Orchestration state and workers.', response: 'OrchestrationView' },
+  { method: 'POST', path: '/api/orchestration/start', summary: 'Start orchestration.', errors: [400, 409] },
+  { method: 'POST', path: '/api/orchestration/stop', summary: 'Stop orchestration.' },
+  { method: 'GET', path: '/api/automation', summary: 'Schedules, webhooks and runs.', response: 'AutomationData' },
+  { method: 'POST', path: '/api/automation/schedules', summary: 'Create a schedule.', request: { objective: { type: 'string', required: true }, cron: { type: 'string' }, cwd: { type: 'string' }, name: { type: 'string' } }, errors: [400] },
+  { method: 'POST', path: '/api/automation/webhooks', summary: 'Create a webhook.', request: { objective: { type: 'string', required: true }, cwd: { type: 'string' }, name: { type: 'string' } }, errors: [400] },
+  { method: 'POST', path: '/api/ralph', summary: 'Start a ralph job.', request: { objective: { type: 'string', required: true }, verifyCmds: { type: 'array' }, cwd: { type: 'string' } }, errors: [400] },
+
+  // ----- workspace · files · settings -----
+  { method: 'GET', path: '/api/workspace/roots', summary: 'Workspace roots.', response: 'RootsResponse' },
+  { method: 'POST', path: '/api/workspace/roots', summary: 'Add a workspace root.', request: { path: { type: 'string', required: true }, label: { type: 'string' }, writable: { type: 'boolean' } }, errors: [400] },
+  { method: 'GET', path: '/api/files/search', summary: 'Find files by name.', response: 'FileSearchResponse' },
+  { method: 'GET', path: '/api/files/tree', summary: 'List a directory.', response: 'FileTreeResponse', errors: [400] },
+  { method: 'GET', path: '/api/files', summary: 'Read one file.', response: 'FileResponse', errors: [400, 413, 415] },
+  { method: 'GET', path: '/api/settings', summary: 'User config and active settings.', response: 'SettingsResponse' },
+  { method: 'PUT', path: '/api/settings', summary: 'Save settings.', request: { roles: { type: 'object' }, sandboxMode: { type: 'string' }, autoApprove: { type: 'boolean' }, fullAuto: { type: 'boolean' } }, errors: [400] },
+  { method: 'GET', path: '/api/plugins', summary: 'Plugin catalog.', response: 'PluginCatalog' },
+  { method: 'POST', path: '/api/plugins/reload', summary: 'Reload plugin modules.' },
+  { method: 'POST', path: '/api/webhooks/:id', summary: 'Trigger a webhook (no session token; the path secret is the credential).', errors: [404] },
+] as const
+
+/** Splits a path or pattern into segments. */
+function segments(pathname: string): string[] {
+  return pathname.split('/').filter((part) => part.length > 0)
+}
+
+/** True when a concrete path matches a contract pattern (`:name` matches one segment). */
+export function pathMatches(pattern: string, pathname: string): boolean {
+  const a = segments(pattern)
+  const b = segments(pathname)
+  if (a.length !== b.length) return false
+  return a.every((part, i) => part.startsWith(':') || part === b[i])
+}
+
+/** The contract for a method + concrete path, or undefined. */
+export function matchContract(method: string, pathname: string): RouteContract | undefined {
+  const upper = method.toUpperCase()
+  return API_ROUTES.find((route) => route.method === upper && pathMatches(route.path, pathname))
+}
+
+/**
+ * Type-checks a request body against a route's declared fields. Required-field
+ * presence is left to the route (each one has its own message); a value of the
+ * wrong type is a contract violation and must be a 400.
+ */
+export function validateRequest(contract: RouteContract, value: unknown): string[] {
+  if (!contract.request) return []
+  if (value === undefined || value === null) return []
+  if (typeof value !== 'object' || Array.isArray(value)) return ['request body must be a JSON object']
+  const problems: string[] = []
+  for (const [field, spec] of Object.entries(contract.request)) {
+    const entry = (value as Record<string, unknown>)[field]
+    if (entry === undefined || entry === null) continue
+    const ok =
+      spec.type === 'images'
+        ? Array.isArray(entry)
+        : spec.type === 'array'
+          ? Array.isArray(entry)
+          : spec.type === 'object'
+            ? typeof entry === 'object' && !Array.isArray(entry)
+            : spec.type === 'number'
+              ? typeof entry === 'number' && Number.isFinite(entry)
+              : typeof entry === spec.type
+    if (!ok) {
+      const expected =
+        spec.type === 'images'
+          ? 'an array of images'
+          : spec.type === 'array'
+            ? 'an array'
+            : spec.type === 'object'
+              ? 'an object'
+              : `a ${spec.type}`
+      problems.push(`${field} must be ${expected}`)
+    }
+  }
+  return problems
+}
+
+/**
+ * Finds the declared contract for a *literal* path as it appears in
+ * `web-server.ts` (`pathname === '…' && method === '…'`), which is what the
+ * drift test compares.
+ */
+export function declaredPath(method: string, pathname: string): RouteContract | undefined {
+  return matchContract(method, pathname)
+}

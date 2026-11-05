@@ -1,0 +1,57 @@
+{
+  "name": "hy-harness",
+  "version": "0.4.0",
+  "description": "HY-HARNESS desktop GUI",
+  "author": "HY-HARNESS",
+  "private": true,
+  "type": "module",
+  "main": "packages/desktop/dist/main.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "gen:protocol": "node scripts/gen-protocol.mjs",
+    "check:protocol": "node scripts/gen-protocol.mjs --check",
+    "gen:config-schema": "node scripts/gen-config-schema.mjs",
+    "gen:api": "node scripts/gen-api-types.mjs",
+    "check:api": "node scripts/gen-api-types.mjs --check",
+    "gen:api-schema": "node scripts/gen-api-schema.mjs",
+    "check:api-schema": "node scripts/gen-api-schema.mjs --check",
+    "verify": "node scripts/verify-all.mjs",
+    "verify:list": "node scripts/verify-all.mjs --list",
+    "check:config-schema": "node scripts/gen-config-schema.mjs --check",
+    "check:version": "node scripts/check-version.mjs",
+    "build": "tsc -b packages/core packages/seams packages/hy-cli packages/sdk && tsc -p packages/hy-cli/tsconfig.web.json && tsc -p packages/desktop/tsconfig.json",
+    "postbuild": "node scripts/copy-assets.mjs",
+    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/seams && tsc --noEmit -p packages/hy-cli && tsc --noEmit -p packages/sdk && tsc --noEmit -p packages/hy-cli/tsconfig.web.json && tsc --noEmit -p packages/desktop/tsconfig.json",
+    "desktop": "pnpm build && electron packages/desktop/dist/main.js",
+    "desktop:dev": "pnpm build && electron packages/desktop/dist/main.js --devtools",
+    "desktop:install": "node node_modules/electron/install.js",
+    "desktop:screenshot": "pnpm build && node scripts/desktop-screenshot.mjs",
+    "desktop:package": "node scripts/check-portable-lock.mjs && pnpm build && electron-builder --win portable --x64",
+    "desktop:package:next": "pnpm build && electron-builder --win portable --x64 --config.directories.output=release/next && node scripts/tag-next-artifact.mjs",
+    "desktop:package:dir": "node scripts/check-portable-lock.mjs && pnpm build && electron-builder --win dir --x64",
+    "test": "node --test --test-reporter=spec \"packages/*/dist/**/*.test.js\" \"packages/hy-cli/web/test/*.test.mjs\"",
+    "test:integration": "node --test --import ./tests/integration/isolate.mjs --import ./tests/integration/fresh-build.mjs --test-isolation=none --test-reporter=spec --test-concurrency=1 \"tests/integration/*.test.mjs\"",
+    "coverage:ts": "node --test --experimental-test-coverage \"packages/*/dist/**/*.test.js\" \"packages/hy-cli/web/test/*.test.mjs\"",
+    "coverage:rust": "node scripts/coverage-rust.mjs",
+    "bench:checkpoint": "node tests/bench/checkpoint-bench.mjs",
+    "bench:startup": "node scripts/bench-startup.mjs",
+    "test:regression": "node --test --import ./tests/integration/isolate.mjs --import ./tests/integration/fresh-build.mjs --test-isolation=none --test-reporter=spec --test-concurrency=1 tests/regression/golden.test.mjs tests/integration/chat-resume.test.mjs tests/integration/guardian.test.mjs tests/integration/verifier-ralph.test.mjs tests/integration/turn-queue.test.mjs tests/integration/mcp-server.test.mjs tests/integration/tool-overhead.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "electron": "45.2.1",
+    "electron-builder": "^26.18.0",
+    "json-schema-to-typescript": "^16.0.0",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.84",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "agent-desktop": "1.0.2",
+    "cordis": "4.0.0-rc.12",
+    "node-pty": "1.2.0-beta.18"
+  }
+}

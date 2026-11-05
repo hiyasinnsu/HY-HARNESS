@@ -1,0 +1,1801 @@
+{
+  "setup": {
+    "info": {
+      "adminMember": true,
+      "logon": "S-1-5-5-0-157864",
+      "user": "S-1-5-21-3695527761-220524766-2495642310-1001",
+      "volumes": [
+        {
+          "fs": "NTFS",
+          "hardLinks": true,
+          "path": "C:\\Users\\川野創太\\AppData\\Local\\Temp\\",
+          "persistentAcls": true
+        },
+        {
+          "fs": "exFAT",
+          "hardLinks": false,
+          "path": "F:\\",
+          "persistentAcls": false
+        },
+        {
+          "fs": "FAT32",
+          "hardLinks": false,
+          "path": "G:\\",
+          "persistentAcls": false
+        }
+      ]
+    },
+    "grants": {
+      "ws": {
+        "applyMs": 1,
+        "changed": 16,
+        "counted": 0,
+        "dirs": 3,
+        "dryRun": false,
+        "enumerateMs": 0,
+        "failed": 0,
+        "failedSample": [],
+        "files": 14,
+        "objects": 17,
+        "protected": [
+          {
+            "ok": true,
+            "path": "C:\\Users\\川野創太\\hy-spike-fixture\\ws\\.git"
+          },
+          {
+            "ok": true,
+            "path": "C:\\Users\\川野創太\\hy-spike-fixture\\ws\\.hy-harness"
+          }
+        ],
+        "root": "C:\\Users\\川野創太\\hy-spike-fixture\\ws",
+        "sid": "S-1-4-1280499181-1489199505-1514705004-162607085",
+        "skippedHardLinkSample": [
+          {
+            "links": 2,
+            "path": "C:\\Users\\川野創太\\hy-spike-fixture\\ws\\hl.txt"
+          }
+        ],
+        "skippedHardLinks": 1,
+        "skippedReparse": [
+          "C:\\Users\\川野創太\\hy-spike-fixture\\ws\\junc"
+        ],
+        "threads": 8,
+        "totalMs": 2
+      },
+      "wsB": {
+        "applyMs": 0,
+        "changed": 2,
+        "counted": 0,
+        "dirs": 1,
+        "dryRun": false,
+        "enumerateMs": 0,
+        "failed": 0,
+        "failedSample": [],
+        "files": 1,
+        "objects": 2,
+        "protected": [],
+        "root": "C:\\Users\\川野創太\\hy-spike-fixture\\wsB",
+        "sid": "S-1-4-2206559499-2520624615-578189811-3082890149",
+        "skippedHardLinkSample": [],
+        "skippedHardLinks": 0,
+        "skippedReparse": [],
+        "threads": 8,
+        "totalMs": 1
+      },
+      "tmpA": {
+        "applyMs": 0,
+        "changed": 1,
+        "counted": 0,
+        "dirs": 1,
+        "dryRun": false,
+        "enumerateMs": 0,
+        "failed": 0,
+        "failedSample": [],
+        "files": 0,
+        "objects": 1,
+        "protected": [],
+        "root": "C:\\Users\\川野創太\\hy-spike-fixture\\tmpA",
+        "sid": "S-1-4-3801637319-1194178430-2093894034-516810873",
+        "skippedHardLinkSample": [],
+        "skippedHardLinks": 0,
+        "skippedReparse": [],
+        "threads": 8,
+        "totalMs": 1
+      }
+    }
+  },
+  "s2_under_appdata": {
+    "ww:cmd_echo": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "hi\r\n",
+      "stderr": ""
+    },
+    "ww:node_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 318,
+      "stdout": "v24.19.0\n",
+      "stderr": ""
+    },
+    "ww:node_child_matrix": {
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 57,
+      "stdout": "",
+      "stderr": "                       ^\r\n\r\nError: EPERM: operation not permitted, lstat 'C:\\Users\\川野創太\\AppData\\Local'\r\n    at Object.realpathSync (node:fs:2848:29)\r\n    at toRealPath (node:internal/modules/helpers:63:13)\r\n    at Module._findPath (node:internal/modules/cjs/loader:803:22)\r\n    at resolveMainPath (node:internal/modules/run_main:35:21)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:146:20)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  errno: -4048,\r\n  code: 'EPERM',\r\n  syscall: 'lstat',\r\n  path: 'C:\\\\Users\\\\川野創太\\\\AppData\\\\Local'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+    },
+    "ww:npm_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 849,
+      "stdout": "11.17.0\n",
+      "stderr": ""
+    },
+    "ww:npm_test": {
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 581,
+      "stdout": "\n> fx@1.0.0 test\n> node test.js\n\n",
+      "stderr": "                       ^\r\n\r\nError: EPERM: operation not permitted, lstat 'C:\\Users\\川野創太\\AppData\\Local'\r\n    at Object.realpathSync (node:fs:2848:29)\r\n    at toRealPath (node:internal/modules/helpers:63:13)\r\n    at Module._findPath (node:internal/modules/cjs/loader:803:22)\r\n    at resolveMainPath (node:internal/modules/run_main:35:21)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:146:20)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  errno: -4048,\r\n  code: 'EPERM',\r\n  syscall: 'lstat',\r\n  path: 'C:\\\\Users\\\\川野創太\\\\AppData\\\\Local'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+    },
+    "ww:tsc_build": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 1244,
+      "stdout": "",
+      "stderr": "",
+      "artifact": true
+    },
+    "ww:git_status": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 30,
+      "stdout": " D existing_ws.txt\n?? hl.txt\n?? junc/\n?? s3_new.txt\n",
+      "stderr": ""
+    },
+    "ww:git_add": {
+      "exitCode": 128,
+      "exitHex": "0x00000080",
+      "timedOut": false,
+      "ms": 21,
+      "stdout": "",
+      "stderr": "fatal: Unable to create 'C:/Users/川野創太/AppData/Local/Temp/hy-spike/ws/.git/index.lock': Permission denied\n"
+    },
+    "ww:cargo_build": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 453,
+      "stdout": "",
+      "stderr": "warn: could not canonicalize path C:\\Users\\川野創太\\AppData\n   Compiling fx v0.1.0 (C:\\Users\\川野創太\\AppData\\Local\\Temp\\hy-spike\\ws)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.41s\n",
+      "artifact": true
+    },
+    "ww:cargo_test": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 619,
+      "stdout": "\nrunning 1 test\ntest t::w ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": "warn: could not canonicalize path C:\\Users\\川野創太\\AppData\n   Compiling fx v0.1.0 (C:\\Users\\川野創太\\AppData\\Local\\Temp\\hy-spike\\ws)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s\n     Running unittests src\\lib.rs (target\\debug\\deps\\fx-8789eed6a32b1722.exe)\n     Running unittests src\\main.rs (target\\debug\\deps\\fx-74fcb1d1924a517f.exe)\n   Doc-tests fx\n"
+    },
+    "ww:winps_51": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 224,
+      "stdout": "17\r\n",
+      "stderr": "",
+      "artifact": true
+    },
+    "ww:git_bash": {
+      "exitCode": -1073741502,
+      "exitHex": "0xc0000142",
+      "timedOut": false,
+      "ms": 213,
+      "stdout": "",
+      "stderr": "      0 [main] bash (3700) C:\\Program Files\\Git\\bin\\..\\usr\\bin\\bash.exe: *** fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-1888ae32e00d56aa): 0xC0000022\n",
+      "artifact": false
+    },
+    "ro:cmd_echo": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "hi\r\n",
+      "stderr": ""
+    },
+    "ro:node_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 52,
+      "stdout": "v24.19.0\n",
+      "stderr": ""
+    },
+    "ro:node_child_matrix": {
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 45,
+      "stdout": "",
+      "stderr": "                       ^\r\n\r\nError: EPERM: operation not permitted, lstat 'C:\\Users\\川野創太\\AppData\\Local'\r\n    at Object.realpathSync (node:fs:2848:29)\r\n    at toRealPath (node:internal/modules/helpers:63:13)\r\n    at Module._findPath (node:internal/modules/cjs/loader:803:22)\r\n    at resolveMainPath (node:internal/modules/run_main:35:21)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:146:20)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  errno: -4048,\r\n  code: 'EPERM',\r\n  syscall: 'lstat',\r\n  path: 'C:\\\\Users\\\\川野創太\\\\AppData\\\\Local'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+    },
+    "ro:npm_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 309,
+      "stdout": "11.17.0\n",
+      "stderr": ""
+    },
+    "ro:npm_test": {
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 469,
+      "stdout": "\n> fx@1.0.0 test\n> node test.js\n\n",
+      "stderr": "                       ^\r\n\r\nError: EPERM: operation not permitted, lstat 'C:\\Users\\川野創太\\AppData\\Local'\r\n    at Object.realpathSync (node:fs:2848:29)\r\n    at toRealPath (node:internal/modules/helpers:63:13)\r\n    at Module._findPath (node:internal/modules/cjs/loader:803:22)\r\n    at resolveMainPath (node:internal/modules/run_main:35:21)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:146:20)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  errno: -4048,\r\n  code: 'EPERM',\r\n  syscall: 'lstat',\r\n  path: 'C:\\\\Users\\\\川野創太\\\\AppData\\\\Local'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+    },
+    "ro:tsc_build": {
+      "exitCode": 2,
+      "exitHex": "0x00000002",
+      "timedOut": false,
+      "ms": 968,
+      "stdout": "error TS5033: Could not write file 'C:/Users/川野創太/AppData/Local/Temp/hy-spike/ws/dist/a.js': EPERM: operation not permitted, mkdir 'C:\\Users\\川野創太\\AppData\\Local\\Temp\\hy-spike\\ws\\dist'.\r\n",
+      "stderr": "",
+      "artifact": false
+    },
+    "ro:git_status": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 27,
+      "stdout": " D existing_ws.txt\n?? Cargo.lock\n?? hl.txt\n?? junc/\n?? s3_new.txt\n",
+      "stderr": ""
+    },
+    "ro:git_add": {
+      "exitCode": 128,
+      "exitHex": "0x00000080",
+      "timedOut": false,
+      "ms": 21,
+      "stdout": "",
+      "stderr": "fatal: Unable to create 'C:/Users/川野創太/AppData/Local/Temp/hy-spike/ws/.git/index.lock': Permission denied\n"
+    },
+    "ro:cargo_build": {
+      "exitCode": 101,
+      "exitHex": "0x00000065",
+      "timedOut": false,
+      "ms": 98,
+      "stdout": "",
+      "stderr": "warn: could not canonicalize path C:\\Users\\川野創太\\AppData\nerror: アクセスが拒否されました。 (os error 5) at path \"C:\\\\Users\\\\川野創太\\\\AppData\\\\Local\\\\Temp\\\\hy-spike\\\\ws\\\\target3zWTDQ\"\n",
+      "artifact": false
+    },
+    "ro:cargo_test": {
+      "exitCode": 101,
+      "exitHex": "0x00000065",
+      "timedOut": false,
+      "ms": 98,
+      "stdout": "",
+      "stderr": "warn: could not canonicalize path C:\\Users\\川野創太\\AppData\nerror: アクセスが拒否されました。 (os error 5) at path \"C:\\\\Users\\\\川野創太\\\\AppData\\\\Local\\\\Temp\\\\hy-spike\\\\ws\\\\targetAoZj5G\"\n"
+    },
+    "ro:winps_51": {
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 253,
+      "stdout": "15\r\n",
+      "stderr": "Set-Content : �p�X 'C:\\Users\\���n��\\AppData\\Local\\Temp\\hy-spike\\ws\\s2_ps.txt' �ւ̃A�N�Z�X�����ۂ���܂����B\r\n�����ꏊ �s:1 ����:31\r\n+ (Get-ChildItem).Count; 'ok' | Set-Content s2_ps.txt\r\n+                               ~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : PermissionDenied: (C:\\Users\\���n��\\A...ke\\ws\\s2_ps.txt:String) [Set-Content], Unauthori\r\nzed    AccessException\r\n    + FullyQualifiedErrorId : GetContentWriterUnauthorizedAccessError,Microsoft.PowerShell.Commands.SetContentCommand\r\n \r\n",
+      "artifact": false
+    },
+    "ro:git_bash": {
+      "exitCode": -1073741502,
+      "exitHex": "0xc0000142",
+      "timedOut": false,
+      "ms": 74,
+      "stdout": "",
+      "stderr": "      0 [main] bash (50280) C:\\Program Files\\Git\\bin\\..\\usr\\bin\\bash.exe: *** fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-1888ae32e00d56aa): 0xC0000022\n",
+      "artifact": false
+    },
+    "ww:node_child_matrix_origDacl": {
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 48,
+      "stdout": "",
+      "stderr": "                       ^\r\n\r\nError: EPERM: operation not permitted, lstat 'C:\\Users\\川野創太\\AppData\\Local'\r\n    at Object.realpathSync (node:fs:2848:29)\r\n    at toRealPath (node:internal/modules/helpers:63:13)\r\n    at Module._findPath (node:internal/modules/cjs/loader:803:22)\r\n    at resolveMainPath (node:internal/modules/run_main:35:21)\r\n    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:146:20)\r\n    at node:internal/main/run_main_module:33:47 {\r\n  errno: -4048,\r\n  code: 'EPERM',\r\n  syscall: 'lstat',\r\n  path: 'C:\\\\Users\\\\川野創太\\\\AppData\\\\Local'\r\n}\r\n\r\nNode.js v24.19.0\r\n"
+    },
+    "none:node_child_matrix": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 386,
+      "stdout": "{\"spawnSyncPipe\":\"status=0 out=42\",\"spawnSyncInherit\":\"status=0\",\"spawnSyncIgnore\":\"status=0\",\"execSyncCmd\":\"7\",\"spawnSyncWindowsHide\":\"status=0 out=hidden\",\"spawnAsyncPipe\":\"code=0 out=1\",\"forkIpc\":\"reply=42\",\"workerThread\":\"msg=5\"}\n",
+      "stderr": ""
+    },
+    "none:cargo_build": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 333,
+      "stdout": "",
+      "stderr": "   Compiling fx v0.1.0 (C:\\Users\\川野創太\\AppData\\Local\\Temp\\hy-spike\\ws)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s\n",
+      "artifact": true
+    }
+  },
+  "s3_under_appdata": {
+    "ws_write": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ws_delete": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ws_mkdir_rmdir_tree": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 15,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ws_rename": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "",
+      "stderr": ""
+    },
+    "outside_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "outside_overwrite": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "outside_delete": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "C:\\Users\\���n��\\AppData\\Local\\Temp\\hy-spike\\outside\\victim.txt\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "outside_move_into_ws": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "        0 �̃t�@�C�����ړ����܂����B\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "ws_move_to_outside": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "        0 �̃t�@�C�����ړ����܂����B\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "cross_root_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "cross_root_delete": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 15,
+      "stdout": "C:\\Users\\���n��\\AppData\\Local\\Temp\\hy-spike\\wsB\\b.txt\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "git_config_append": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "git_new_file": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "git_delete_head": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "C:\\Users\\���n��\\AppData\\Local\\Temp\\hy-spike\\ws\\.git\\HEAD\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "git_rename_dir": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�w�肳�ꂽ�t�@�C����������܂���B\r\n"
+    },
+    "hy_harness_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "hy_harness_rename": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "hardlink_overwrite": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 15,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "hardlink_delete_ws_name": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "C:\\Users\\���n��\\AppData\\Local\\Temp\\hy-spike\\ws\\hl.txt\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "junction_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "junction_replace": {
+      "expectHolds": true,
+      "exitCode": 5,
+      "exitHex": "0x00000005",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "temp_write": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "userprofile_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "exfat_write_GAP": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "",
+      "stderr": ""
+    },
+    "outside_read_GAP": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "original victim.txt\r\n",
+      "stderr": ""
+    },
+    "hkcu_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 9,
+      "stdout": "",
+      "stderr": "�G���[: �A�N�Z�X�����ۂ���܂����B\r\r\n"
+    },
+    "late_git_config_append": {
+      "expectHolds": false,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ro_ws_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    }
+  },
+  "appdata_package_sid_finding": {
+    "rule": "Low-IL token gets ERROR_ACCESS_DENIED opening (even lstat/FILE_READ_ATTRIBUTES) any object whose DACL has an ACE applying to the object itself for a package-format SID (S-1-15-2 + 7 subauthorities); S-1-15-2-1, S-1-15-3-1, other SIDs and inherit-only package ACEs are fine",
+    "isolation": {
+      "draft": "EPERM",
+      "nolow": "ok",
+      "norestrict": "EPERM",
+      "keepadmin": "EPERM",
+      "users/authusers restricting": "EPERM",
+      "nolow,norestrict": "ok"
+    },
+    "thisMachine": "%USERPROFILE%\\AppData and AppData\\Local carry (A;;FA;;;S-1-15-2-3557520199-...) so %TEMP% cannot be realpath'd under the token",
+    "impact": "node <script> under %TEMP% fails in realpathSync (EPERM lstat AppData\\Local); cargo warns 'could not canonicalize path AppData'"
+  },
+  "s3": {
+    "ws_write": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ws_delete": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ws_mkdir_rmdir_tree": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 15,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ws_rename": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "outside_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "outside_overwrite": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "outside_delete": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "C:\\Users\\���n��\\hy-spike-fixture\\outside\\victim.txt\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "outside_move_into_ws": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "        0 �̃t�@�C�����ړ����܂����B\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "ws_move_to_outside": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "        0 �̃t�@�C�����ړ����܂����B\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "cross_root_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "cross_root_delete": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "C:\\Users\\���n��\\hy-spike-fixture\\wsB\\b.txt\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "git_config_append": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "git_new_file": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "git_delete_head": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "C:\\Users\\���n��\\hy-spike-fixture\\ws\\.git\\HEAD\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "git_rename_dir": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�w�肳�ꂽ�t�@�C����������܂���B\r\n"
+    },
+    "hy_harness_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "hy_harness_rename": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "hardlink_overwrite": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "hardlink_delete_ws_name": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "C:\\Users\\���n��\\hy-spike-fixture\\ws\\hl.txt\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "junction_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "junction_replace": {
+      "expectHolds": true,
+      "exitCode": 5,
+      "exitHex": "0x00000005",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "temp_write": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "userprofile_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "exfat_write_GAP": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "",
+      "stderr": ""
+    },
+    "outside_read_GAP": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 12,
+      "stdout": "original victim.txt\r\n",
+      "stderr": ""
+    },
+    "hkcu_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 10,
+      "stdout": "",
+      "stderr": "�G���[: �A�N�Z�X�����ۂ���܂����B\r\r\n"
+    },
+    "late_git_config_append": {
+      "expectHolds": false,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ro_ws_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "locallow_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    }
+  },
+  "s2": {
+    "ww:cmd_echo": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "hi\r\n",
+      "stderr": ""
+    },
+    "ww:node_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 43,
+      "stdout": "v24.19.0\n",
+      "stderr": ""
+    },
+    "ww:node_child_matrix": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 160,
+      "stdout": "{\"spawnSyncPipe\":\"ERR EPERM spawnSync C:\\\\Program Files\\\\nodejs\\\\node.EXE EPERM\",\"spawnSyncInherit\":\"status=0\",\"spawnSyncIgnore\":\"status=0\",\"execSyncCmd\":\"ERR EPERM spawnSync C:\\\\Windows\\\\system32\\\\cmd.exe EPERM\",\"spawnSyncWindowsHide\":\"ERR EPERM spawnSync cmd EPERM\",\"spawnAsyncPipe\":\"ERR spawn EPERM\",\"forkIpc\":\"ERR EPERM spawn EPERM\",\"workerThread\":\"msg=5\"}\n",
+      "stderr": ""
+    },
+    "ww:npm_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 344,
+      "stdout": "11.17.0\n",
+      "stderr": ""
+    },
+    "ww:npm_test": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 460,
+      "stdout": "\n> fx@1.0.0 test\n> node test.js\n\ntests pass\n",
+      "stderr": ""
+    },
+    "ww:tsc_build": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 1045,
+      "stdout": "",
+      "stderr": "",
+      "artifact": true
+    },
+    "ww:git_status": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 26,
+      "stdout": " D existing_ws.txt\n?? hl.txt\n?? junc/\n?? s3_new.txt\n",
+      "stderr": ""
+    },
+    "ww:git_add": {
+      "exitCode": 128,
+      "exitHex": "0x00000080",
+      "timedOut": false,
+      "ms": 21,
+      "stdout": "",
+      "stderr": "fatal: Unable to create 'C:/Users/川野創太/hy-spike-fixture/ws/.git/index.lock': Permission denied\n"
+    },
+    "ww:cargo_build": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 349,
+      "stdout": "",
+      "stderr": "   Compiling fx v0.1.0 (C:\\Users\\川野創太\\hy-spike-fixture\\ws)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s\n",
+      "artifact": true
+    },
+    "ww:cargo_test": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 438,
+      "stdout": "\nrunning 1 test\ntest t::w ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "stderr": "   Compiling fx v0.1.0 (C:\\Users\\川野創太\\hy-spike-fixture\\ws)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s\n     Running unittests src\\lib.rs (target\\debug\\deps\\fx-8789eed6a32b1722.exe)\n     Running unittests src\\main.rs (target\\debug\\deps\\fx-74fcb1d1924a517f.exe)\n   Doc-tests fx\n"
+    },
+    "ww:winps_51": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 183,
+      "stdout": "17\r\n",
+      "stderr": "",
+      "artifact": true
+    },
+    "ww:git_bash": {
+      "exitCode": -1073741502,
+      "exitHex": "0xc0000142",
+      "timedOut": false,
+      "ms": 119,
+      "stdout": "",
+      "stderr": "      0 [main] bash (26672) C:\\Program Files\\Git\\bin\\..\\usr\\bin\\bash.exe: *** fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-1888ae32e00d56aa): 0xC0000022\n",
+      "artifact": false
+    },
+    "ro:cmd_echo": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "hi\r\n",
+      "stderr": ""
+    },
+    "ro:node_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 44,
+      "stdout": "v24.19.0\n",
+      "stderr": ""
+    },
+    "ro:node_child_matrix": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 158,
+      "stdout": "{\"spawnSyncPipe\":\"ERR EPERM spawnSync C:\\\\Program Files\\\\nodejs\\\\node.EXE EPERM\",\"spawnSyncInherit\":\"status=0\",\"spawnSyncIgnore\":\"status=0\",\"execSyncCmd\":\"ERR EPERM spawnSync C:\\\\Windows\\\\system32\\\\cmd.exe EPERM\",\"spawnSyncWindowsHide\":\"ERR EPERM spawnSync cmd EPERM\",\"spawnAsyncPipe\":\"ERR spawn EPERM\",\"forkIpc\":\"ERR EPERM spawn EPERM\",\"workerThread\":\"msg=5\"}\n",
+      "stderr": ""
+    },
+    "ro:npm_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 304,
+      "stdout": "11.17.0\n",
+      "stderr": ""
+    },
+    "ro:npm_test": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 440,
+      "stdout": "\n> fx@1.0.0 test\n> node test.js\n\ntests pass\n",
+      "stderr": ""
+    },
+    "ro:tsc_build": {
+      "exitCode": 2,
+      "exitHex": "0x00000002",
+      "timedOut": false,
+      "ms": 955,
+      "stdout": "error TS5033: Could not write file 'C:/Users/川野創太/hy-spike-fixture/ws/dist/a.js': EPERM: operation not permitted, mkdir 'C:\\Users\\川野創太\\hy-spike-fixture\\ws\\dist'.\r\n",
+      "stderr": "",
+      "artifact": false
+    },
+    "ro:git_status": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 27,
+      "stdout": " D existing_ws.txt\n?? Cargo.lock\n?? hl.txt\n?? junc/\n?? s3_new.txt\n",
+      "stderr": ""
+    },
+    "ro:git_add": {
+      "exitCode": 128,
+      "exitHex": "0x00000080",
+      "timedOut": false,
+      "ms": 21,
+      "stdout": "",
+      "stderr": "fatal: Unable to create 'C:/Users/川野創太/hy-spike-fixture/ws/.git/index.lock': Permission denied\n"
+    },
+    "ro:cargo_build": {
+      "exitCode": 101,
+      "exitHex": "0x00000065",
+      "timedOut": false,
+      "ms": 96,
+      "stdout": "",
+      "stderr": "error: アクセスが拒否されました。 (os error 5) at path \"C:\\\\Users\\\\川野創太\\\\hy-spike-fixture\\\\ws\\\\targetgN8v81\"\n",
+      "artifact": false
+    },
+    "ro:cargo_test": {
+      "exitCode": 101,
+      "exitHex": "0x00000065",
+      "timedOut": false,
+      "ms": 93,
+      "stdout": "",
+      "stderr": "error: アクセスが拒否されました。 (os error 5) at path \"C:\\\\Users\\\\川野創太\\\\hy-spike-fixture\\\\ws\\\\targetxNqoNX\"\n"
+    },
+    "ro:winps_51": {
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 222,
+      "stdout": "15\r\n",
+      "stderr": "Set-Content : �p�X 'C:\\Users\\���n��\\hy-spike-fixture\\ws\\s2_ps.txt' �ւ̃A�N�Z�X�����ۂ���܂����B\r\n�����ꏊ �s:1 ����:31\r\n+ (Get-ChildItem).Count; 'ok' | Set-Content s2_ps.txt\r\n+                               ~~~~~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : PermissionDenied: (C:\\Users\\���n��\\h...re\\ws\\s2_ps.txt:String) [Set-Content], Unauthori\r\nzed    AccessException\r\n    + FullyQualifiedErrorId : GetContentWriterUnauthorizedAccessError,Microsoft.PowerShell.Commands.SetContentCommand\r\n \r\n",
+      "artifact": false
+    },
+    "ro:git_bash": {
+      "exitCode": -1073741502,
+      "exitHex": "0xc0000142",
+      "timedOut": false,
+      "ms": 73,
+      "stdout": "",
+      "stderr": "      0 [main] bash (24472) C:\\Program Files\\Git\\bin\\..\\usr\\bin\\bash.exe: *** fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-1888ae32e00d56aa): 0xC0000022\n",
+      "artifact": false
+    },
+    "ww:node_child_matrix_origDacl": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 169,
+      "stdout": "{\"spawnSyncPipe\":\"ERR EPERM spawnSync C:\\\\Program Files\\\\nodejs\\\\node.EXE EPERM\",\"spawnSyncInherit\":\"status=0\",\"spawnSyncIgnore\":\"status=0\",\"execSyncCmd\":\"ERR EPERM spawnSync C:\\\\Windows\\\\system32\\\\cmd.exe EPERM\",\"spawnSyncWindowsHide\":\"ERR EPERM spawnSync cmd EPERM\",\"spawnAsyncPipe\":\"ERR spawn EPERM\",\"forkIpc\":\"ERR EPERM spawn EPERM\",\"workerThread\":\"msg=5\"}\n",
+      "stderr": ""
+    },
+    "none:node_child_matrix": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 348,
+      "stdout": "{\"spawnSyncPipe\":\"status=0 out=42\",\"spawnSyncInherit\":\"status=0\",\"spawnSyncIgnore\":\"status=0\",\"execSyncCmd\":\"7\",\"spawnSyncWindowsHide\":\"status=0 out=hidden\",\"spawnAsyncPipe\":\"code=0 out=1\",\"forkIpc\":\"reply=42\",\"workerThread\":\"msg=5\"}\n",
+      "stderr": ""
+    },
+    "none:cargo_build": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 322,
+      "stdout": "",
+      "stderr": "   Compiling fx v0.1.0 (C:\\Users\\川野創太\\hy-spike-fixture\\ws)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.29s\n",
+      "artifact": true
+    }
+  },
+  "s2_pipe_variants": {
+    "draft": {
+      "spawnSyncPipe": "EPERM",
+      "spawnSyncInherit": "ok",
+      "spawnSyncIgnore": "ok",
+      "execSyncCmd": "EPERM",
+      "spawnSyncWindowsHide": "EPERM",
+      "spawnAsyncPipe": "EPERM",
+      "forkIpc": "EPERM",
+      "workerThread": "ok"
+    },
+    "nolow": {
+      "spawnSyncPipe": "EPERM",
+      "spawnSyncInherit": "ok",
+      "spawnSyncIgnore": "ok",
+      "execSyncCmd": "EPERM",
+      "spawnSyncWindowsHide": "EPERM",
+      "spawnAsyncPipe": "EPERM",
+      "forkIpc": "EPERM",
+      "workerThread": "ok"
+    },
+    "norestrict": {
+      "spawnSyncPipe": "ok",
+      "spawnSyncInherit": "ok",
+      "spawnSyncIgnore": "ok",
+      "execSyncCmd": "ok",
+      "spawnSyncWindowsHide": "ok",
+      "spawnAsyncPipe": "ok",
+      "forkIpc": "ok",
+      "workerThread": "ok"
+    },
+    "nolow,norestrict": {
+      "spawnSyncPipe": "ok",
+      "spawnSyncInherit": "ok",
+      "spawnSyncIgnore": "ok",
+      "execSyncCmd": "ok",
+      "spawnSyncWindowsHide": "ok",
+      "spawnAsyncPipe": "ok",
+      "forkIpc": "ok",
+      "workerThread": "ok"
+    },
+    "users": {
+      "spawnSyncPipe": "EPERM",
+      "spawnSyncInherit": "ok",
+      "spawnSyncIgnore": "ok",
+      "execSyncCmd": "EPERM",
+      "spawnSyncWindowsHide": "EPERM",
+      "spawnAsyncPipe": "EPERM",
+      "forkIpc": "EPERM",
+      "workerThread": "ok"
+    },
+    "authusers": {
+      "spawnSyncPipe": "EPERM",
+      "spawnSyncInherit": "ok",
+      "spawnSyncIgnore": "ok",
+      "execSyncCmd": "EPERM",
+      "spawnSyncWindowsHide": "EPERM",
+      "spawnAsyncPipe": "EPERM",
+      "forkIpc": "EPERM",
+      "workerThread": "ok"
+    },
+    "keepadmin": {
+      "spawnSyncPipe": "EPERM",
+      "spawnSyncInherit": "ok",
+      "spawnSyncIgnore": "ok",
+      "execSyncCmd": "EPERM",
+      "spawnSyncWindowsHide": "EPERM",
+      "spawnAsyncPipe": "EPERM",
+      "forkIpc": "EPERM",
+      "workerThread": "ok"
+    }
+  },
+  "s3_norestrict": {
+    "ws_write": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ws_delete": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ws_mkdir_rmdir_tree": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ws_rename": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "outside_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "outside_overwrite": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "outside_delete": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "C:\\Users\\���n��\\hy-spike-fixture\\outside\\victim.txt\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "outside_move_into_ws": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "        0 �̃t�@�C�����ړ����܂����B\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "ws_move_to_outside": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "        0 �̃t�@�C�����ړ����܂����B\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "cross_root_write": {
+      "expectHolds": false,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "cross_root_delete": {
+      "expectHolds": false,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "git_config_append": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "git_new_file": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "git_delete_head": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "C:\\Users\\���n��\\hy-spike-fixture\\ws\\.git\\HEAD\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "git_rename_dir": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�w�肳�ꂽ�t�@�C����������܂���B\r\n"
+    },
+    "hy_harness_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "hy_harness_rename": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "hardlink_overwrite": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "hardlink_delete_ws_name": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "C:\\Users\\���n��\\hy-spike-fixture\\ws\\hl.txt\r\n",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "junction_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "junction_replace": {
+      "expectHolds": true,
+      "exitCode": 5,
+      "exitHex": "0x00000005",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "temp_write": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "",
+      "stderr": ""
+    },
+    "userprofile_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "",
+      "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n"
+    },
+    "exfat_write_GAP": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 14,
+      "stdout": "",
+      "stderr": ""
+    },
+    "outside_read_GAP": {
+      "expectHolds": true,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "original victim.txt\r\n",
+      "stderr": ""
+    },
+    "hkcu_write": {
+      "expectHolds": true,
+      "exitCode": 1,
+      "exitHex": "0x00000001",
+      "timedOut": false,
+      "ms": 9,
+      "stdout": "",
+      "stderr": "�G���[: �A�N�Z�X�����ۂ���܂����B\r\r\n"
+    },
+    "late_git_config_append": {
+      "expectHolds": false,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "ro_ws_write": {
+      "expectHolds": false,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    },
+    "locallow_write": {
+      "expectHolds": false,
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "s4": {
+    "inherit:cmd_echo": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 13,
+      "stdout": "hi\r\n",
+      "stderr": ""
+    },
+    "inherit:node_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 44,
+      "stdout": "1\n",
+      "stderr": ""
+    },
+    "inherit:node_child_matrix": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 157,
+      "stdout": "{\"spawnSyncPipe\":\"ERR EPERM spawnSync C:\\\\Program Files\\\\nodejs\\\\node.EXE EPERM\",\"spawnSyncInherit\":\"status=0\",\"spawnSyncIgnore\":\"status=0\",\"execSyncCmd\":\"ERR EPERM spawnSync C:\\\\Windows\\\\system32\\\\cmd.exe EPERM\",\"spawnSyncWindowsHide\":\"ERR EPERM spawnSync cmd EPERM\",\"spawnAsyncPipe\":\"ERR spawn EPERM\",\"forkIpc\":\"ERR EPERM spawn EPERM\",\"workerThread\":\"msg=5\"}\n",
+      "stderr": ""
+    },
+    "hidden:cmd_echo": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 78,
+      "stdout": "hi\r\n",
+      "stderr": ""
+    },
+    "hidden:node_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 79,
+      "stdout": "1\n",
+      "stderr": ""
+    },
+    "hidden:node_child_matrix": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 206,
+      "stdout": "{\"spawnSyncPipe\":\"ERR EPERM spawnSync C:\\\\Program Files\\\\nodejs\\\\node.EXE EPERM\",\"spawnSyncInherit\":\"status=0\",\"spawnSyncIgnore\":\"status=0\",\"execSyncCmd\":\"ERR EPERM spawnSync C:\\\\Windows\\\\system32\\\\cmd.exe EPERM\",\"spawnSyncWindowsHide\":\"ERR EPERM spawnSync cmd EPERM\",\"spawnAsyncPipe\":\"ERR spawn EPERM\",\"forkIpc\":\"ERR EPERM spawn EPERM\",\"workerThread\":\"msg=5\"}\n",
+      "stderr": ""
+    },
+    "nowindow:cmd_echo": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 27,
+      "stdout": "hi\r\n",
+      "stderr": ""
+    },
+    "nowindow:node_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 60,
+      "stdout": "1\n",
+      "stderr": ""
+    },
+    "nowindow:node_child_matrix": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 172,
+      "stdout": "{\"spawnSyncPipe\":\"ERR EPERM spawnSync C:\\\\Program Files\\\\nodejs\\\\node.EXE EPERM\",\"spawnSyncInherit\":\"status=0\",\"spawnSyncIgnore\":\"status=0\",\"execSyncCmd\":\"ERR EPERM spawnSync C:\\\\Windows\\\\system32\\\\cmd.exe EPERM\",\"spawnSyncWindowsHide\":\"ERR EPERM spawnSync cmd EPERM\",\"spawnAsyncPipe\":\"ERR spawn EPERM\",\"forkIpc\":\"ERR EPERM spawn EPERM\",\"workerThread\":\"msg=5\"}\n",
+      "stderr": ""
+    },
+    "conpty:cmd_echo": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 17,
+      "stdout": "\u001b[2J\u001b[m\u001b[H\u001b]0;C:\\Windows\\SYSTEM32\\cmd.exe\u0007\u001b[?25h",
+      "stderr": ""
+    },
+    "conpty:node_version": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 46,
+      "stdout": "\u001b[2J\u001b[m\u001b[H\u001b]0;C:\\Program Files\\nodejs\\node.EXE\u0007\u001b[?25h",
+      "stderr": ""
+    },
+    "conpty:node_child_matrix": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 177,
+      "stdout": "\u001b[2J\u001b[m\u001b[H\u001b]0;C:\\Program Files\\nodejs\\node.EXE\u0007\u001b[?25h",
+      "stderr": ""
+    }
+  },
+  "s5": {
+    "default": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 51,
+      "stdout": "{\"start\":\"ok v24.19.0\",\"readWorkspace\":\"ERR EPERM EPERM: operation not permitted, open 'C:\\\\Users\\\\川野創太\\\\hy-spike-fixture\\\\ws\\\\README.md'\",\"writeWorkspace\":\"ERR EPERM EPERM: operation not permitted, open 'C:\\\\Users\\\\川野創太\\\\hy-spike-fixture\\\\ws\\\\s5_appc.txt'\",\"writeTemp\":\"WROTE\",\"writeExfat\":\"ERR EPERM EPERM: operation not permitted, open 'F:\\\\HY-HARNESS\\\\spikes\\\\win-sandbox\\\\s5_exfat_probe.txt'\",\"spawnCmd\":\"ERR EPERM\",\"tmpdir\":\"C:\\\\Users\\\\川野創太\\\\AppData\\\\Local\\\\Packages\\\\hy-spike-ptc\\\\AC\\\\Temp\",\"network\":\"ERR EACCES\"}\n",
+      "stderr": "",
+      "profileDeleted": true
+    },
+    "singleProcess": {
+      "exitCode": 0,
+      "exitHex": "0x00000000",
+      "timedOut": false,
+      "ms": 50,
+      "stdout": "{\"start\":\"ok v24.19.0\",\"readWorkspace\":\"ERR EPERM EPERM: operation not permitted, open 'C:\\\\Users\\\\川野創太\\\\hy-spike-fixture\\\\ws\\\\README.md'\",\"writeWorkspace\":\"ERR EPERM EPERM: operation not permitted, open 'C:\\\\Users\\\\川野創太\\\\hy-spike-fixture\\\\ws\\\\s5_appc.txt'\",\"writeTemp\":\"WROTE\",\"writeExfat\":\"ERR EPERM EPERM: operation not permitted, open 'F:\\\\HY-HARNESS\\\\spikes\\\\win-sandbox\\\\s5_exfat_probe.txt'\",\"spawnCmd\":\"ERR EPERM\",\"tmpdir\":\"C:\\\\Users\\\\川野創太\\\\AppData\\\\Local\\\\Packages\\\\hy-spike-ptc\\\\AC\\\\Temp\",\"network\":\"ERR EACCES\"}\n",
+      "stderr": "",
+      "profileDeleted": true
+    }
+  },
+  "s6": {
+    "outside": "C:\\Users\\川野創太\\hy-spike-fixture\\outside",
+    "results": {
+      "junctionCreated": true,
+      "moveFileNewInside": "ok",
+      "race": {
+        "filesEscapedOutside": 0,
+        "flips": 201,
+        "iterations": 200,
+        "writesFailed": 1072,
+        "writesOk": 5913
+      },
+      "replaceFileInside": "ok",
+      "replaceHardLink": "denied/failed: ReplaceFileW failed: Win32 error 5 (アクセスが拒否されました。 (os error 5))",
+      "writeHardLinkInPlace": "denied/failed: CreateFileW failed: Win32 error 5 (アクセスが拒否されました。 (os error 5))",
+      "writeInside": "ok",
+      "writeOutside": "denied/failed: CreateFileW failed: Win32 error 5 (アクセスが拒否されました。 (os error 5))",
+      "writeThroughJunction": "denied/failed: CreateFileW failed: Win32 error 5 (アクセスが拒否されました。 (os error 5))",
+      "writeThroughJunctionUnimpersonated": "ok"
+    },
+    "workspace": "C:\\Users\\川野創太\\hy-spike-fixture\\ws"
+  },
+  "s2_gitbash_variants": {
+    "draft": {
+      "exitHex": "0xc0000142",
+      "stdout": "",
+      "stderr": " bash (33844) C:\\Program Files\\Git\\bin\\..\\usr\\bin\\bash.exe: *** fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-1888ae32e00d56aa): 0xC0000022",
+      "wroteFile": false
+    },
+    "nolow": {
+      "exitHex": "0x00000100",
+      "stdout": "",
+      "stderr": " C:\\Program Files\\Git\\bin\\..\\usr\\bin\\bash.exe: *** fatal error - CreateFileMapping S-1-5-21-3695527761-220524766-2495642310-1001.1, Win32 error 5.  Terminating.",
+      "wroteFile": false
+    },
+    "norestrict": {
+      "exitHex": "0xc0000142",
+      "stdout": "",
+      "stderr": " bash (11060) C:\\Program Files\\Git\\bin\\..\\usr\\bin\\bash.exe: *** fatal error - NtCreateDirectoryObject(\\BaseNamedObjects\\msys-2.0S5-1888ae32e00d56aa): 0xC0000022",
+      "wroteFile": false
+    },
+    "nolow,norestrict": {
+      "exitHex": "0x00000000",
+      "stdout": "hi",
+      "stderr": "",
+      "wroteFile": true
+    }
+  },
+  "s5_notes": {
+    "realpathMain": "node <script> fails: an AppContainer cannot lstat C:\\ (main-module realpath); --preserve-symlinks --preserve-symlinks-main fixes it",
+    "workerLocation": "AppContainer cannot read exFAT (F:) or ordinary user dirs; the worker must live in a dir granting ALL APPLICATION PACKAGES (S-1-15-2-1) RX",
+    "pipedSpawnHangs": "child_process.spawnSync with piped stdio hangs inside the AppContainer and ignores its own timeout; the Job Object timeout killed it. stdio:'ignore' fails fast with EPERM",
+    "temp": "Windows sets TEMP/TMP to %LOCALAPPDATA%\\Packages\\<name>\\AC\\Temp, removed by DeleteAppContainerProfile"
+  },
+  "revoke": {
+    "ws": {
+      "failed": 0,
+      "failedSample": [],
+      "leftoverObjectsNamingSid": 4,
+      "leftoverSample": [
+        "C:\\Users\\川野創太\\hy-spike-fixture\\ws\\s6_hl.tmp",
+        "C:\\Users\\川野創太\\hy-spike-fixture\\ws\\s6_inside.txt",
+        "C:\\Users\\川野創太\\hy-spike-fixture\\ws\\s6_new.txt",
+        "C:\\Users\\川野創太\\hy-spike-fixture\\ws\\s6_target.txt"
+      ],
+      "mismatchedAfterRestore": 18,
+      "restoreMs": 3,
+      "restored": 18,
+      "root": "C:\\Users\\川野創太\\hy-spike-fixture\\ws",
+      "sid": "S-1-4-1280499181-1489199505-1514705004-162607085"
+    },
+    "wsB": {
+      "failed": 0,
+      "failedSample": [],
+      "leftoverObjectsNamingSid": 0,
+      "leftoverSample": [],
+      "mismatchedAfterRestore": 2,
+      "restoreMs": 1,
+      "restored": 2,
+      "root": "C:\\Users\\川野創太\\hy-spike-fixture\\wsB",
+      "sid": "S-1-4-2206559499-2520624615-578189811-3082890149"
+    },
+    "tmpA": {
+      "failed": 0,
+      "failedSample": [],
+      "leftoverObjectsNamingSid": 0,
+      "leftoverSample": [],
+      "mismatchedAfterRestore": 1,
+      "restoreMs": 0,
+      "restored": 1,
+      "root": "C:\\Users\\川野創太\\hy-spike-fixture\\tmpA",
+      "sid": "S-1-4-3801637319-1194178430-2093894034-516810873"
+    }
+  },
+  "s1": {
+    "npm": {
+      "files": 100000,
+      "generateSec": 56.2,
+      "dryRun_t1": {
+        "applyMs": 5535,
+        "changed": 0,
+        "counted": 104691,
+        "dirs": 4691,
+        "dryRun": true,
+        "enumerateMs": 376,
+        "failed": 0,
+        "files": 100000,
+        "objects": 104691,
+        "protected": [],
+        "root": "C:\\Users\\川野創太\\hy-spike-fixture\\s1_npm",
+        "sid": "S-1-4-909220196-3554432940-3999162770-1609813003",
+        "skippedHardLinks": 0,
+        "skippedReparse": [],
+        "threads": 1,
+        "totalMs": 5912
+      },
+      "dryRun_t8": {
+        "applyMs": 980,
+        "changed": 0,
+        "counted": 104691,
+        "dirs": 4691,
+        "dryRun": true,
+        "enumerateMs": 332,
+        "failed": 0,
+        "files": 100000,
+        "objects": 104691,
+        "protected": [],
+        "root": "C:\\Users\\川野創太\\hy-spike-fixture\\s1_npm",
+        "sid": "S-1-4-909220196-3554432940-3999162770-1609813003",
+        "skippedHardLinks": 0,
+        "skippedReparse": [],
+        "threads": 8,
+        "totalMs": 1314
+      },
+      "grant_t8": {
+        "applyMs": 3836,
+        "changed": 104691,
+        "counted": 0,
+        "dirs": 4691,
+        "dryRun": false,
+        "enumerateMs": 340,
+        "failed": 0,
+        "files": 100000,
+        "objects": 104691,
+        "protected": [],
+        "root": "C:\\Users\\川野創太\\hy-spike-fixture\\s1_npm",
+        "sid": "S-1-4-909220196-3554432940-3999162770-1609813003",
+        "skippedHardLinks": 0,
+        "skippedReparse": [],
+        "threads": 8,
+        "totalMs": 4394
+      },
+      "newFileWrite": {
+        "exitCode": 0,
+        "exitHex": "0x00000000",
+        "timedOut": false,
+        "ms": 25,
+        "stdout": "",
+        "stderr": "",
+        "created": true
+      },
+      "revoke": {
+        "failed": 0,
+        "leftoverObjectsNamingSid": 1,
+        "mismatchedAfterRestore": 0,
+        "restoreMs": 14904,
+        "restored": 104691,
+        "root": "C:\\Users\\川野創太\\hy-spike-fixture\\s1_npm",
+        "sid": "S-1-4-909220196-3554432940-3999162770-1609813003"
+      }
+    },
+    "pnpm": {
+      "files": 100000,
+      "generateSec": 53.9,
+      "dryRun_t1": {
+        "applyMs": 5993,
+        "changed": 0,
+        "counted": 4692,
+        "dirs": 4692,
+        "dryRun": true,
+        "enumerateMs": 373,
+        "failed": 0,
+        "files": 100000,
+        "objects": 104692,
+        "protected": [],
+        "root": "C:\\Users\\川野創太\\hy-spike-fixture\\s1_pnpm",
+        "sid": "S-1-4-1809607946-3979525758-3371549707-3831596910",
+        "skippedHardLinks": 100000,
+        "skippedReparse": [],
+        "threads": 1,
+        "totalMs": 6408
+      },
+      "dryRun_t8": {
+        "applyMs": 972,
+        "changed": 0,
+        "counted": 4692,
+        "dirs": 4692,
+        "dryRun": true,
+        "enumerateMs": 330,
+        "failed": 0,
+        "files": 100000,
+        "objects": 104692,
+        "protected": [],
+        "root": "C:\\Users\\川野創太\\hy-spike-fixture\\s1_pnpm",
+        "sid": "S-1-4-1809607946-3979525758-3371549707-3831596910",
+        "skippedHardLinks": 100000,
+        "skippedReparse": [],
+        "threads": 8,
+        "totalMs": 1346
+      },
+      "grant_t8": {
+        "applyMs": 1095,
+        "changed": 4692,
+        "counted": 0,
+        "dirs": 4692,
+        "dryRun": false,
+        "enumerateMs": 338,
+        "failed": 0,
+        "files": 100000,
+        "objects": 104692,
+        "protected": [],
+        "root": "C:\\Users\\川野創太\\hy-spike-fixture\\s1_pnpm",
+        "sid": "S-1-4-1809607946-3979525758-3371549707-3831596910",
+        "skippedHardLinks": 100000,
+        "skippedReparse": [],
+        "threads": 8,
+        "totalMs": 1486
+      },
+      "hardlinkWrite": {
+        "exitCode": 1,
+        "exitHex": "0x00000001",
+        "timedOut": false,
+        "ms": 16,
+        "stdout": "",
+        "stderr": "�A�N�Z�X�����ۂ���܂����B\r\n",
+        "storeUnchanged": true
+      },
+      "newFileWrite": {
+        "exitCode": 0,
+        "exitHex": "0x00000000",
+        "timedOut": false,
+        "ms": 15,
+        "stdout": "",
+        "stderr": "",
+        "created": true
+      },
+      "revoke": {
+        "failed": 0,
+        "leftoverObjectsNamingSid": 1,
+        "mismatchedAfterRestore": 0,
+        "restoreMs": 479,
+        "restored": 4692,
+        "root": "C:\\Users\\川野創太\\hy-spike-fixture\\s1_pnpm",
+        "sid": "S-1-4-1809607946-3979525758-3371549707-3831596910"
+      }
+    }
+  }
+}

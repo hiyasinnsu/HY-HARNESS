@@ -1,0 +1,19 @@
+[E1] commit-tree failed without identity: Author identity unknown
+[E2] add -u captures .env.local: 0
+[E2] add -A captures .env.local: 1
+[E3] rev2: .env.local restored: no
+[E3] rev2: f10 mtime changed: yes
+[E3] rev2: user staged f1 still differs from HEAD in index: yes
+[E3] rev2: f2 unstaged change became staged: yes
+[E4] diff-tree changes: M .env.local;M f3.txt;A new.txt;
+[E4] .env.local restored: yes
+[E4] f3 restored: yes
+[E4] new.txt deleted: yes
+[E4] f10 mtime unchanged: yes
+[E4] node_modules untouched: yes
+[E4] user staged f1 preserved: yes
+[E4] f2 still unstaged: yes
+[E4] HEAD unchanged: yes
+[E5] default config stores raw bytes: no
+[E5] GIT_ATTR_SOURCE+autocrlf=false stores raw bytes: yes
+git: git version 2.50.1.windows.1
