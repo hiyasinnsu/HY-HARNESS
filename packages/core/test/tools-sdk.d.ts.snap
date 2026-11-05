@@ -8,10 +8,10 @@ declare namespace tools {
   /** Run a command; after foregroundWaitMs it becomes a job. root: workspace root ID (default main). Windows: PowerShell, not grep/head/find. */
   function shell(args: { command: string; root?: string; cwd?: string; foregroundWaitMs?: number; hardTimeoutMs?: number; persistent?: boolean; stdinPipe?: boolean; tty?: boolean }): Promise<{ status: 'completed' | 'backgrounded'; exitCode?: number | null; stdout: string; stderr: string; jobId?: string | null; gap?: string }>
   namespace search {
-    /** Glob paths (skips .git/node_modules/.hy-harness). root:* = all roots. */
-    function glob(args: { pattern: string; root?: string; maxResults?: number }): Promise<{ files: string[]; truncated: boolean }>
-    /** Regex lines; optional glob. root:* = all roots. */
-    function grep(args: { pattern: string; root?: string; glob?: string; ignoreCase?: boolean; maxResults?: number }): Promise<{ matches: { path: string; line: number; text: string }[]; truncated: boolean; filesSearched: number }>
+    /** Root-relative paths matching a glob (docs/*.md); skips .git, node_modules, .gitignore'd. root:* = all roots. */
+    function glob(args: { pattern: string; root?: string; maxResults?: number }): Promise<{ files: string[]; truncated: boolean; note?: string }>
+    /** Regex lines; optional path glob; same skips. root:* = all roots. */
+    function grep(args: { pattern: string; root?: string; glob?: string; ignoreCase?: boolean; maxResults?: number }): Promise<{ matches: { path: string; line: number; text: string }[]; truncated: boolean; filesSearched: number; note?: string }>
   }
   namespace jobs {
     /** State of a background job. */

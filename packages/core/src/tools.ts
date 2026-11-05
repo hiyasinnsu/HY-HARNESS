@@ -5,6 +5,7 @@ import type { ExecResult, PatchApplyResult, SandboxMode } from './protocol.js'
 import { ExecRpcClient, ExecRpcError } from './exec-rpc.js'
 import { TOOLS_BY_NAME, TOOLS_BY_SDK, deferredTools, jsonSchemaToTs, validate, type ToolSpec } from './tool-registry.js'
 import type { Ledger } from './ledger.js'
+import { isIgnored, parseGitignore, type IgnoreRule } from './gitignore.js'
 import { loadSkill, type SkillInfo } from './skills.js'
 import type { McpManager } from './mcp.js'
 import type { Hooks } from './hooks.js'
@@ -243,6 +244,44 @@ function resolveInside(root: string, rel: string): string {
 
 /** Directories `tools.search.*` never enters. */
 const SEARCH_SKIP = new Set(['.git', 'node_modules', '.hy-harness'])
+
+/** A root's own ignore rules: `.git/info/exclude`, then its `.gitignore`. */
+function rootIgnoreRules(root: string): IgnoreRule[] {
+  const rules: IgnoreRule[] = []
+  for (const file of [path.join(root, '.git', 'info', 'exclude'), path.join(root, '.gitignore')]) {
+    try {
+      rules.push(...parseGitignore(fs.readFileSync(file, 'utf8')))
+    } catch {
+      // Missing or unreadable: no rules from this file.
+    }
+  }
+  return rules
+}
+
+/**
+ * When a search found nothing and its pattern names a directory that search
+ * never enters (.gitignore or the built-in skips), that directory, so the
+ * result can say why instead of looking like the files do not exist.
+ */
+function ignoredTarget(roots: readonly { path: string }[], pattern: string): string | undefined {
+  const segments: string[] = []
+  for (const segment of pattern.split('/').slice(0, -1)) {
+    if (/[*?[{]/.test(segment)) break
+    segments.push(segment)
+  }
+  for (const root of roots) {
+    const rules = rootIgnoreRules(root.path)
+    for (let i = 1; i <= segments.length; i++) {
+      const dir = segments.slice(0, i).join('/')
+      if (SEARCH_SKIP.has(segments[i - 1]!) || isIgnored(rules, dir, true)) return dir
+    }
+  }
+  return undefined
+}
+
+function withIgnoreNote<T extends object>(result: T, dir: string | undefined): T & { note?: string } {
+  return dir ? { ...result, note: `${dir}/ is not searched (.gitignore or a built-in skip); read_file still opens files there by path.` } : result
+}
 const GREP_MAX_FILE_BYTES = 1024 * 1024
 
 /** `read_image` limits (WP-30): a vision model cannot use more than this. */
@@ -1164,28 +1203,51 @@ export class ToolRuntime {
     return this.options.ledger
   }
 
-  /** Workspace files (relative, `/`-separated) in stable order; no links followed. */
-  private *walk(dir: string): Generator<string> {
+  /**
+   * Workspace files relative to `base` (the root), `/`-separated, in stable
+   * order; no links followed. The path must be relative to the root, not to the
+   * directory being listed: otherwise every result collapses to its basename,
+   * `docs/*.md` never matches, and grep re-reads `<root>/<basename>`.
+   */
+  private *walk(root: string): Generator<string> {
+    yield* this.walkDir(root, '', rootIgnoreRules(root))
+  }
+
+  /**
+   * `.gitignore` rules apply as git applies them: the root file (plus
+   * `.git/info/exclude`), then each nested `.gitignore` below its directory.
+   * An ignored directory is not entered at all.
+   */
+  private *walkDir(dir: string, rel: string, inherited: readonly IgnoreRule[]): Generator<string> {
     let entries: fs.Dirent[]
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true })
     } catch {
       return
     }
+    let rules = inherited
+    if (rel !== '' && entries.some((e) => e.name === '.gitignore' && e.isFile())) {
+      try {
+        rules = [...inherited, ...parseGitignore(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), rel)]
+      } catch {
+        // An unreadable nested .gitignore only means its rules do not apply.
+      }
+    }
     entries.sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))
     for (const e of entries) {
       if (e.isSymbolicLink()) continue
-      const full = path.join(dir, e.name)
+      const childRel = rel === '' ? e.name : `${rel}/${e.name}`
       if (e.isDirectory()) {
-        if (!SEARCH_SKIP.has(e.name)) yield* this.walk(full)
-      } else if (e.isFile()) {
-        yield path.relative(dir, full).split(path.sep).join('/')
+        if (!SEARCH_SKIP.has(e.name) && !isIgnored(rules, childRel, true)) yield* this.walkDir(path.join(dir, e.name), childRel, rules)
+      } else if (e.isFile() && !isIgnored(rules, childRel, false)) {
+        yield childRel
       }
     }
   }
 
   private searchGlob(args: Record<string, unknown>): ToolResult {
-    const re = globToRegExp(String(args.pattern))
+    const pattern = String(args.pattern)
+    const re = globToRegExp(pattern)
     const max = Number(args.maxResults ?? 200)
     const selected = args.root === '*' ? this.roots : [this.root(typeof args.root === 'string' ? args.root : undefined)]
     const files: string[] = []
@@ -1196,7 +1258,7 @@ export class ToolRuntime {
         files.push(this.qualified(root, rel))
       }
     }
-    return { files, truncated: false }
+    return withIgnoreNote({ files, truncated: false }, files.length === 0 ? ignoredTarget(selected, pattern) : undefined)
   }
 
   private searchGrep(args: Record<string, unknown>): ToolResult {
@@ -1232,7 +1294,8 @@ export class ToolRuntime {
         }
       }
     }
-    return { matches, truncated: false, filesSearched }
+    const target = matches.length === 0 && typeof args.glob === 'string' ? ignoredTarget(selected, args.glob) : undefined
+    return withIgnoreNote({ matches, truncated: false, filesSearched }, target)
   }
 
   private readFile(args: Record<string, unknown>): ToolResult {
