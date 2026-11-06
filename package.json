@@ -44,6 +44,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "@types/qrcode": "1.5.5",
     "electron": "45.2.1",
     "electron-builder": "^26.18.0",
     "json-schema-to-typescript": "^16.0.0",
@@ -55,6 +56,7 @@
     "@xterm/xterm": "6.0.0",
     "agent-desktop": "1.0.2",
     "cordis": "4.0.0-rc.12",
-    "node-pty": "1.2.0-beta.18"
+    "node-pty": "1.2.0-beta.18",
+    "qrcode": "1.5.4"
   }
 }

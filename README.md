@@ -377,8 +377,37 @@ to `POST /turn`.
 
 ### Phone access over Tailscale
 
-`hy web --tailscale` binds to this PC's Tailscale IPv4 and prints a URL that a
-phone on the same tailnet can open:
+**From the desktop app (recommended).** Settings › Phone › **Turn on** adds a
+listener on this PC's Tailscale address next to the local one, so the phone
+sees the same live chats. With HTTPS certificates enabled for the tailnet
+(Tailscale admin console › DNS) the app fetches one with `tailscale cert`
+(this publishes the machine's `*.ts.net` name in Certificate Transparency logs)
+and serves `https://<pc>.<tailnet>.ts.net:3443/`; otherwise it serves
+`http://100.x.y.z:3443/` and notifications are unavailable. The setting is
+remembered (`phone.enabled`, `phone.port` in `config.json`).
+
+- **Pairing.** **Add a phone (QR code)** shows a single-use code that expires in
+  five minutes. Scanning it on the phone (with Tailscale connected) gives that
+  phone its own long-lived key as an HttpOnly cookie; only a hash is stored in
+  `%APPDATA%\hy-harness\phone-devices.json`. The list under **Paired phones**
+  shows each phone and when it was last seen; **Revoke** disconnects it at once,
+  open streams included. A phone can use the app but cannot pair others or
+  change phone access.
+- **Notifications.** On the phone, Settings › Phone › **Turn on notifications**
+  (iPhone: first Share › Add to Home Screen and open it from there). The phone
+  is notified when an approval or a question is waiting and when a turn
+  finishes or fails; tapping opens that chat. Delivery is standard Web Push
+  (RFC 8291/8292, VAPID key in `%APPDATA%\hy-harness\vapid.json`); the push
+  service sees only ciphertext.
+- **Phone layout.** Pending approvals and questions are pinned to the top of
+  the chat, and decisions are thumb-sized buttons.
+- **Keep running.** Settings › Phone › Keep running (also in the tray icon's
+  menu): closing the window keeps the app in the tray so the phone can still
+  reach it, and **Start at Windows login** starts it in the tray without a
+  window (packaged exe only).
+
+**From the command line.** `hy web --tailscale` binds to this PC's Tailscale
+IPv4 and prints a URL that a phone on the same tailnet can open:
 
 ```powershell
 node packages\hy-cli\dist\main.js web --tailscale --cwd C:\work\my-repo
@@ -392,9 +421,10 @@ regenerated on every server start, so reopen the current URL after a restart;
 the browser cookie remains valid for one year. The URL is a credential — anyone
 with it and tailnet access can use the session.
 
-The first phone connection may be blocked by Windows Firewall. Allow Node.js on
-the Private/Tailscale profile when Windows asks. To add the rule up front from
-an elevated PowerShell (replace the port if you changed it):
+The first phone connection may be blocked by Windows Firewall. Allow the app
+(HY-HARNESS.exe, or Node.js for `hy web`) on the Private/Tailscale profile when
+Windows asks. To add the rule up front from an elevated PowerShell (the desktop
+app's phone listener uses port 3443; replace the port and program as needed):
 
 ```powershell
 New-NetFirewallRule -DisplayName "HY-HARNESS Tailscale" -Direction Inbound `

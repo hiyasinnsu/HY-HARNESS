@@ -31,6 +31,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<{ id: string; key: string }> = [
   { id: 'models', key: 'models' },
   { id: 'capabilities', key: 'capabilities' },
   { id: 'automation', key: 'automation' },
+  { id: 'phone', key: 'phoneTitle' },
   { id: 'update', key: 'updateTitle' },
 ]
 import { sumDenials } from './denials.js'
@@ -43,6 +44,7 @@ import { SCROLL_ANCHOR_AT_BOTTOM, anchorAfterRender, captureAnchor, type ScrollA
 import { entryMotionKey, settledFlags, wrapEntryHtml } from './entry-motion.js'
 import { nextTheme, resolveTheme, themeToggleView } from './theme.js'
 import { buildLabel } from './build-label.js'
+import { pushSupport, renderPhoneSection, type PhonePairing, type PhoneStatus, type PushSupport } from './phone-view.js'
 import { caretAfterRender, composerDraftKey, readComposerDraft, shouldRebuildComposer, shouldStartSessionOnFocus, writeComposerDraft, type ComposerSnapshot } from './composer-draft.js'
 import { Terminal } from '../vendor/xterm.mjs'
 import { FitAddon } from '../vendor/addon-fit.mjs'
@@ -1015,7 +1017,14 @@ function renderTranscriptNow(): void {
   // across the re-render that replaces its element.
   const focusedCard = (document.activeElement as HTMLElement | null)?.closest?.<HTMLElement>('.approval-card[data-approval-id]')?.dataset.approvalId
   const focusCard = focusedCard ?? approvalToFocus
-  el.innerHTML = `<div class="transcript-inner">${body}${running}</div>`
+  // Pending approvals and questions stay in view on a phone, where the card
+  // itself has usually scrolled away by the time the notification is tapped.
+  const waiting = state.entries.filter(
+    (entry) => (entry.kind === 'approval' && !entry.decision) || (entry.kind === 'question' && entry.answer === undefined),
+  ).length
+  const waitingBar =
+    waiting > 0 ? `<button type="button" class="waiting-bar" data-action="jump-waiting">${icon('alert', 15)}<span>${escapeHtml(translate(state.locale, 'phoneApprovalsWaiting', { count: waiting }))}</span>${icon('chevron-down', 14)}</button>` : ''
+  el.innerHTML = `<div class="transcript-inner">${waitingBar}${body}${running}</div>`
   restoreTranscriptAnchor(el)
   if (focusCard) {
     const card = el.querySelector<HTMLElement>(`.approval-card[data-approval-id="${CSS.escape(focusCard)}"]`)
@@ -3444,6 +3453,11 @@ function renderModal(): void {
         <div class="settings-row"><span>${tr('desktopAutomation')}</span><label class="toggle"><input id="settings-desktop" type="checkbox" ${settings?.user.automation?.desktop?.enabled ? 'checked' : ''}> ${tr('enabled')}</label></div>
         <div class="settings-note" id="automation-restart-note" hidden>${icon('alert', 14)} ${tr('automationChangedNote')}</div>
       </section>
+      <section class="settings-section" data-settings-section="phone">
+        <h3>${tr('phoneTitle')}</h3>
+        <div id="phone-section">${renderPhoneSection(phoneStatus, phonePairing, currentPushSupport(), state.locale)}</div>
+        <div id="resident-section"></div>
+      </section>
       <section class="settings-section" data-settings-section="update">
         <h3>${tr('updateTitle')}</h3>
         <div class="settings-note">${icon('info', 14)} ${tr('updateHint')}</div>
@@ -5166,9 +5180,166 @@ async function openSettings(): Promise<void> {
     state.pluginCatalog = plugins
     state.modal = 'settings'
     renderModal()
+    void loadPhoneStatus()
   } catch (error) {
     toast(error instanceof Error ? error.message : String(error), 'error')
   }
+}
+
+// ---------- Phone access (Settings › Phone) ----------
+
+let phoneStatus: PhoneStatus | undefined
+let phonePairing: PhonePairing | undefined
+let phonePairingTimer: number | undefined
+
+function currentPushSupport(): PushSupport {
+  return pushSupport({
+    isSecureContext: window.isSecureContext,
+    hasServiceWorker: 'serviceWorker' in navigator,
+    hasPushManager: 'PushManager' in window,
+    userAgent: navigator.userAgent,
+    standalone: window.matchMedia?.('(display-mode: standalone)').matches === true || (navigator as Navigator & { standalone?: boolean }).standalone === true,
+    ...(typeof Notification === 'undefined' ? {} : { permission: Notification.permission }),
+  })
+}
+
+function renderPhone(): void {
+  const el = document.getElementById('phone-section')
+  if (el) el.innerHTML = renderPhoneSection(phoneStatus, phonePairing, currentPushSupport(), state.locale)
+}
+
+async function loadPhoneStatus(): Promise<void> {
+  try {
+    phoneStatus = await api<PhoneStatus>('/api/phone')
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+  }
+  renderPhone()
+  void renderResident()
+}
+
+/** Desktop only: keep running in the tray, and start at Windows login. */
+async function renderResident(): Promise<void> {
+  const el = document.getElementById('resident-section')
+  const bridge = window.hyDesktop
+  if (!el || !bridge?.residentState) return
+  const resident = await bridge.residentState()
+  el.innerHTML = `<h4>${tr('residentTitle')}</h4>
+    <div class="settings-note">${icon('info', 14)} ${tr('residentHint')}</div>
+    <label class="checkbox-field"><input type="checkbox" data-resident="resident" ${resident.resident ? 'checked' : ''}> ${tr('residentKeep')}</label>
+    ${resident.loginAvailable ? `<label class="checkbox-field"><input type="checkbox" data-resident="openAtLogin" ${resident.openAtLogin ? 'checked' : ''}> ${tr('residentLogin')}</label>` : `<div class="settings-note">${tr('residentLoginPackagedOnly')}</div>`}`
+  for (const input of el.querySelectorAll<HTMLInputElement>('input[data-resident]')) {
+    input.addEventListener('change', () => {
+      const key = input.dataset.resident === 'openAtLogin' ? 'openAtLogin' : 'resident'
+      void bridge.setResident?.({ [key]: input.checked }).then(() => renderResident())
+    })
+  }
+}
+
+function stopPairingPoll(): void {
+  if (phonePairingTimer !== undefined) window.clearInterval(phonePairingTimer)
+  phonePairingTimer = undefined
+}
+
+async function phoneAction(action: string, target?: HTMLElement): Promise<void> {
+  try {
+    if (action === 'phone-enable' || action === 'phone-disable') {
+      const view = await post<Omit<PhoneStatus, 'devices' | 'client'>>(action === 'phone-enable' ? '/api/phone/enable' : '/api/phone/disable')
+      if (view.error) toast(view.error, 'error')
+      if (action === 'phone-disable') {
+        phonePairing = undefined
+        stopPairingPoll()
+      }
+      void window.hyDesktop?.phoneChanged?.()
+      await loadPhoneStatus()
+      return
+    }
+    if (action === 'phone-pair') {
+      phonePairing = await post<PhonePairing>('/api/phone/pairing')
+      renderPhone()
+      stopPairingPoll()
+      const code = phonePairing.code
+      phonePairingTimer = window.setInterval(() => {
+        if (!phonePairing || phonePairing.code !== code || Date.now() > phonePairing.expiresAt) {
+          stopPairingPoll()
+          if (phonePairing?.code === code) phonePairing = undefined
+          renderPhone()
+          return
+        }
+        void api<{ state: string }>(`/api/phone/pairing?code=${encodeURIComponent(code)}`).then((result) => {
+          if (result.state !== 'done' || phonePairing?.code !== code) return
+          stopPairingPoll()
+          phonePairing = undefined
+          toast(tr('phonePaired'), 'success')
+          void loadPhoneStatus()
+        })
+      }, 2_000)
+      return
+    }
+    if (action === 'phone-pair-cancel') {
+      phonePairing = undefined
+      stopPairingPoll()
+      renderPhone()
+      return
+    }
+    if (action === 'phone-revoke') {
+      const id = target?.dataset.deviceId
+      if (!id || !window.confirm(tr('phoneRevokeConfirm'))) return
+      await api(`/api/phone/devices/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      await loadPhoneStatus()
+      return
+    }
+    if (action === 'push-enable') {
+      const permission = await Notification.requestPermission()
+      if (permission !== 'granted') {
+        renderPhone()
+        return
+      }
+      const registration = await navigator.serviceWorker.ready
+      const { publicKey } = await api<{ publicKey: string }>('/api/push/key')
+      const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64UrlBytes(publicKey) })
+      await post('/api/push/subscribe', { subscription: subscription.toJSON(), locale: state.locale })
+      await loadPhoneStatus()
+      return
+    }
+    if (action === 'push-disable') {
+      const registration = await navigator.serviceWorker.getRegistration()
+      await (await registration?.pushManager.getSubscription())?.unsubscribe()
+      await post('/api/push/unsubscribe')
+      await loadPhoneStatus()
+      return
+    }
+    if (action === 'push-test') {
+      await post('/api/push/test')
+      toast(tr('phoneNotifyTestSent'), 'success')
+    }
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+/**
+ * The service worker receives Web Push on a paired phone. It needs a secure
+ * context (HTTPS, or localhost); the desktop shell does not use it.
+ */
+function registerServiceWorker(): void {
+  if (window.hyDesktop || !window.isSecureContext || !('serviceWorker' in navigator)) return
+  navigator.serviceWorker.register('/sw.js').catch(() => {
+    // Without a service worker the page still works; only notifications are off.
+  })
+  navigator.serviceWorker.addEventListener('message', (event: MessageEvent<{ type?: string; url?: string }>) => {
+    if (event.data?.type !== 'open' || !event.data.url) return
+    const runId = new URL(event.data.url, window.location.origin).searchParams.get('run')
+    if (runId && state.sessions.some((session) => session.runId === runId)) void selectSession(runId)
+  })
+}
+
+function base64UrlBytes(text: string): Uint8Array<ArrayBuffer> {
+  const padded = text.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(text.length / 4) * 4, '=')
+  const binary = atob(padded)
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length))
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
 }
 
 async function reloadPlugins(): Promise<void> {
@@ -5611,6 +5782,22 @@ function onDocumentClick(event: MouseEvent): void {
       break
     case 'apply-update':
       void applyUpdate()
+      break
+    case 'jump-waiting': {
+      const card = document.querySelector<HTMLElement>('#transcript .approval-card[data-approval-id], #transcript .question-card[data-question-id]')
+      card?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      card?.focus({ preventScroll: true })
+      break
+    }
+    case 'phone-enable':
+    case 'phone-disable':
+    case 'phone-pair':
+    case 'phone-pair-cancel':
+    case 'phone-revoke':
+    case 'push-enable':
+    case 'push-disable':
+    case 'push-test':
+      void phoneAction(action, el)
       break
     case 'check-update':
       void checkUpdate()
@@ -6478,9 +6665,16 @@ async function init(): Promise<void> {
     connectGlobal()
     // WP-53: a fresh install starts with the three-step wizard.
     if (boot.onboarding && !boot.onboarding.complete) openOnboarding()
-    const preferred = boot.orchestration?.active?.orchestratorRunId ?? boot.sessions[0]?.runId
+    // A tapped notification opens /?run=<id>: that chat wins over the default.
+    const linked = new URLSearchParams(window.location.search).get('run')
+    if (linked) window.history.replaceState(null, '', '/')
+    const preferred =
+      (linked && boot.sessions.some((session) => session.runId === linked) ? linked : undefined) ??
+      boot.orchestration?.active?.orchestratorRunId ??
+      boot.sessions[0]?.runId
     if (preferred) await selectSession(preferred)
     else await newSession()
+    registerServiceWorker()
     if (window.hyDesktop) {
       window.hyDesktop.onMenu((action) => {
         if (action === 'new-session') void newSession()

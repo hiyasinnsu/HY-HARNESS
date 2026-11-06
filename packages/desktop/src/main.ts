@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, screen, shell, type MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray, type MenuItemConstructorOptions } from 'electron'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
@@ -17,6 +17,10 @@ interface DesktopState {
   workspace?: string
   workspaces?: string[]
   window?: { width: number; height: number; x?: number; y?: number }
+  /** Closing the window keeps the app (and phone access) running in the tray. */
+  resident?: boolean
+  /** The "still running in the tray" notice was shown once. */
+  residentNoticeShown?: boolean
 }
 
 interface DesktopArgs {
@@ -37,11 +41,14 @@ interface DesktopArgs {
   web: boolean
   ptc: boolean
   memory: boolean
+  /** Started at Windows login: stay in the tray, do not show the window. */
+  background: boolean
 }
 
 let win: BrowserWindow | undefined
 let server: WebServerHandle | undefined
 let quitting = false
+let tray: Tray | undefined
 
 function readState(): DesktopState {
   try {
@@ -107,6 +114,7 @@ function parseArgs(argv: string[]): DesktopArgs {
     web: bool('web'),
     ptc: bool('ptc'),
     memory: bool('memory'),
+    background: bool('background'),
   }
 }
 
@@ -144,8 +152,101 @@ async function startFor(workspace: string): Promise<WebServerHandle> {
     port: args.port,
     open: false,
     desktop: true,
+    // Phone access the user turned on earlier comes back with the app (not in
+    // screenshot/demo runs, which must not open a network listener).
+    phoneAutoStart: !args.screenshot && !args.demo,
     log: (line) => console.error(`[desktop] ${line}`),
   })
+}
+
+// ---------- Resident mode: tray icon, close-to-tray, start at login ----------
+
+/** The exe Windows should start at login: the portable exe, not its temp extraction. */
+function loginExecutable(): string | undefined {
+  if (!app.isPackaged) return undefined
+  return process.env.PORTABLE_EXECUTABLE_FILE ?? process.execPath
+}
+
+function residentState(): { resident: boolean; openAtLogin: boolean; loginAvailable: boolean } {
+  const exe = loginExecutable()
+  const openAtLogin = exe ? app.getLoginItemSettings({ path: exe, args: ['--background'] }).openAtLogin : false
+  return { resident: readState().resident === true || openAtLogin, openAtLogin, loginAvailable: exe !== undefined }
+}
+
+function setResident(next: { resident?: boolean; openAtLogin?: boolean }): ReturnType<typeof residentState> {
+  const state = readState()
+  const exe = loginExecutable()
+  if (next.openAtLogin !== undefined && exe) {
+    app.setLoginItemSettings({ openAtLogin: next.openAtLogin, path: exe, args: ['--background'] })
+  }
+  // Starting hidden at login only makes sense if the app stays in the tray.
+  const resident = next.openAtLogin === true ? true : (next.resident ?? state.resident === true)
+  writeState({ ...state, resident })
+  if (resident === false && exe && app.getLoginItemSettings({ path: exe, args: ['--background'] }).openAtLogin) {
+    app.setLoginItemSettings({ openAtLogin: false, path: exe, args: ['--background'] })
+  }
+  void refreshTray()
+  return residentState()
+}
+
+function showWindow(): void {
+  if (!server) return
+  if (!win || win.isDestroyed()) {
+    win = createWindow()
+    void win.loadURL(server.url)
+    return
+  }
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+async function refreshTray(): Promise<void> {
+  if (!tray) return
+  const phone = server?.phone.status()
+  const resident = residentState()
+  tray.setToolTip(phone?.enabled ? `HY-HARNESS — phone: ${phone.url ?? 'on'}` : 'HY-HARNESS')
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: 'Open HY-HARNESS', click: () => showWindow() },
+      { type: 'separator' },
+      {
+        label: phone?.enabled ? `Phone access: ${phone.url ?? 'on'}` : 'Phone access: off',
+        enabled: false,
+      },
+      {
+        label: 'Phone access',
+        type: 'checkbox',
+        checked: phone?.enabled === true,
+        click: () => {
+          void (phone?.enabled ? server?.phone.disable() : server?.phone.enable())?.then((view) => {
+            if (view.error) dialog.showErrorBox('HY-HARNESS', view.error)
+            void refreshTray()
+          })
+        },
+      },
+      { label: 'Keep running when the window is closed', type: 'checkbox', checked: resident.resident, click: (item) => setResident({ resident: item.checked }) },
+      ...(resident.loginAvailable
+        ? [{ label: 'Start at Windows login', type: 'checkbox' as const, checked: resident.openAtLogin, click: (item: Electron.MenuItem) => setResident({ openAtLogin: item.checked }) }]
+        : []),
+      { type: 'separator' },
+      {
+        label: 'Quit',
+        click: () => {
+          quitting = true
+          app.quit()
+        },
+      },
+    ]),
+  )
+}
+
+function createTray(): void {
+  if (tray || args.screenshot || args.demo) return
+  const image = nativeImage.createFromPath(path.join(here, '..', 'assets', 'HY_icon.png')).resize({ width: 16, height: 16 })
+  tray = new Tray(image)
+  tray.on('click', () => showWindow())
+  void refreshTray()
 }
 
 interface UpdateCandidate {
@@ -377,6 +478,7 @@ async function switchWorkspace(workspace: string): Promise<void> {
     rememberWorkspace(workspace)
     await win.loadURL(next.url)
     await previous?.close()
+    setTimeout(() => void refreshTray(), 3_000)
   } catch (error) {
     dialog.showErrorBox('HY-HARNESS', error instanceof Error ? error.message : String(error))
     if (previous) {
@@ -478,7 +580,10 @@ function createWindow(): BrowserWindow {
       spellcheck: false,
     },
   })
-  window.once('ready-to-show', () => window.show())
+  // Started at login: the app lives in the tray until the user opens it.
+  window.once('ready-to-show', () => {
+    if (!args.background) window.show()
+  })
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
@@ -496,10 +601,19 @@ function createWindow(): BrowserWindow {
     }
   })
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
-  window.on('close', () => {
+  window.on('close', (event) => {
     const state = readState()
     const bounds = window.getBounds()
     writeState({ ...state, window: { width: bounds.width, height: bounds.height, x: bounds.x, y: bounds.y } })
+    // Resident: hide instead of quitting, so running turns and phone access go on.
+    if (!quitting && tray && residentState().resident) {
+      event.preventDefault()
+      window.hide()
+      if (!state.residentNoticeShown && Notification.isSupported()) {
+        new Notification({ title: 'HY-HARNESS', body: 'Still running in the tray. Use the tray icon to open it or quit.' }).show()
+        writeState({ ...readState(), residentNoticeShown: true })
+      }
+    }
   })
   if (args.devtools) window.webContents.openDevTools({ mode: 'detach' })
   return window
@@ -575,8 +689,11 @@ async function boot(): Promise<void> {
   }
   rememberWorkspace(workspace)
   buildMenu()
+  createTray()
   win = createWindow()
   await win.loadURL(server.url)
+  // Phone access restores itself asynchronously; show its state once it has.
+  setTimeout(() => void refreshTray(), 3_000)
   if (args.screenshot) {
     try {
       await capture(args.screenshot)
@@ -591,18 +708,15 @@ async function boot(): Promise<void> {
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.on('second-instance', () => {
-    if (win) {
-      if (win.isMinimized()) win.restore()
-      win.focus()
-    }
-  })
+  app.on('second-instance', () => showWindow())
   app.on('before-quit', () => {
     if (quitting) return
     quitting = true
     void server?.close()
   })
   app.on('window-all-closed', () => {
+    // In resident mode the window is only hidden; this fires on a real quit path.
+    if (tray && residentState().resident && !quitting) return
     if (process.platform !== 'darwin') app.quit()
   })
   app.on('activate', () => {
@@ -656,6 +770,15 @@ if (!app.requestSingleInstanceLock()) {
   })
   ipcMain.handle('update:apply', () => applyUpdate())
   ipcMain.handle('update:check', () => checkUpdate())
+  ipcMain.handle('resident:get', () => residentState())
+  ipcMain.handle('resident:set', (_event, next: unknown) => {
+    const value = next && typeof next === 'object' ? (next as { resident?: unknown; openAtLogin?: unknown }) : {}
+    return setResident({
+      ...(typeof value.resident === 'boolean' ? { resident: value.resident } : {}),
+      ...(typeof value.openAtLogin === 'boolean' ? { openAtLogin: value.openAtLogin } : {}),
+    })
+  })
+  ipcMain.handle('phone:changed', () => void refreshTray())
   ipcMain.handle('app:versions', () => ({
     app: app.getVersion(),
     electron: process.versions.electron ?? '',

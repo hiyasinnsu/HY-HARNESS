@@ -13,6 +13,9 @@ contextBridge.exposeInMainWorld('hyDesktop', {
   notify: (title, body) => ipcRenderer.invoke('app:notify', title, body),
   applyUpdate: () => ipcRenderer.invoke('update:apply'),
   checkUpdate: () => ipcRenderer.invoke('update:check'),
+  residentState: () => ipcRenderer.invoke('resident:get'),
+  setResident: (next) => ipcRenderer.invoke('resident:set', next),
+  phoneChanged: () => ipcRenderer.invoke('phone:changed'),
   pickPluginFile: () => ipcRenderer.invoke('plugins:pick'),
   versions: () => ipcRenderer.invoke('app:versions'),
   onMenu: (callback) => {

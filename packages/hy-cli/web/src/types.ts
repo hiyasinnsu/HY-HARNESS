@@ -568,6 +568,11 @@ export interface DesktopBridge {
   applyUpdate(): Promise<{ ok: boolean; error?: string; from?: string }>
   /** Whether a staged build would be applied (older desktop shells lack it). */
   checkUpdate?(): Promise<{ available: boolean; version?: string; commit?: string; builtAt?: string; current: string; reason?: string }>
+  /** Resident mode (tray, close-to-tray, start at Windows login). */
+  residentState?(): Promise<{ resident: boolean; openAtLogin: boolean; loginAvailable: boolean }>
+  setResident?(next: { resident?: boolean; openAtLogin?: boolean }): Promise<{ resident: boolean; openAtLogin: boolean; loginAvailable: boolean }>
+  /** Tells the shell to refresh its tray after phone access changed. */
+  phoneChanged?(): Promise<void>
   pickPluginFile(): Promise<string | null>
   onMenu(cb: (action: string) => void): () => void
   versions?(): Promise<Record<string, string>>

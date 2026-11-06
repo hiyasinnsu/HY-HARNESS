@@ -1441,3 +1441,38 @@ code, pre { font-family: var(--mono); }
 .import-row summary { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; }
 .import-row.import-skip { opacity: 0.6; }
 .import-diff { margin: 6px 0 0; max-height: 200px; overflow: auto; font-size: 11px; }
+
+/* ---------- Phone access (Settings › Phone) ---------- */
+.phone-pairing { display: flex; gap: 16px; align-items: flex-start; margin-top: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft); }
+.phone-qr { flex: none; width: 184px; height: 184px; padding: 6px; border-radius: 8px; background: #fff; }
+.phone-qr svg { display: block; width: 100%; height: 100%; }
+.phone-pairing-text { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12px; color: var(--text-2); }
+.phone-pairing-text code { word-break: break-all; font-size: 11px; color: var(--muted); }
+.phone-pairing-text .btn { align-self: flex-start; }
+.phone-device { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border-soft); }
+.phone-device:last-child { border-bottom: 0; }
+.phone-device-main { display: flex; flex-direction: column; min-width: 0; }
+.phone-device-main strong { font-size: 13px; font-weight: 600; }
+.settings-section h4 { margin: 14px 0 4px; font-size: 12px; font-weight: 600; color: var(--text-2); }
+
+/* Pending approvals and questions, pinned to the top of the chat. */
+.waiting-bar { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: 8px; width: 100%; margin: 0 0 12px; padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--amber) 50%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--amber) 12%, var(--panel)); color: var(--text); font-size: 13px; font-weight: 600; text-align: left; cursor: pointer; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12); }
+.waiting-bar svg { color: var(--amber); flex: none; }
+.waiting-bar span { flex: 1; }
+
+/* Phone-first: thumb-sized decisions, readable diffs, full-screen dialogs. */
+@media (max-width: 640px) {
+  .approval-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .approval-actions .btn { min-height: 44px; justify-content: center; font-size: 14px; }
+  .approval-actions kbd { display: none; }
+  .question-card textarea, .question-card input { font-size: 16px; }
+  .question-card .btn { min-height: 44px; }
+  .diff-view { padding: 4px; }
+  .diff-view pre, .tool-body pre { font-size: 11px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .modal-backdrop { padding: 0; }
+  .modal { width: 100%; max-width: 100%; height: 100%; max-height: 100%; border-radius: 0; }
+  .phone-pairing { flex-direction: column; }
+  .waiting-bar { font-size: 14px; padding: 12px 14px; }
+}
+.tag.ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, var(--border)); }
+#resident-section .checkbox-field { display: flex; padding-top: 8px; font-size: 13px; color: var(--text-2); }

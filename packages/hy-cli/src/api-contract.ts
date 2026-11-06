@@ -136,6 +136,16 @@ export const API_ROUTES: readonly RouteContract[] = [
   { method: 'POST', path: '/api/ralph', summary: 'Start a ralph job.', request: { objective: { type: 'string', required: true }, verifyCmds: { type: 'array' }, cwd: { type: 'string' } }, errors: [400] },
 
   // ----- workspace · files · settings -----
+  { method: 'GET', path: '/api/phone', summary: 'Phone access state, paired devices (owner only) and who is asking.', response: 'PhoneStatus' },
+  { method: 'POST', path: '/api/phone/enable', summary: 'Listen on this node\'s Tailscale address (HTTPS via tailscale cert when available).', response: 'PhoneAccessView', errors: [403] },
+  { method: 'POST', path: '/api/phone/disable', summary: 'Stop the Tailscale listener.', response: 'PhoneAccessView', errors: [403] },
+  { method: 'POST', path: '/api/phone/pairing', summary: 'A single-use pairing code, its URL and a QR code (SVG); expires in 5 minutes.', response: 'PhonePairing', errors: [403, 409] },
+  { method: 'GET', path: '/api/phone/pairing', summary: 'Whether a pairing code was claimed.', request: { code: { type: 'string', required: true } }, errors: [403] },
+  { method: 'DELETE', path: '/api/phone/devices/:id', summary: 'Revoke a paired device; its open streams close at once.', errors: [403, 404] },
+  { method: 'GET', path: '/api/push/key', summary: 'The VAPID public key for PushManager.subscribe.' },
+  { method: 'POST', path: '/api/push/subscribe', summary: 'Turn notifications on for this paired phone.', request: { subscription: { type: 'object', required: true }, locale: { type: 'string' } }, errors: [400, 409] },
+  { method: 'POST', path: '/api/push/unsubscribe', summary: 'Turn notifications off for this paired phone.' },
+  { method: 'POST', path: '/api/push/test', summary: 'Send a test notification to this phone.', errors: [409, 502] },
   { method: 'GET', path: '/api/workspace/roots', summary: 'Workspace roots.', response: 'RootsResponse' },
   { method: 'POST', path: '/api/workspace/roots', summary: 'Add a workspace root.', request: { path: { type: 'string', required: true }, label: { type: 'string' }, writable: { type: 'boolean' } }, errors: [400] },
   { method: 'GET', path: '/api/files/search', summary: 'Find files by name.', response: 'FileSearchResponse' },

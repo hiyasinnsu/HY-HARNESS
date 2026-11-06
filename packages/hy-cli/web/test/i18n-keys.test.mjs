@@ -13,7 +13,7 @@ import { hasTranslation, translate } from '../dist/i18n.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const bundle = path.join(here, '..', 'dist', 'app.js')
-const helperBundles = ['turn-queue-view.js', 'turn-queue-intent.js'].map((file) => path.join(here, '..', 'dist', file))
+const helperBundles = ['turn-queue-view.js', 'turn-queue-intent.js', 'phone-view.js'].map((file) => path.join(here, '..', 'dist', file))
 
 function keysIn(file) {
   if (!fs.existsSync(file)) return new Set()

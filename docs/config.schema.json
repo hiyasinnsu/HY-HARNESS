@@ -1581,6 +1581,27 @@
       },
       "description": "Desktop release feed and its Ed25519 key (WP-53); `hy update` never runs on its own."
     },
+    "phone": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Listen on this PC's Tailscale address for paired phones (set from Settings › Phone)."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Port of the phone listener (default 3443)."
+        },
+        "pushSubject": {
+          "type": "string",
+          "description": "VAPID contact (mailto: or https:) sent to push services."
+        }
+      },
+      "description": "Phone access over Tailscale: QR pairing, per-device keys and Web Push notifications."
+    },
     "telemetry": {
       "type": "object",
       "additionalProperties": false,

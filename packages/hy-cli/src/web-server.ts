@@ -102,6 +102,10 @@ import { usageOf, type UsageView } from './usage.js'
 import { instantThinkingSummary } from './summary-text.js'
 import { cronMatches, nextCronTime, parseCron } from './cron.js'
 import { PersistentPty } from './pty.js'
+import QRCode from 'qrcode'
+import { DEVICE_COOKIE, PhoneDeviceStore, parsePushSubscription, phoneLocale, phoneMessage, type PhoneDevice, type PhoneEvent } from './phone-devices.js'
+import { loadVapidKeys, sendPush, type VapidKeys } from './web-push.js'
+import { ensureTailscaleCert, tailscaleNode, type Runner } from './tailscale.js'
 import {
   DEFAULT_MAX_WORKERS,
   canSpawnWorker,
@@ -163,6 +167,28 @@ export interface WebServerOptions {
   trustedHosts?: string[] | undefined
   /** Advertised browser root behind a prefix-stripping proxy, e.g. https://app.example/ui/ */
   publicUrl?: string | undefined
+  /**
+   * Phone access (desktop): restore the Tailscale listener at start when the
+   * user turned it on earlier (`phone.enabled` in config.json).
+   */
+  phoneAutoStart?: boolean | undefined
+  /** Test hook: the Tailscale CLI runner. */
+  tailscaleRunner?: Runner | undefined
+  /** Test hook: the phone listener's address instead of this node's Tailscale IP. */
+  phoneHostOverride?: string | undefined
+  /** Test hook: where Web Push requests go. */
+  pushFetch?: typeof fetch | undefined
+}
+
+/** What the settings page shows about phone access. */
+export interface PhoneAccessView {
+  enabled: boolean
+  /** The address phones open (https://<name>.ts.net:<port>/ or http://100.x:port/). */
+  url?: string
+  https: boolean
+  /** Why it is off or why HTTPS (and so notifications) is unavailable. */
+  error?: string
+  warning?: string
 }
 
 export interface WebServerHandle {
@@ -173,6 +199,12 @@ export interface WebServerHandle {
   port: number
   token: string
   config: HarnessConfig
+  /** Phone access over Tailscale: state, and turning the extra listener on/off. */
+  phone: {
+    status(): PhoneAccessView
+    enable(): Promise<PhoneAccessView>
+    disable(): Promise<PhoneAccessView>
+  }
   close(): Promise<void>
 }
 
@@ -252,7 +284,9 @@ export function createHostFence(bindHost: string, trustedHosts: readonly string[
       return false
     }
   }
-  return { allows, allowsOrigin }
+  /** Accepts another authority from now on (the phone listener's name and address). */
+  const trust = (raw: string): void => add(raw)
+  return { allows, allowsOrigin, trust }
 }
 
 /** Normalizes `--public-url` to a trailing-slash HTTP(S) root, or throws. */
@@ -1048,6 +1082,46 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   if (onboarding.applied.length > 0) options.log?.(`onboarding: applied ${onboarding.applied.join(', ')}`)
   const logFile = sessionLogPath(config.stateDir)
   const token = options.token ?? randomBytes(24).toString('hex')
+  // Phone access: paired devices (each with its own secret) and Web Push. They
+  // live in the user config directory, so a phone stays paired across restarts
+  // and workspaces.
+  const devices = new PhoneDeviceStore(path.join(userConfigDir(), 'phone-devices.json'))
+  let vapid: VapidKeys | undefined
+  const vapidKeys = (): VapidKeys => (vapid ??= loadVapidKeys(path.join(userConfigDir(), 'vapid.json')))
+  /** Open responses (SSE streams included) per device, so a revoke cuts them off at once. */
+  const deviceResponses = new Map<string, Set<http.ServerResponse>>()
+  const pushSubject = (): string => {
+    const { user } = readUserConfigFile()
+    const phone = user.phone as { pushSubject?: unknown } | undefined
+    return typeof phone?.pushSubject === 'string' && /^(mailto:|https:)/.test(phone.pushSubject) ? phone.pushSubject : 'mailto:hy-harness@example.com'
+  }
+  /** Notifies every phone that asked for it; drops subscriptions the push service says are gone. */
+  const notifyPhones = (event: PhoneEvent): void => {
+    const targets = devices.pushTargets()
+    if (targets.length === 0) return
+    let keys: VapidKeys
+    try {
+      keys = vapidKeys()
+    } catch (error) {
+      serverLog(`push: VAPID keys unavailable: ${errorMessage(error)}`)
+      return
+    }
+    const subject = pushSubject()
+    for (const target of targets) {
+      const message = phoneMessage(event, target.locale)
+      void sendPush(target.subscription, message, keys, subject, options.pushFetch).then((outcome) => {
+        if (outcome === 'gone') devices.setPush(target.id, undefined)
+        else if (outcome === 'failed') serverLog(`push: delivery to ${target.id} failed`)
+      })
+    }
+  }
+  const sessionLabel = (session: WebSession): string => {
+    const custom = uiState.titles[session.runId] ?? uiState.generatedTitles[session.runId]?.title
+    if (custom) return custom
+    const first = session.entries.find((entry) => entry.kind === 'user')
+    const text = first && 'text' in first ? first.text : session.runId
+    return text.replace(/\s+/g, ' ').trim().slice(0, 40) || session.runId
+  }
   const sessions = new Map<string, WebSession>()
   const deletedRuns = new Set<string>()
   const ralphJobs = new Map<string, RalphJob>()
@@ -1774,6 +1848,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     const details = describeApproval(request, config.workspaceRoot)
     session.entries.push({ id: `approval-${requestId}`, kind: 'approval', runId: session.runId, requestId, request, details, ts: Date.now() })
     broadcast(session, { type: 'approval/request', requestId, request, details })
+    notifyPhones({ kind: 'approval', label: sessionLabel(session), body: String(request.command ?? ''), runId: session.runId })
     return new Promise<boolean | { approved: boolean; reason?: string }>((resolve) => {
       const timer = setTimeout(() => {
         session.pendingApprovals.delete(requestId)
@@ -1793,6 +1868,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     const requestId = `ask-${randomBytes(6).toString('hex')}`
     session.entries.push({ id: `question-${requestId}`, kind: 'question', runId: session.runId, requestId, question, ts: Date.now() })
     broadcast(session, { type: 'question/request', requestId, question })
+    notifyPhones({ kind: 'question', label: sessionLabel(session), body: question, runId: session.runId })
     return new Promise<string>((resolve) => {
       const timer = setTimeout(() => {
         session.pendingQuestions.delete(requestId)
@@ -2214,6 +2290,10 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   }
 
   function onTurnFinished(session: WebSession, outcome: 'completed' | 'aborted' | 'error', text: string): void {
+    // A cancel is the user's own action; a finished or failed turn is news.
+    if (outcome !== 'aborted' && session.kind !== 'worker') {
+      notifyPhones({ kind: outcome === 'completed' ? 'completed' : 'error', label: sessionLabel(session), body: text, runId: session.runId })
+    }
     if (session.kind === 'orchestrator') {
       if (outcome === 'completed') reportUnmentionedWorkers(session, text)
       return
@@ -3026,15 +3106,26 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         if (problems.length > 0) throw new HttpError(400, `invalid request: ${problems.join('; ')}`)
         return body
       }
-      const authorized = (): boolean => {
+      /** The launch token (desktop app, `hy web` URL, SDK bearer): full control. */
+      const ownerAuthorized = (): boolean => {
         const cookies = parseCookies(req.headers.cookie)
         if (sameSecret(cookies.hy_web_token, token)) return true
         const bearer = req.headers.authorization
         return bearer?.startsWith('Bearer ') === true && sameSecret(bearer.slice(7), token)
       }
+      // A paired phone: everything except managing phone access itself.
+      let pairedDevice: PhoneDevice | undefined | null = null
+      const currentDevice = (): PhoneDevice | undefined =>
+        pairedDevice === null ? (pairedDevice = devices.verify(parseCookies(req.headers.cookie)[DEVICE_COOKIE])) : pairedDevice
+      const authorized = (): boolean => ownerAuthorized() || currentDevice() !== undefined
       const requireAuth = (): boolean => {
         if (authorized()) return true
-        json(res, 401, { error: 'unauthorized: open the URL printed by hy web / the desktop app' })
+        json(res, 401, { error: 'unauthorized: open the URL printed by hy web / the desktop app, or pair this phone again' })
+        return false
+      }
+      const requireOwner = (): boolean => {
+        if (ownerAuthorized()) return true
+        json(res, 403, { error: 'phone access is managed from the desktop app' })
         return false
       }
 
@@ -3046,6 +3137,25 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         }
         res.statusCode = 302
         res.setHeader('Set-Cookie', `hy_web_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/${secure ? '; Secure' : ''}; Max-Age=31536000`)
+        res.setHeader('Location', '/')
+        res.end()
+        return
+      }
+
+      // Phone pairing: the QR code opens /pair?code=…; a valid, unexpired code is
+      // consumed and this phone gets its own secret as an HttpOnly cookie.
+      // (A page like the launch URL, not part of the /api contract.)
+      if (method === 'GET' && pathname === '/pair') {
+        const claimed = devices.claim(url.searchParams.get('code') ?? '', req.headers['user-agent'])
+        if (!claimed) {
+          res.statusCode = 403
+          res.setHeader('Content-Type', 'text/html; charset=utf-8')
+          res.end('<!doctype html><meta name="viewport" content="width=device-width"><p style="font:16px system-ui;padding:24px">This pairing code is invalid or expired. Show a new QR code in the desktop app (Settings › Phone).</p>')
+          return
+        }
+        serverLog(`phone paired: ${claimed.device.name} (${claimed.device.id})`)
+        res.statusCode = 302
+        res.setHeader('Set-Cookie', `${DEVICE_COOKIE}=${encodeURIComponent(claimed.cookie)}; HttpOnly; SameSite=Strict; Path=/${req.socket && 'encrypted' in req.socket && req.socket.encrypted ? '; Secure' : ''}; Max-Age=31536000`)
         res.setHeader('Location', '/')
         res.end()
         return
@@ -3080,6 +3190,100 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
 
       if (pathname.startsWith('/api/')) {
         if (!requireAuth()) return
+        const device = ownerAuthorized() ? undefined : currentDevice()
+        if (device) {
+          const open = deviceResponses.get(device.id) ?? new Set<http.ServerResponse>()
+          deviceResponses.set(device.id, open)
+          open.add(res)
+          res.on('close', () => open.delete(res))
+        }
+
+        if (pathname === '/api/phone' && method === 'GET') {
+          json(res, 200, { ...phoneView(), devices: ownerAuthorized() ? devices.list() : [], client: device ? { kind: 'device', id: device.id, name: device.name, push: device.push !== undefined } : { kind: 'owner' } })
+          return
+        }
+        if (pathname === '/api/phone/enable' && method === 'POST') {
+          if (!requireOwner()) return
+          json(res, 200, await enablePhone(true))
+          return
+        }
+        if (pathname === '/api/phone/disable' && method === 'POST') {
+          if (!requireOwner()) return
+          json(res, 200, await disablePhone(true))
+          return
+        }
+        if (pathname === '/api/phone/pairing' && method === 'POST') {
+          if (!requireOwner()) return
+          if (!phone) {
+            json(res, 409, { error: 'turn phone access on first' })
+            return
+          }
+          const pairing = devices.startPairing()
+          const pairUrl = `${phone.url}pair?code=${encodeURIComponent(pairing.code)}`
+          const qrSvg = await QRCode.toString(pairUrl, { type: 'svg', errorCorrectionLevel: 'M', margin: 2 })
+          json(res, 200, { code: pairing.code, url: pairUrl, expiresAt: pairing.expiresAt, qrSvg })
+          return
+        }
+        if (pathname === '/api/phone/pairing' && method === 'GET') {
+          if (!requireOwner()) return
+          json(res, 200, { state: devices.pairingState(url.searchParams.get('code') ?? '') })
+          return
+        }
+        const deviceMatch = /^\/api\/phone\/devices\/([^/]+)$/.exec(pathname)
+        if (deviceMatch && method === 'DELETE') {
+          if (!requireOwner()) return
+          const id = decodeURIComponent(deviceMatch[1]!)
+          if (!devices.revoke(id)) {
+            json(res, 404, { error: 'unknown device' })
+            return
+          }
+          // Revocation is immediate: open streams of that phone are cut too.
+          for (const open of deviceResponses.get(id) ?? []) {
+            try {
+              open.end()
+            } catch {
+              // already closed
+            }
+          }
+          deviceResponses.delete(id)
+          serverLog(`phone revoked: ${id}`)
+          json(res, 200, { devices: devices.list() })
+          return
+        }
+        if (pathname === '/api/push/key' && method === 'GET') {
+          json(res, 200, { publicKey: vapidKeys().publicKey })
+          return
+        }
+        if (pathname === '/api/push/subscribe' && method === 'POST') {
+          if (!device) {
+            json(res, 409, { error: 'notifications are for paired phones; pair this browser from the desktop app first' })
+            return
+          }
+          const body = await readBody()
+          const subscription = parsePushSubscription(body.subscription)
+          if (!subscription) {
+            json(res, 400, { error: 'invalid push subscription' })
+            return
+          }
+          devices.setPush(device.id, subscription, phoneLocale(body.locale))
+          json(res, 200, { ok: true })
+          return
+        }
+        if (pathname === '/api/push/unsubscribe' && method === 'POST') {
+          if (device) devices.setPush(device.id, undefined)
+          json(res, 200, { ok: true })
+          return
+        }
+        if (pathname === '/api/push/test' && method === 'POST') {
+          if (!device?.push) {
+            json(res, 409, { error: 'notifications are not on for this phone' })
+            return
+          }
+          const outcome = await sendPush(device.push, phoneMessage({ kind: 'test', label: '', body: 'HY-HARNESS' }, device.locale), vapidKeys(), pushSubject(), options.pushFetch)
+          if (outcome === 'gone') devices.setPush(device.id, undefined)
+          json(res, outcome === 'sent' ? 200 : 502, { outcome })
+          return
+        }
 
         if (pathname === '/api/metrics' && method === 'GET') {
           json(res, 200, metricsSnapshot({ uptimeSeconds: process.uptime(), sessions: sessions.size, rssBytes: process.memoryUsage().rss }))
@@ -5148,6 +5352,114 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   // otherwise the server keeps the loopback HTTP behavior of earlier versions.
   const server = secure ? https.createServer(tlsOptions, requestHandler) : http.createServer(requestHandler)
 
+  // Phone access: a second listener on this node's Tailscale address, serving
+  // the same handler (so the phone sees the desktop's live sessions). HTTPS
+  // comes from `tailscale cert` when the tailnet allows it; notifications need it.
+  let phone: { server: http.Server | https.Server; url: string; https: boolean; warning?: string } | undefined
+  let phoneError: string | undefined
+  let phoneStarting: Promise<PhoneAccessView> | undefined
+  const phoneSettings = (): { enabled: boolean; port: number } => {
+    const { user } = readUserConfigFile()
+    const raw = user.phone && typeof user.phone === 'object' && !Array.isArray(user.phone) ? (user.phone as Record<string, unknown>) : {}
+    const port = typeof raw.port === 'number' && Number.isInteger(raw.port) && raw.port > 0 && raw.port < 65536 ? raw.port : 3443
+    return { enabled: raw.enabled === true, port }
+  }
+  const persistPhone = (enabled: boolean): void => {
+    const { path: settingsPath, user } = readUserConfigFile()
+    const previous = user.phone && typeof user.phone === 'object' && !Array.isArray(user.phone) ? (user.phone as Record<string, unknown>) : {}
+    user.phone = { ...previous, enabled }
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
+    fs.writeFileSync(settingsPath, `${JSON.stringify(user, null, 2)}\n`, 'utf8')
+  }
+  const phoneView = (): PhoneAccessView =>
+    phone
+      ? { enabled: true, url: phone.url, https: phone.https, ...(phone.warning ? { warning: phone.warning } : {}) }
+      : { enabled: false, https: false, ...(phoneError ? { error: phoneError } : {}) }
+  const listenOn = (target: http.Server | https.Server, port: number, bindHost: string): Promise<number> =>
+    new Promise<number>((resolve, reject) => {
+      const onError = (error: NodeJS.ErrnoException): void => {
+        target.removeListener('listening', onListening)
+        reject(error)
+      }
+      const onListening = (): void => {
+        target.removeListener('error', onError)
+        resolve((target.address() as AddressInfo).port)
+      }
+      target.once('error', onError)
+      target.once('listening', onListening)
+      target.listen(port, bindHost)
+    })
+  const startPhone = async (persist: boolean): Promise<PhoneAccessView> => {
+    if (phone) return phoneView()
+    phoneError = undefined
+    let bindHost: string
+    let dnsName: string | undefined
+    let certDomains: string[] = []
+    if (options.phoneHostOverride) {
+      bindHost = options.phoneHostOverride
+    } else {
+      const node = tailscaleNode(options.tailscaleRunner)
+      if ('error' in node) {
+        phoneError = node.error
+        return phoneView()
+      }
+      bindHost = node.ipv4
+      dnsName = node.dnsName
+      certDomains = node.certDomains
+    }
+    let tls: https.ServerOptions | undefined
+    let warning: string | undefined
+    if (dnsName && certDomains.includes(dnsName)) {
+      const cert = ensureTailscaleCert(path.join(userConfigDir(), 'tailscale-cert'), dnsName, options.tailscaleRunner)
+      if ('error' in cert) warning = `${cert.error}. Without HTTPS the page works but notifications cannot.`
+      else tls = { cert: fs.readFileSync(cert.cert), key: fs.readFileSync(cert.key), minVersion: 'TLSv1.2' }
+    } else if (!options.phoneHostOverride) {
+      warning = 'HTTPS certificates are off for this tailnet (Tailscale admin console › DNS). The page works over http, but notifications need HTTPS.'
+    }
+    const listener = tls ? https.createServer(tls, requestHandler) : http.createServer(requestHandler)
+    const wanted = options.phoneHostOverride ? 0 : phoneSettings().port
+    let bound: number | undefined
+    // A workspace switch starts the next server before the previous one has
+    // released the port, so a busy port is retried briefly.
+    for (let attempt = 0; bound === undefined; attempt++) {
+      try {
+        bound = await listenOn(listener, wanted, bindHost)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE' || attempt >= 10) {
+          phoneError = `cannot listen on ${bindHost}:${wanted}: ${errorMessage(error)}`
+          return phoneView()
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+    }
+    const name = tls && dnsName ? dnsName : bindHost
+    fence.trust(`${name}:${bound}`)
+    fence.trust(`${bindHost}:${bound}`)
+    phone = { server: listener, url: `${tls ? 'https' : 'http'}://${name}:${bound}/`, https: tls !== undefined, ...(warning ? { warning } : {}) }
+    if (persist) persistPhone(true)
+    serverLog(`phone access on ${phone.url}${warning ? ` (${warning})` : ''}`)
+    return phoneView()
+  }
+  const enablePhone = (persist: boolean): Promise<PhoneAccessView> => {
+    phoneStarting ??= startPhone(persist).finally(() => {
+      phoneStarting = undefined
+    })
+    return phoneStarting
+  }
+  const disablePhone = async (persist: boolean): Promise<PhoneAccessView> => {
+    await phoneStarting
+    const current = phone
+    phone = undefined
+    phoneError = undefined
+    if (current) {
+      current.server.closeAllConnections()
+      await new Promise<void>((resolve) => current.server.close(() => resolve()))
+      serverLog('phone access off')
+    }
+    if (persist) persistPhone(false)
+    return phoneView()
+  }
+
   const listen = (port: number): Promise<number> =>
     new Promise<number>((resolve, reject) => {
       const onError = (error: NodeJS.ErrnoException): void => {
@@ -5223,6 +5535,11 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   if (publicUrl !== undefined) logLine(options, `public url: ${publicUrl} (name it with --trusted-host to accept it)`)
   if ((options.trustedHosts ?? []).length > 0) logLine(options, `trusted hosts: ${(options.trustedHosts ?? []).join(', ')}`)
   if (options.open) openBrowser(url)
+  if (options.phoneAutoStart && phoneSettings().enabled) {
+    void enablePhone(false).then((view) => {
+      if (view.error) serverLog(`phone access could not start: ${view.error}`)
+    })
+  }
 
   return {
     url,
@@ -5230,9 +5547,11 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     port,
     token,
     config,
+    phone: { status: phoneView, enable: () => enablePhone(true), disable: () => disablePhone(true) },
     close: async () => {
       if (closing) return
       closing = true
+      await disablePhone(false)
       clearInterval(heartbeatTimer)
       clearInterval(automationTimer)
       for (const child of automationChildren.values()) child.kill()
