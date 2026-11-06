@@ -70,6 +70,26 @@ async function prepare(harness, n) {
   return ws
 }
 
+/**
+ * A fresh HY user-config directory for the benchmark: the user's config.json
+ * minus the parts that would make the comparison unfair or leak in state
+ * from other projects — MCP servers (`mcpServers`, the `automation` presets)
+ * and added workspace roots. RULE.md and skills are not copied, so the
+ * user's global rules are ignored too. The model role, plugins, sandbox and
+ * the rest stay as the user runs HY.
+ */
+function benchHyConfigDir() {
+  const dir = path.join(benchRoot, `${stamp}-hy-config`)
+  fs.mkdirSync(dir, { recursive: true })
+  const userDir = process.env.HY_CONFIG_DIR ?? path.join(process.env.APPDATA, 'hy-harness')
+  const userFile = path.join(userDir, 'config.json')
+  const user = fs.existsSync(userFile) ? JSON.parse(fs.readFileSync(userFile, 'utf8')) : {}
+  for (const key of ['mcpServers', 'automation', 'workspaceRoots', 'workspaceRootsByWorkspace']) delete user[key]
+  fs.writeFileSync(path.join(dir, 'config.json'), `${JSON.stringify(user, null, 2)}\n`)
+  return dir
+}
+const HY_CONFIG_DIR = harnesses.includes('hy') ? benchHyConfigDir() : undefined
+
 async function runHy(ws, n) {
   const state = `${ws}.state`
   fs.rmSync(state, { recursive: true, force: true })
@@ -78,6 +98,7 @@ async function runHy(ws, n) {
   const r = await exec(process.execPath, [HY_MAIN, 'chat', '--cwd', ws, '--state-dir', state, '--json', '--full-auto', '--exec-server', EXEC_SERVER], {
     cwd: ws,
     input,
+    env: { ...childEnv, HY_CONFIG_DIR },
   })
   const wallMs = Date.now() - started
   fs.writeFileSync(path.join(outDir, `hy-${n}.stdout.jsonl`), r.stdout)

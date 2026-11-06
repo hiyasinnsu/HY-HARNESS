@@ -33,6 +33,16 @@ for (const native of [true, false]) {
   })
 }
 
+test('the path hint names search tools the model has: run_code only with PTC', () => {
+  for (const native of [true, false]) {
+    const plain = buildSystemPrompt('C:\\work\\alpha', false, false, { native })
+    assert.doesNotMatch(plain, /run_code/, 'without PTC there is no run_code to point at')
+    assert.match(plain, /search_glob \/ search_grep/)
+    const ptc = buildSystemPrompt('C:\\work\\alpha', true, false, { native })
+    assert.match(ptc, /tools\.search\.glob \/ tools\.search\.grep inside run_code/)
+  }
+})
+
 test('skill and MCP catalogs sit in the session part (only the tools they add change the earlier text)', () => {
   const prompt = buildSystemPrompt('C:\\work\\alpha', true, false, {
     native: true,

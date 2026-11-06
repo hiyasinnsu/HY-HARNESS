@@ -51,6 +51,46 @@ prefix_rule(pattern = [["pip", "pip3"], ["install", "download", "uninstall"]], d
 prefix_rule(pattern = ["cargo", ["install", "add", "publish", "login", "owner", "yank"]], decision = "prompt", justification = "registry access")
 prefix_rule(pattern = [["winget", "choco", "scoop"]], decision = "prompt", justification = "system package manager")
 
+# Node test runners start their workers and the processes under test with
+# pipes or IPC, which fail with `spawn EPERM` under the write-restricted
+# workspace-write token (ADR 0001 S-2). They run with the Low label only
+# (`low-integrity`): writes outside the granted roots stay blocked; the known
+# gaps are other sessions' granted roots and AppData\LocalLow (enforcement
+# gaps S4/S5). A user rule with sandbox = "workspace-write" turns this off.
+# Only a plain command qualifies: a pipeline or redirect is compound and is
+# evaluated as before.
+prefix_rule(
+    pattern = ["node", "--test"],
+    decision = "allow",
+    sandbox = "low-integrity",
+    justification = "Node test runner (child processes need pipes)",
+    match = ["node --test", "node --test test/stats.test.js"],
+    not_match = ["node script.js", "node -e x"],
+)
+prefix_rule(
+    pattern = [["npm", "pnpm", "yarn"], ["test", "t"]],
+    decision = "allow",
+    sandbox = "low-integrity",
+    justification = "package test script (Node test runners need pipes)",
+    match = ["npm test", "pnpm test -- --watch=false", "npm.cmd test", "yarn t"],
+    not_match = ["npm run build", "npm install"],
+)
+prefix_rule(
+    pattern = [["npm", "pnpm", "yarn"], "run", ["test", "test:unit", "test:integration"]],
+    decision = "allow",
+    sandbox = "low-integrity",
+    justification = "package test script (Node test runners need pipes)",
+    match = ["npm run test", "pnpm run test:unit"],
+    not_match = ["npm run build"],
+)
+prefix_rule(
+    pattern = [["vitest", "jest"]],
+    decision = "allow",
+    sandbox = "low-integrity",
+    justification = "Node test runner (worker processes need pipes)",
+    match = ["vitest run", "jest --ci"],
+)
+
 # Build and test commands run model-editable code; the sandbox limits them, not the policy.
 prefix_rule(
     pattern = ["cargo", ["build", "check", "test", "clippy", "fmt", "run", "doc", "bench", "tree", "metadata"]],

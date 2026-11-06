@@ -355,13 +355,20 @@ impl PolicySet {
 
             // Layer restrictions.
             // Both modes are looser than workspace-write (OQ-2, ADR 0001 C).
-            if matches!(
-                rule.sandbox,
-                Some(SandboxMode::Unconfined | SandboxMode::LowIntegrity)
-            ) && layer != Layer::User
-            {
+            // `unconfined` is the user's alone. `low-integrity` may also come
+            // from the embedded default, which uses it only for Node test
+            // runners: their pipe/IPC child processes fail with EPERM under
+            // the write-restricted token (ADR 0001 S-2). A user rule with
+            // `sandbox = "workspace-write"` for the same command turns it off
+            // (the strictest matching sandbox wins). Project policy may not.
+            let looser_allowed = match rule.sandbox {
+                Some(SandboxMode::Unconfined) => layer == Layer::User,
+                Some(SandboxMode::LowIntegrity) => matches!(layer, Layer::User | Layer::Default),
+                _ => true,
+            };
+            if !looser_allowed {
                 self.warnings.push(format!(
-                    "{id}: sandbox = \"unconfined\" / \"low-integrity\" is honored only in user policy; rule ignored"
+                    "{id}: sandbox = \"unconfined\" is honored only in user policy, \"low-integrity\" only in user or default policy; rule ignored"
                 ));
                 continue;
             }
@@ -442,7 +449,21 @@ impl PolicySet {
                 compound: false,
             };
         };
-        let sandbox = matched.iter().filter_map(|r| r.sandbox).min();
+        // A user rule's sandbox replaces the embedded default's (the user may
+        // loosen it to unconfined or tighten it back to workspace-write);
+        // within a layer, and for project rules, the strictest one wins, so a
+        // project can only tighten.
+        let strictest = |pick: &dyn Fn(&Layer) -> bool| {
+            matched
+                .iter()
+                .filter(|r| pick(&r.layer))
+                .filter_map(|r| r.sandbox)
+                .min()
+        };
+        let user = strictest(&|l| *l == Layer::User);
+        let default = strictest(&|l| *l == Layer::Default);
+        let project = strictest(&|l| matches!(l, Layer::Project { .. }));
+        let sandbox = [user.or(default), project].into_iter().flatten().min();
         PolicyEval {
             decision: strongest.decision,
             sandbox,
@@ -512,7 +533,11 @@ prefix_rule(pattern = ["npm", "test"], sandbox = "unconfined")
             s.evaluate("cargo publish", Dialect::PowerShell).decision,
             Decision::Deny
         );
-        assert_eq!(s.evaluate("npm test", Dialect::PowerShell).sandbox, None);
+        // The project's "unconfined" is ignored; the default test-runner rule applies.
+        assert_eq!(
+            s.evaluate("npm test", Dialect::PowerShell).sandbox,
+            Some(SandboxMode::LowIntegrity)
+        );
         assert_eq!(s.warnings.len(), 2);
     }
 
@@ -525,6 +550,54 @@ prefix_rule(pattern = ["npm", "test"], sandbox = "unconfined")
         };
         let e = s.evaluate("npm.cmd test", Dialect::PowerShell);
         assert_eq!(e.sandbox, Some(SandboxMode::Unconfined));
+    }
+
+    #[test]
+    fn default_policy_runs_node_test_runners_low_integrity() {
+        let p = default_set();
+        let sb = |c: &str| p.evaluate(c, Dialect::PowerShell).sandbox;
+        for c in [
+            "node --test",
+            "npm test",
+            "npm.cmd test",
+            "pnpm run test",
+            "vitest run",
+            "jest --ci",
+        ] {
+            assert_eq!(sb(c), Some(SandboxMode::LowIntegrity), "{c}");
+            assert_eq!(
+                p.evaluate(c, Dialect::PowerShell).decision,
+                Decision::Allow,
+                "{c}"
+            );
+        }
+        for c in ["node script.js", "npm run build", "cargo test"] {
+            assert_ne!(sb(c), Some(SandboxMode::LowIntegrity), "{c}");
+        }
+        // A pipeline is compound: no per-rule sandbox, as before.
+        assert_eq!(sb("npm test | Select-String fail"), None);
+        // The user can turn it off: the strictest matching sandbox wins.
+        let off = r#"prefix_rule(pattern = [["npm", "pnpm", "yarn"], "test"], sandbox = "workspace-write", match = ["npm test"])"#;
+        let s = match PolicySet::load_layers(Some(("u.star", off)), None) {
+            Ok(s) => s,
+            Err(e) => panic!("{e}"),
+        };
+        assert_eq!(
+            s.evaluate("npm test", Dialect::PowerShell).sandbox,
+            Some(SandboxMode::WorkspaceWrite)
+        );
+    }
+
+    #[test]
+    fn unconfined_is_user_policy_only() {
+        let rule =
+            r#"prefix_rule(pattern = ["mytool"], sandbox = "unconfined", match = ["mytool x"])"#;
+        let s = match PolicySet::load_layers(None, Some(("p.star", rule, true))) {
+            Ok(s) => s,
+            Err(e) => panic!("{e}"),
+        };
+        assert_eq!(s.evaluate("mytool x", Dialect::PowerShell).sandbox, None);
+        assert_eq!(s.warnings.len(), 1);
     }
 
     #[test]

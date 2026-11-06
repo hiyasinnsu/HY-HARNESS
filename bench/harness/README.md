@@ -5,7 +5,7 @@
 ## 条件
 
 - モデル: OpenCode Go の `deepseek-v4.1-flash`、effort `max`（両方とも）
-  - HY: ユーザー設定の `opencode` ロール（effort は `max`）。
+  - HY: ユーザー設定の `opencode` ロール（effort は `max`）。実行のたびに新しい設定フォルダー（`<workdir>/<stamp>-hy-config`）を作り、ユーザーの `config.json` から MCP（`mcpServers`、`automation`）と追加ルートを除いたものを置いて `HY_CONFIG_DIR` に渡す。RULE.md とスキルはコピーしないので、ユーザーの全体ルールは使わない。DSH 側には MCP も全体ルールもないので、条件をこれで揃える。
   - DSH: `dsh --profile headless --patch bench/harness/dsh.patch.yml`。pi-ai の `opencode-go` ルートを使い、モデルと effort をこの重ね合わせファイルで指定する。API キーは環境変数 `OPENCODE_API_KEY` を参照するだけで、ファイルには書かない。ユーザーのプロファイルは変更しない。
 - 課題: `fixture.mjs` が作る小さな統計ライブラリ（`formatTable` にバグが 1 つ仕込んである）に対して、`tasks.mjs` の 4 つの指示を 1 つのセッションで順番に与える。
   1. `median` / `mode` の実装とテスト

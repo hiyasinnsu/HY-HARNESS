@@ -74,6 +74,31 @@ export function normalizeShellCwd(workspaceRoot: string, cwd: string): string {
 }
 
 /**
+ * Node child processes with pipes or IPC fail with `spawn EPERM` under the
+ * write-restricted workspace-write token (ADR 0001 S-2). The default policy
+ * runs plain test-runner commands in `low-integrity`, where they work, but a
+ * pipeline or redirect is compound and keeps the session's sandbox. Says so,
+ * so the model reruns the command plainly instead of trying workarounds.
+ */
+export function pipeChildGap(
+  result: { stdout?: unknown; stderr?: unknown; exitCode?: unknown; sandbox?: unknown },
+  command = '',
+): string | undefined {
+  const text = `${typeof result.stdout === 'string' ? result.stdout : ''}\n${typeof result.stderr === 'string' ? result.stderr : ''}`
+  const seen = /spawn(Sync)? \S*\s*EPERM|EPERM[^\n]*spawn/i.test(text)
+  // A filter (`| Select-String pass`) can hide the EPERM line: a failing test
+  // runner that a pipe or redirect kept in workspace-write gets the hint too.
+  const likely =
+    result.sandbox === 'workspace-write' &&
+    typeof result.exitCode === 'number' &&
+    result.exitCode !== 0 &&
+    /[|>;&]/.test(command) &&
+    /\bnode(\.exe)?\s+--test\b|\b(npm|pnpm|yarn)(\.cmd)?\s+(run\s+)?(test|t)\b|\b(vitest|jest)\b/i.test(command)
+  if (!seen && !likely) return undefined
+  return 'named-pipe-children: Node child processes with pipes are blocked in this sandbox (spawn EPERM). Run the test command on its own, with no pipe or redirect (for example `npm test` or `node --test`): plain test-runner commands run in a sandbox where they work. Filter the output afterwards instead of piping it.'
+}
+
+/**
  * Windows PowerShell 5.1 serializes stderr as CLIXML when a command fails.
  * Return the human-readable error strings instead of XML noise.
  */
@@ -1568,7 +1593,7 @@ export class ToolRuntime {
         if (result.jobId) await this.exec.jobKill(result.jobId).catch(() => undefined)
         throw new Error('worker shell commands must finish in the foreground; run a shorter command or ask the orchestrator to split the task')
       }
-      const gap = this.persistentGap
+      const gap = [this.persistentGap, pipeChildGap(result, command)].filter(Boolean).join('; ')
       this.persistentGap = undefined
       return {
         ...result,

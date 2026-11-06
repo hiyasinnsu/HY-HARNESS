@@ -228,6 +228,20 @@ test('CP-10: tool_search loads a deferred tool, which then becomes callable', as
   }
 })
 
+test('a spawn EPERM in shell output points at the plain test-runner command', async () => {
+  const { pipeChildGap } = await import('./tools.js')
+  assert.match(pipeChildGap({ stderr: 'Error: spawn EPERM\n    at ChildProcess.spawn' })!, /Run the test command on its own/)
+  assert.match(pipeChildGap({ stdout: 'Error: spawnSync C:\\node.exe EPERM' })!, /named-pipe-children/)
+  assert.equal(pipeChildGap({ stdout: 'ok', stderr: '' }), undefined)
+  assert.equal(pipeChildGap({ stdout: 'EPERM: operation not permitted, open x' }), undefined, 'a plain file EPERM is not this gap')
+  // A filter hid the EPERM line: a failing piped test runner in workspace-write.
+  const filtered = { stdout: 'ℹ pass 0', exitCode: 1, sandbox: 'workspace-write' }
+  assert.match(pipeChildGap(filtered, "npm test 2>&1 | Select-String -Pattern 'pass|fail'")!, /on its own/)
+  assert.equal(pipeChildGap(filtered, 'npm test'), undefined, 'a plain command already ran in the right sandbox')
+  assert.equal(pipeChildGap({ ...filtered, exitCode: 0 }, 'npm test | Select-String pass'), undefined, 'it passed')
+  assert.equal(pipeChildGap(filtered, 'cargo test | Select-String ok'), undefined, 'not a Node test runner')
+})
+
 test('plan mode refuses changing tools at run time (the prompt keeps the full, cached tool list)', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-plan-refuse-'))
   try {

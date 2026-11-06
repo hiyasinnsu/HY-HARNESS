@@ -135,11 +135,14 @@ ${
     : 'Shell environment: POSIX shell. Use relative paths or absolute paths inside the workspace; quote paths with spaces.'
 }`
 
+  // Point at the search tools the model actually has: inside run_code with
+  // PTC, the wire tools otherwise (run_code is not offered without PTC).
+  const searchHint = ptc ? 'tools.search.glob / tools.search.grep inside run_code' : 'search_glob / search_grep'
   const common = `Read a file before editing it. apply_patch rejects stale or unread files.
 Prefer small, verifiable steps. Inspect shell output before continuing.
 Never claim success without checking the result.
 Do not try to read or write outside the workspace.
-If a path is missing, locate it with tools.search.glob / tools.search.grep inside run_code instead of guessing similar paths.
+If a path is missing, locate it with ${searchHint} instead of guessing similar paths.
 For a large edit, split it into several apply_patch calls; do not emit an entire large file in one response.
 To create or replace a whole file, give apply_patch file + content; to edit part of a file, a unified diff in patch.`
   if (extras.native) {
@@ -181,7 +184,7 @@ Rules:
 8. To create or replace a whole file, prefer:
    {"tool":"apply_patch","args":{"file":"NOTES.md","content":"line 1\\nline 2\\n"}}
    To edit part of a file, use a unified diff in "patch".
-9. If a path is missing, use tools.search.glob / tools.search.grep inside run_code; do not guess similar paths.
+9. If a path is missing, use ${searchHint}; do not guess similar paths.
 10. For a large edit, split it into several apply_patch calls; do not emit a whole large file in one response.
 ${sessionPart}`
 }
