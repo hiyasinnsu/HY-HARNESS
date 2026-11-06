@@ -180,6 +180,21 @@ test('OpenCode hosts are detected so any OpenAI-compatible role sends the sessio
   assert.equal(isOpenCodeHost('not a url'), false)
 })
 
+test('cache routing: every session of a workspace shares one provider cache key', async () => {
+  const { cacheRouteKey } = await import('./llm.js')
+  const a = cacheRouteKey('C:\\work\\alpha', 'run-1')
+  assert.match(a!, /^hy-ws-[0-9a-f]{16}$/)
+  assert.equal(cacheRouteKey('c:\\WORK\\alpha\\', 'run-2'), a, 'another run, same workspace (case and trailing slash ignored)')
+  assert.notEqual(cacheRouteKey('C:\\work\\beta', 'run-1'), a, 'another workspace, another key')
+  assert.equal(cacheRouteKey('C:\\work\\alpha', undefined), undefined, 'no run, no key (as before)')
+  process.env.HY_CACHE_ROUTING = 'session'
+  try {
+    assert.equal(cacheRouteKey('C:\\work\\alpha', 'run-1'), 'run-1', 'opt-out: one key per run')
+  } finally {
+    delete process.env.HY_CACHE_ROUTING
+  }
+})
+
 test('OpenCode: sends the stable session and user-agent headers', async () => {  process.env.HY_TEST_API_KEY = 'sk-test'
   const s = await serve([{ status: 200, body: fixture('openai-chat.json') }])
   try {

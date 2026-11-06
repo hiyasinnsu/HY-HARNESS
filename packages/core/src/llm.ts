@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { roleApiKey, type RoleConfig } from './config.js'
 import { isSteerMessage, steerText } from './steering.js'
 import { effortWithToolsFor, temperatureAllowedFor, tokenFieldFor } from './model-catalog.js'
@@ -1184,7 +1185,25 @@ export async function listProviderModels(role: RoleConfig): Promise<string[]> {
     .filter((name) => name.length > 0)
   return [...new Set(names)].sort()
 }
-export function createProvider(role: RoleConfig, workspaceRoot: string, sessionId?: string): LlmProvider {
+/**
+ * The routing / cache key sent to providers that keep their prompt cache per
+ * key (OpenCode's `x-opencode-session`, OpenAI's `prompt_cache_key`). Measured
+ * on OpenCode (2026-11-07): an identical prompt from another session id never
+ * hits, the same id does. So every session of a workspace (chats, workers,
+ * subagents) shares one key, and a new session reuses the cached system prompt
+ * and tool definitions the previous one wrote (they are identical up to the
+ * per-session tail, see `buildSystemPrompt`). `HY_CACHE_ROUTING=session` keeps
+ * one key per run instead.
+ */
+export function cacheRouteKey(workspaceRoot: string, sessionId?: string): string | undefined {
+  if (sessionId === undefined) return undefined
+  if (process.env.HY_CACHE_ROUTING === 'session') return sessionId
+  const root = path.resolve(workspaceRoot).replace(/[\\/]+$/, '').toLowerCase()
+  return `hy-ws-${createHash('sha256').update(root).digest('hex').slice(0, 16)}`
+}
+
+export function createProvider(role: RoleConfig, workspaceRoot: string, runId?: string): LlmProvider {
+  const sessionId = cacheRouteKey(workspaceRoot, runId)
   switch (role.provider) {
     case 'mock':
       return new MockProvider(workspaceRoot)

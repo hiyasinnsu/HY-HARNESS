@@ -118,10 +118,16 @@ export function lastSessionContext(messages: readonly { role: string; content: s
 export function buildSystemPrompt(workspaceRoot: string, ptc = false, objective = false, extras: PromptExtras = {}): string {
   const features = promptFeatures(extras)
   const catalog = [renderSkillCatalog(extras.skills ?? []), extras.mcpCatalog ?? ''].filter(Boolean).join('\n\n')
-  const header = `You are HY-HARNESS, a careful autonomous coding agent working in:
-${workspaceRoot}${extras.date ? `\nToday is ${extras.date}.` : ''}
-${extras.roleInstruction ? `\n${extras.roleInstruction.trim()}\n` : ''}
-${extras.goal ? `\n${goalPrompt(extras.goal)}\n` : ''}
+  // Cross-session prefix cache (DSH: "the system prompt is identical across
+  // checkouts"): everything up to `sessionPart` is the same for every session
+  // with the same tool set, whatever the workspace or role, so a new chat, a
+  // worker or a subagent reuses the cached prefix another session wrote. What
+  // differs per session comes last: workspace, skill / MCP catalog, role.
+  const sessionPart = `
+This session:
+Workspace root: ${workspaceRoot}${extras.date ? `\nToday is ${extras.date}.` : ''}
+${catalog ? `\n${catalog}\n` : ''}${extras.roleInstruction ? `\n${extras.roleInstruction.trim()}\n` : ''}${extras.goal ? `\n${goalPrompt(extras.goal)}\n` : ''}`
+  const header = `You are HY-HARNESS, a careful autonomous coding agent. The workspace and this session's role are given at the end of these instructions.
 Private reasoning style: write your thinking in Japanese. Use a blunt, concise tone such as 「〜だ。〜する。〜が分かった。」. No polite forms, filler, or restating the request. Start with one sentence saying what you will do next.
 ${
   process.platform === 'win32'
@@ -145,7 +151,7 @@ To create or replace a whole file, give apply_patch file + content; to edit part
       : extras.finalSchema
         ? `When the work is done, reply without a tool call, with only JSON of type ${jsonSchemaToTs(extras.finalSchema)}.`
         : 'When the work is done, reply without a tool call: a short summary of what changed and what you verified.'
-    return `${header}${sdk}${catalog ? `\n${catalog}\n` : ''}
+    return `${header}${sdk}
 Rules:
 Use the provided tools through function calls; call several at once when they are independent.
 Call tools only through function calls; never write JSON such as {"tool":...} or {"calls":[...]} in the body. Write plain prose in the body, and only for the final answer.
@@ -153,11 +159,11 @@ Such JSON, especially a truncated fragment, is never a final answer: emit a real
 If work remains, your reply must contain a tool call. Do not end with a plan, a promise, or a confirmation request; prose without a tool call is treated as the final answer.
 ${finish}
 ${common}
-`
+${sessionPart}`
   }
   return `${header}
 ${renderToolPrompt(ptc, allSpecs(extras), objective, features, extras.allowTools, extras.activeTools)}
-${catalog ? `\n${catalog}\n` : ''}
+
 Rules:
 1. Reply with exactly one JSON object and no markdown fences, prose, or comments.
 2. To call a tool: {"tool":"<name>","args":{...}}; several independent calls: {"calls":[{"tool":"<name>","args":{...}},...]}
@@ -177,5 +183,5 @@ Rules:
    To edit part of a file, use a unified diff in "patch".
 9. If a path is missing, use tools.search.glob / tools.search.grep inside run_code; do not guess similar paths.
 10. For a large edit, split it into several apply_patch calls; do not emit a whole large file in one response.
-`
+${sessionPart}`
 }
