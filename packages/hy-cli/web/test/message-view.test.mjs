@@ -1,7 +1,7 @@
 // WP-64 (handover 3-2): the message markup, without a DOM.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { renderAssistantMessage, renderUserMessage } from '../dist/message-view.js'
+import { renderAssistantMessage, renderUserMessage, renderUserMessageEditor } from '../dist/message-view.js'
 
 const now = new Date('2026-11-05T10:33:00').getTime()
 const ts = new Date('2026-11-05T09:05:00').getTime()
@@ -47,4 +47,26 @@ test('markdown still renders (and HTML is escaped)', () => {
   const html = renderUserMessage({ id: 'msg-8', text: '**bold** <script>alert(1)</script>', ts }, context)
   assert.match(html, /<strong>bold<\/strong>/)
   assert.equal(html.includes('<script>'), false)
+})
+
+test('own messages: copy always; resend and edit only for a turn in an editable chat', () => {
+  const plain = renderUserMessage({ id: 'msg-6', text: 'hi', ts, turn: 2 }, context)
+  assert.match(plain, /data-turn="2"/)
+  assert.match(plain, /data-action="copy-entry" data-entry-id="msg-6"/)
+  assert.doesNotMatch(plain, /resend-entry|edit-entry/, 'not editable: running turn or a worker session')
+  const editable = renderUserMessage({ id: 'msg-6', text: 'hi', ts, turn: 2 }, { ...context, editable: true })
+  assert.match(editable, /data-action="resend-entry" data-entry-id="msg-6"/)
+  assert.match(editable, /data-action="edit-entry" data-entry-id="msg-6"/)
+  const steering = renderUserMessage({ id: 'msg-7', text: 'also', ts, steering: true }, { ...context, editable: true })
+  assert.match(steering, /copy-entry/)
+  assert.doesNotMatch(steering, /resend-entry|edit-entry/, 'a steering message opens no turn')
+})
+
+test('the inline editor holds the escaped text, the restore option and send / cancel', () => {
+  const html = renderUserMessageEditor({ id: 'msg-8', text: 'fix <b>this</b>', ts, turn: 1 }, context)
+  assert.match(html, /class="message user editing"/)
+  assert.match(html, /<textarea class="message-edit-input" id="edit-input-msg-8" rows="4">fix &lt;b&gt;this&lt;\/b&gt;<\/textarea>/)
+  assert.match(html, /id="edit-restore-msg-8"/)
+  assert.match(html, /data-action="edit-send" data-entry-id="msg-8"/)
+  assert.match(html, /data-action="edit-cancel" data-entry-id="msg-8"/)
 })

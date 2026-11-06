@@ -242,6 +242,14 @@ prefix_rule(pattern = [["jest", "vitest"]], sandbox = "low-integrity", match = [
 
 ---
 
+### 2.15 自分のメッセージの操作と履歴の書き出し（2026-11-06）
+
+- **コピー / 再送信 / 編集**: 自分のメッセージにホバー（タッチ端末では常時）で「コピー」「再送信」「編集」を出す。再送信と編集は、そのターン以降を会話から外してから（`POST /undo` の `toTurn`）送り直す。編集はメッセージの場でテキスト欄に変わり、既定ではファイルはそのまま（`keepFiles: true`、Codex の巻き戻しと同じ）、「ファイルもこのメッセージの前の状態に戻す」をチェックするとそのターンのチェックポイントで戻す。消えるターン数・ファイル復元・画像は再送されないことを確認ダイアログで示す。編集中の文字は、ライブの再描画でも消えない。ターンを開かないステアリングのメッセージ、ワーカー / オーケストレーターのセッション、ターン実行中は再送信・編集を出さない（コピーは常に可）。
+- **ジャンプバー**: トランスクリプトの右端に、自分のメッセージ 1 件ごとの印と前 / 次ボタンを出す（2 件以上のとき）。印のツールチップに番号と本文の先頭、クリックでそのメッセージへスクロールし枠を一瞬強調、表示位置に応じて現在の印を強調する。
+- **履歴の書き出し（デバッグ用）**: トップバーのボタンと `/export` で開くダイアログから、Markdown（読みやすい形式）または JSON（生のイベント）をダウンロードする。`GET /api/sessions/:id/export?format=md|markdown|json&mask=1`。ランとそのサブエージェントのすべてのイベントを順に含み、思考、ツール呼び出しの引数、ツール結果の全文（spill されたものは `spill://` から読み戻し、1 件 200,000 文字まで）、承認、リトライ、ステップごとのトークン、取り消したターン（「Turn N was undone」）まで残す。「API キーのような文字列を伏せる」は既定で GUI の伏せ字設定に従う。JSON は従来の `entries` も含む。以前の簡易な Markdown 書き出し（表示中のエントリだけ）はこれに統合した。
+- **実装**: `packages/hy-cli/src/transcript-export.ts`、`Conversation.undo(keepFiles)` / `rewind(toTurn, keepFiles)`、`web/src/message-view.ts` の `renderUserMessage` / `renderUserMessageEditor`、`app.ts` の `rewindAndSend` / ジャンプバー / 書き出しダイアログ、英・日・中の文言。
+- **テスト**: `transcript-export.test.ts`（3 件）、`web/test/message-view.test.mjs`（2 件追加）、`tests/integration/web-ui.test.mjs`（`keepFiles` の巻き戻しでファイルが残り、送り直したターンが 2 番になること、書き出しに取り消したターンとツール呼び出しが残ること）。内蔵ブラウザでモックの GUI を操作し、ジャンプ、前 / 次、編集して送信、再送信、書き出しダイアログ、通知の日本語化を確認した。
+
 ## 3. 実装中に分かったこと
 
 1. **F: は exFAT**。pnpm は `node-linker=hoisted`、Cargo は `CARGO_INCREMENTAL=0` が必要。

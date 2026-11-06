@@ -1,7 +1,7 @@
 import { ApiError, api, cancelQueuedTurn, fetchTurnQueue, generateTitle, globalEvents, post, put, resolveQueuedTurn, resumeTurnQueue, sessionEvents, setSessionTitle } from './api.js'
 import { detectLocale, localeChoices, translate } from './i18n.js'
 import { formatRelative } from './time-format.js'
-import { renderAssistantMessage, renderUserMessage, type MessageContext } from './message-view.js'
+import { renderAssistantMessage, renderUserMessage, renderUserMessageEditor, type MessageContext } from './message-view.js'
 import { SHORTCUT_ACTIONS, matchesAccelerator, normalizeAccelerator, resolveShortcuts, shortcutConflicts, type ShortcutMap } from './shortcuts.js'
 import { icon } from './icons.js'
 import { commentKey, commentsToPrompt, parseUnifiedDiff, renderDiffFiles, type DiffComment } from './diff-view.js'
@@ -169,7 +169,7 @@ interface State {
   automationForm?: AutomationForm | undefined
   automationRun?: AutomationRun | undefined
   automationTimer?: number | undefined
-  modal?: 'settings' | 'help' | 'goal' | 'ralph' | 'model' | 'workspace' | 'palette' | 'automation' | 'roots' | 'rename' | 'sandbox' | 'onboarding' | 'outline' | 'feedback' | 'shortcuts' | 'hooks' | 'doctor' | 'rewind' | 'worktree' | 'import' | undefined
+  modal?: 'settings' | 'help' | 'goal' | 'ralph' | 'model' | 'workspace' | 'palette' | 'automation' | 'roots' | 'rename' | 'sandbox' | 'onboarding' | 'outline' | 'feedback' | 'shortcuts' | 'hooks' | 'doctor' | 'rewind' | 'worktree' | 'import' | 'export' | undefined
   /** Chat being renamed; only set while the rename dialog is open. */
   renameRunId?: string | undefined
   /** Current text of the rename input, so a failed save keeps what was typed. */
@@ -200,6 +200,8 @@ interface State {
   worktrees?: { repo: boolean; dir: string; worktrees: Array<{ path: string; branch?: string; head?: string }> } | undefined
   /** CP-33: the turn picked in the rewind dialog, awaiting confirmation. */
   rewindTurn?: number | undefined
+  /** The user message being edited inline (its entry id). */
+  editingEntryId?: string | undefined
   /** CP-32: workspace files matching the palette query (fetched as you type). */
   paletteFiles: string[]
   /** CP-32: `/hooks` and `/doctor` modal contents. */
@@ -385,7 +387,9 @@ function loadStoredShortcuts(): ShortcutMap {
 
 /** WP-64: the display switches `message-view.ts` needs. */
 function messageContext(): MessageContext {
-  return { locale: state.locale, mask: state.maskSecrets, raw: state.rawTranscript }
+  // Resend / edit rewind the conversation, which only ordinary chats support.
+  const editable = (state.current?.state.kind ?? 'chat') === 'chat' && !state.busy && currentRunId() !== undefined
+  return { locale: state.locale, mask: state.maskSecrets, raw: state.rawTranscript, editable }
 }
 
 let toastId = 0
@@ -803,6 +807,16 @@ function renderQuestion(entry: Extract<ChatEntry, { kind: 'question' }>): string
 }
 
 function localizeNotice(text: string): string {
+  // Undo / rewind results: one line per removed turn.
+  const lines = text.split('\n')
+  const undoLine = (line: string): string | undefined => {
+    const undid = /^undid turn (\d+): restored (\d+), deleted (\d+) file\(s\)$/.exec(line)
+    if (undid) return tr('noticeUndidTurn', { turn: undid[1] ?? '', restored: undid[2] ?? '', deleted: undid[3] ?? '' })
+    const kept = /^removed turn (\d+) from the conversation; files were kept$/.exec(line)
+    if (kept) return tr('noticeRemovedTurn', { turn: kept[1] ?? '' })
+    return undefined
+  }
+  if (lines.every((line) => undoLine(line) !== undefined)) return lines.map((line) => undoLine(line)).join('\n')
   const round = /^round (\d+) started$/.exec(text)
   if (round) return `${tr('round')} ${round[1]} ${tr('started')}`
   const ended = /^round (\d+): (.+)$/.exec(text)
@@ -823,7 +837,7 @@ function renderEntry(entry: ChatEntry): string {
     // WP-64: user/assistant markup lives in message-view.ts so it can be tested
     // without a DOM (and so both kinds get the same absolute time chip).
     case 'user':
-      return renderUserMessage(entry, messageContext())
+      return state.editingEntryId === entry.id ? renderUserMessageEditor(entry, messageContext()) : renderUserMessage(entry, messageContext())
     case 'assistant':
       return renderAssistantMessage(entry, messageContext())
     case 'thinking': {
@@ -980,6 +994,7 @@ function watchTranscriptScroll(el: HTMLElement): void {
       transcriptScrollFrame = window.requestAnimationFrame(() => {
         transcriptScrollFrame = undefined
         captureTranscriptAnchor()
+        markActiveJump()
       })
     },
     { passive: true },
@@ -1008,6 +1023,9 @@ function renderTranscript(): void {
 function renderTranscriptNow(): void {
   const el = document.getElementById('transcript')
   if (!el) return
+  // A live re-render must not throw away a message being edited.
+  const editing = state.editingEntryId ? (document.getElementById(`edit-input-${state.editingEntryId}`) as HTMLTextAreaElement | null) : null
+  const editDraft = editing ? { text: editing.value, focused: document.activeElement === editing } : undefined
   window.queueMicrotask(() => applyFindHighlight())
   const body = state.entries.length === 0 && !state.busy ? renderEmptyState() : renderEntries()
   const running = state.busy
@@ -1026,6 +1044,14 @@ function renderTranscriptNow(): void {
     waiting > 0 ? `<button type="button" class="waiting-bar" data-action="jump-waiting">${icon('alert', 15)}<span>${escapeHtml(translate(state.locale, 'phoneApprovalsWaiting', { count: waiting }))}</span>${icon('chevron-down', 14)}</button>` : ''
   el.innerHTML = `<div class="transcript-inner">${waitingBar}${body}${running}</div>`
   restoreTranscriptAnchor(el)
+  if (editDraft !== undefined && state.editingEntryId) {
+    const input = document.getElementById(`edit-input-${state.editingEntryId}`) as HTMLTextAreaElement | null
+    if (input) {
+      input.value = editDraft.text
+      if (editDraft.focused) input.focus()
+    }
+  }
+  renderJumpRail()
   if (focusCard) {
     const card = el.querySelector<HTMLElement>(`.approval-card[data-approval-id="${CSS.escape(focusCard)}"]`)
     const active = document.activeElement
@@ -1525,6 +1551,7 @@ function renderShell(): void {
         <div class="topbar-actions">
           <button class="icon-btn" id="rename-current" data-action="rename-current" title="${tr('renameChat')}" hidden>${icon('edit', 16)}</button>
           <button class="icon-btn" data-action="open-outline" title="${tr('turnOutline')}">${icon('plan', 16)}</button>
+          <button class="icon-btn" data-action="open-export" title="${tr('exportHistory')}">${icon('file', 16)}</button>
           <button class="icon-btn" data-action="open-palette" title="${tr('commandPalette')} (Ctrl+K)">${icon('search', 16)}</button>
           <span class="status-pill" id="run-status"><span class="status-dot"></span>${tr('ready')}</span>
           <button class="icon-btn" data-action="toggle-right" title="${tr('toggleRightPanel')}">${icon('panel', 16)}</button>
@@ -1532,7 +1559,7 @@ function renderShell(): void {
         </div>
       </header>
       <div class="find-host" id="find-host"></div>
-      <div class="transcript" id="transcript"></div>
+      <div class="transcript-host"><div class="transcript" id="transcript"></div><nav class="jump-rail" id="jump-rail" hidden></nav></div>
       <div class="composer-wrap" id="composer-wrap"></div>
     </main>
     <aside class="rightbar" id="rightbar"></aside>
@@ -3095,6 +3122,14 @@ function renderModal(): void {
     if (picked !== undefined) (document.getElementById('rewind-confirm') as HTMLButtonElement | null)?.focus()
     return
   }
+  if (state.modal === 'export') {
+    el.innerHTML = `<div class="modal-backdrop" data-action="close-modal"><div class="modal" role="dialog" aria-modal="true" data-modal="export">
+      <div class="modal-head"><h2>${icon('file', 16)} ${tr('exportHistory')}</h2><button class="icon-btn" data-action="close-modal">${icon('close', 16)}</button></div>
+      <div class="modal-body"><p class="muted">${tr('exportHint')}</p><label class="message-edit-option"><input type="checkbox" id="export-mask" ${state.maskSecrets ? 'checked' : ''}> ${tr('exportMask')}</label></div>
+      <div class="modal-foot"><button class="btn ghost" data-action="export-download" data-format="json">${tr('exportJson')}</button><button class="btn primary" data-action="export-download" data-format="markdown">${tr('exportMarkdown')}</button></div>
+    </div></div>`
+    return
+  }
   if (state.modal === 'import') {
     const view = state.importView
     const pending = view?.items.filter((i) => i.action !== 'skip') ?? []
@@ -3939,10 +3974,140 @@ async function copyText(text: string): Promise<void> {
 
 async function copyEntry(entryId: string): Promise<void> {
   const entry = state.entries.find((candidate) => candidate.id === entryId)
-  if (entry?.kind !== 'assistant') return
+  if (entry?.kind !== 'assistant' && entry?.kind !== 'user') return
   try {
     await copyText(entry.text)
     toast(tr('copied'), 'success')
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+/**
+ * Resend / edit: removes the message's turn and every later one from the
+ * conversation (optionally restoring the files from that turn's checkpoint),
+ * then sends `text` as the new turn.
+ */
+async function rewindAndSend(entryId: string, text: string, restoreFiles: boolean): Promise<void> {
+  const entry = state.entries.find((candidate) => candidate.id === entryId)
+  const runId = currentRunId()
+  if (entry?.kind !== 'user' || entry.turn === undefined || !runId) return
+  if (state.busy) {
+    toast(tr('rewindBusy'), 'error')
+    return
+  }
+  if (!text.trim()) return
+  const later = state.entries.filter((e) => e.kind === 'user' && e.turn !== undefined && e.turn >= (entry.turn ?? 0)).length
+  const warnings = [tr('rewindConfirmCount', { count: String(later) })]
+  if (restoreFiles) warnings.push(tr('rewindFilesConfirm'))
+  if (entry.images && entry.images > 0) warnings.push(tr('rewindImagesLost'))
+  if (!window.confirm(warnings.join('\n\n'))) return
+  try {
+    await post(`/api/sessions/${encodeURIComponent(runId)}/undo`, { toTurn: entry.turn, keepFiles: !restoreFiles })
+    state.editingEntryId = undefined
+    await sendMessage(text)
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+function startEditEntry(entryId: string): void {
+  state.editingEntryId = entryId
+  renderTranscriptNow()
+  const input = document.getElementById(`edit-input-${entryId}`) as HTMLTextAreaElement | null
+  if (input) {
+    input.focus()
+    input.setSelectionRange(input.value.length, input.value.length)
+  }
+}
+
+/** The user messages of the open chat, oldest first (the jump rail's stops). */
+function userMessageIds(): string[] {
+  return state.entries.filter((e) => e.kind === 'user').map((e) => e.id)
+}
+
+/** The rail beside the transcript: one mark per own message, plus previous / next. */
+function renderJumpRail(): void {
+  const rail = document.getElementById('jump-rail')
+  if (!rail) return
+  const users = state.entries.filter((e): e is Extract<ChatEntry, { kind: 'user' }> => e.kind === 'user')
+  if (users.length < 2) {
+    rail.hidden = true
+    rail.innerHTML = ''
+    return
+  }
+  rail.hidden = false
+  rail.innerHTML = `<button class="jump-step" data-action="jump-prev" title="${escapeHtml(tr('jumpPrev'))}" aria-label="${escapeHtml(tr('jumpPrev'))}">${icon('arrow-up', 12)}</button><div class="jump-marks" role="list" aria-label="${escapeHtml(tr('jumpToMessage'))}">${users
+    .map(
+      (u, i) =>
+        `<button class="jump-mark" role="listitem" data-action="jump-to" data-entry-id="${escapeHtml(u.id)}" title="${escapeHtml(`${i + 1}. ${oneLine(u.text, 80)}`)}"><span></span></button>`,
+    )
+    .join('')}</div><button class="jump-step down" data-action="jump-next" title="${escapeHtml(tr('jumpNext'))}" aria-label="${escapeHtml(tr('jumpNext'))}">${icon('arrow-up', 12)}</button>`
+  markActiveJump()
+}
+
+/** Highlights the mark of the own message nearest the top of the view. */
+function markActiveJump(): void {
+  const rail = document.getElementById('jump-rail')
+  const transcript = document.getElementById('transcript')
+  if (!rail || rail.hidden || !transcript) return
+  const top = transcript.getBoundingClientRect().top
+  let active: string | undefined
+  for (const id of userMessageIds()) {
+    const el = transcript.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(id)}"]`)
+    if (!el) continue
+    if (el.getBoundingClientRect().top - top <= 80) active = id
+  }
+  active ??= userMessageIds()[0]
+  for (const mark of rail.querySelectorAll<HTMLElement>('.jump-mark')) mark.classList.toggle('active', mark.dataset.entryId === active)
+}
+
+function jumpToEntry(entryId: string): void {
+  const transcript = document.getElementById('transcript')
+  const el = transcript?.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(entryId)}"]`)
+  if (!transcript || !el) return
+  const offset = el.getBoundingClientRect().top - transcript.getBoundingClientRect().top
+  transcript.scrollTo({ top: transcript.scrollTop + offset - 16, behavior: 'smooth' })
+  el.classList.add('jump-flash')
+  window.setTimeout(() => el.classList.remove('jump-flash'), 1200)
+}
+
+/** Previous (-1) or next (+1) own message relative to the one at the top of the view. */
+function jumpStep(direction: -1 | 1): void {
+  const ids = userMessageIds()
+  const current = document.querySelector<HTMLElement>('#jump-rail .jump-mark.active')?.dataset.entryId
+  const transcript = document.getElementById('transcript')
+  let index = current ? ids.indexOf(current) : -1
+  // At the very top of a message, "previous" means the one before it.
+  if (direction === -1 && current && transcript) {
+    const el = transcript.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(current)}"]`)
+    if (el && el.getBoundingClientRect().top - transcript.getBoundingClientRect().top < -8) index += 1
+  }
+  const next = ids[Math.max(0, Math.min(ids.length - 1, index + direction))]
+  if (next) jumpToEntry(next)
+}
+
+/** Downloads the open chat's full history (debugging). */
+async function exportHistory(format: 'markdown' | 'json'): Promise<void> {
+  const runId = currentRunId()
+  if (!runId) {
+    toast(tr('exportNoChat'), 'error')
+    return
+  }
+  const mask = (document.getElementById('export-mask') as HTMLInputElement | null)?.checked ?? state.maskSecrets
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(runId)}/export?format=${format}${mask ? '&mask=1' : ''}`, { credentials: 'same-origin' })
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${runId}.${format === 'json' ? 'json' : 'md'}`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
+    toast(tr('exported'), 'success')
   } catch (error) {
     toast(error instanceof Error ? error.message : String(error), 'error')
   }
@@ -4328,7 +4493,11 @@ async function runCommand(id: string, args = ''): Promise<void> {
       else toast('Usage: /model <name>')
       return
     case 'export':
-      if (runId) window.open(`/api/sessions/${encodeURIComponent(runId)}/export?format=md`, '_blank')
+      // The same dialog as the topbar button: Markdown or JSON, masking optional.
+      if (runId) {
+        state.modal = 'export'
+        renderModal()
+      } else toast(tr('exportNoChat'), 'error')
       return
     // WP-61: `/feedback [text]` rates the last answer from the keyboard.
     case 'feedback': {
@@ -5874,6 +6043,41 @@ function onDocumentClick(event: MouseEvent): void {
       break
     case 'copy-entry':
       if (el.dataset.entryId) void copyEntry(el.dataset.entryId)
+      break
+    case 'resend-entry': {
+      const entry = state.entries.find((e) => e.id === el.dataset.entryId)
+      if (entry?.kind === 'user') void rewindAndSend(entry.id, entry.text, false)
+      break
+    }
+    case 'edit-entry':
+      if (el.dataset.entryId) startEditEntry(el.dataset.entryId)
+      break
+    case 'edit-cancel':
+      state.editingEntryId = undefined
+      renderTranscriptNow()
+      break
+    case 'edit-send': {
+      const id = el.dataset.entryId ?? ''
+      const text = (document.getElementById(`edit-input-${id}`) as HTMLTextAreaElement | null)?.value ?? ''
+      const restore = (document.getElementById(`edit-restore-${id}`) as HTMLInputElement | null)?.checked === true
+      void rewindAndSend(id, text, restore)
+      break
+    }
+    case 'jump-to':
+      if (el.dataset.entryId) jumpToEntry(el.dataset.entryId)
+      break
+    case 'jump-prev':
+      jumpStep(-1)
+      break
+    case 'jump-next':
+      jumpStep(1)
+      break
+    case 'open-export':
+      state.modal = 'export'
+      renderModal()
+      break
+    case 'export-download':
+      void exportHistory(el.dataset.format === 'json' ? 'json' : 'markdown')
       break
     case 'switch-workspace':
       if (el.dataset.path) void switchWorkspace(el.dataset.path)

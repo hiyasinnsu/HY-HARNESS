@@ -1580,11 +1580,21 @@ export class Conversation {
     return expanded.text
   }
 
-  /** Restores the files to before the last turn and drops it from the conversation. */
-  async undo(): Promise<string> {
+  /**
+   * Restores the files to before the last turn and drops it from the
+   * conversation. With `keepFiles` only the conversation goes back (editing or
+   * resending a message without discarding the work on disk).
+   */
+  async undo(keepFiles = false): Promise<string> {
     if (this.turns === 0) return 'nothing to undo'
-    if (!this.checkpoints) return 'undo is unavailable: checkpoints are off'
     const turn = this.turns
+    if (keepFiles) {
+      this.log.append('turn/undo', { turn, keepFiles: true })
+      this.history = rebuildHistory(readEvents(this.log.file), this.runId)
+      this.turns -= 1
+      return `removed turn ${turn} from the conversation; files were kept`
+    }
+    if (!this.checkpoints) return 'undo is unavailable: checkpoints are off'
     const result = await this.client.checkpointRollback(this.runId, `t${turn}`)
     this.log.append('turn/undo', { turn })
     this.history = rebuildHistory(readEvents(this.log.file), this.runId)
@@ -1597,13 +1607,13 @@ export class Conversation {
    * turn repeatedly, newest first, so every turn's checkpoint restores the
    * files it changed. Stops at the first failure and says how far it got.
    */
-  async rewind(toTurn: number): Promise<string> {
+  async rewind(toTurn: number, keepFiles = false): Promise<string> {
     if (!Number.isInteger(toTurn) || toTurn < 1) throw new Error('toTurn must be a turn number (1 or more)')
     if (toTurn > this.turns) return `nothing to rewind: turn ${toTurn} has not run (${this.turns} turn(s) so far)`
     const results: string[] = []
     while (this.turns >= toTurn) {
       const before = this.turns
-      const result = await this.undo()
+      const result = await this.undo(keepFiles)
       results.push(result)
       if (this.turns === before) break
     }

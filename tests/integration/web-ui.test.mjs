@@ -1790,3 +1790,43 @@ test('CP-36: GUI preferences are saved in ui-state.json and come back after a re
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('web GUI: rewind with keepFiles keeps the work on disk; the history export has the whole chat', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir)
+  try {
+    const runId = await newSession(ctx)
+    await turn(ctx, runId, 'SAY first')
+    await turn(ctx, runId, 'Create the demo file')
+    assert.ok(fs.existsSync(path.join(dir, 'HY_DEMO.md')))
+    const user = (await snapshot(ctx, runId)).entries.filter((e) => e.kind === 'user')
+    assert.deepEqual(user.map((e) => e.turn), [1, 2])
+
+    // Edit / resend: only the conversation goes back; the file stays.
+    const rewound = await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/undo`, {
+      method: 'POST',
+      body: JSON.stringify({ toTurn: 2, keepFiles: true }),
+    })
+    assert.equal(rewound.status, 200, rewound.text)
+    assert.match(rewound.json.result, /removed turn 2 from the conversation; files were kept/)
+    assert.ok(fs.existsSync(path.join(dir, 'HY_DEMO.md')), 'keepFiles leaves the file')
+    assert.deepEqual(rewound.json.entries.filter((e) => e.kind === 'user').map((e) => e.text), ['SAY first'])
+    await turn(ctx, runId, 'SAY edited')
+    const after = (await snapshot(ctx, runId)).entries.filter((e) => e.kind === 'user')
+    assert.deepEqual(after.map((e) => [e.text, e.turn]), [['SAY first', 1], ['SAY edited', 2]])
+
+    const md = await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/export?format=markdown`)
+    assert.equal(md.status, 200, md.text)
+    assert.match(md.text, /^# HY-HARNESS chat history: run-/)
+    assert.match(md.text, /\*\*Tool call:\*\* `apply_patch`/, 'the undone turn is still in the debug export')
+    assert.match(md.text, /### Tool result: `apply_patch`/)
+    assert.match(md.text, /\*\*Turn 2 was undone\*\*/)
+    assert.match(md.text, /SAY edited/)
+    const raw = await ctx.request(`/api/sessions/${encodeURIComponent(runId)}/export?format=json`)
+    assert.equal(raw.status, 200, raw.text)
+    assert.ok(raw.json.events.some((e) => e.type === 'turn/undo' && e.payload.keepFiles === true))
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

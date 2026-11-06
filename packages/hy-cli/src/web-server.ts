@@ -84,6 +84,7 @@ import type { SubagentView } from './agents.js'
 import { normalizeSessionTitle } from './session-title.js'
 import { generateSessionTitle } from './session-title-gen.js'
 import { ForkError, planFork } from './session-fork.js'
+import { exportJson, exportMarkdown } from './transcript-export.js'
 import { digestFor, expandSessionReferences } from './session-reference.js'
 import { FeedbackError, FeedbackStore, feedbackFile, validateFeedback } from './feedback.js'
 import { OpenInError, detectOpenIn, isLocalAddress, openInArgv } from './open-in.js'
@@ -1001,21 +1002,6 @@ function broadcast(session: WebSession, event: unknown): void {
 
 function refreshTranscript(session: WebSession, stateDir: string): void {
   session.entries = projectChat(readEvents(sessionLogPath(stateDir)), session.runId)
-}
-
-function markdownExport(session: WebSession): string {
-  const lines: string[] = [`# HY-HARNESS run ${session.runId}`, '']
-  for (const entry of session.entries) {
-    if (entry.kind === 'user') lines.push('## You', '', entry.text, '')
-    else if (entry.kind === 'assistant') lines.push('## HY-HARNESS', '', entry.text, '')
-    else if (entry.kind === 'notice') lines.push(`> ${entry.text}`, '')
-    else if (entry.kind === 'tool') {
-      lines.push(`<details><summary>${entry.name}${entry.status === 'error' ? ' (error)' : ''}</summary>`, '', '```', entry.output ?? '', '```', '', '</details>', '')
-    } else if (entry.kind === 'plan') {
-      lines.push('### Plan', '', ...entry.plan.map((p) => `- [${p.status === 'completed' ? 'x' : ' '}] ${p.step}`), '')
-    }
-  }
-  return lines.join('\n')
 }
 
 export async function startWebServer(options: WebServerOptions): Promise<WebServerHandle> {
@@ -4328,7 +4314,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
               json(res, 409, { error: 'a turn is running; stop it before rewinding' })
               return
             }
-            const result = undoBody.toTurn !== undefined ? await conv.rewind(Number(undoBody.toTurn)) : await conv.undo()
+            const keepFiles = undoBody.keepFiles === true
+            const result =
+              undoBody.toTurn !== undefined ? await conv.rewind(Number(undoBody.toTurn), keepFiles) : await conv.undo(keepFiles)
             refreshTranscript(session, config.stateDir)
             broadcast(session, { type: 'transcript', entries: session.entries })
             broadcast(session, { type: 'notice', text: result })
@@ -4763,6 +4751,36 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             return
           }
 
+          // The full history for debugging (export button): every event of
+          // the run and its subagents, with thinking, tool arguments and full
+          // tool results (spills read back).
+          if (sub === 'export' && method === 'GET') {
+            const format = url.searchParams.get('format') === 'json' ? 'json' : 'markdown'
+            const spillDir = path.join(config.stateDir, 'spill')
+            const options = {
+              runId,
+              workspaceRoot: config.workspaceRoot,
+              // The projected chat as the GUI shows it (the earlier export's shape).
+              entries: session.entries,
+              mask: url.searchParams.get('mask') === '1',
+              readSpill: (ref: string) => {
+                const file = spillFile(spillDir, ref)
+                try {
+                  return file ? fs.readFileSync(file, 'utf8') : undefined
+                } catch {
+                  return undefined
+                }
+              },
+            }
+            const events = readEvents(logFile)
+            const bodyText = format === 'json' ? exportJson(events, options) : exportMarkdown(events, options)
+            res.statusCode = 200
+            res.setHeader('Content-Type', format === 'json' ? 'application/json; charset=utf-8' : 'text/markdown; charset=utf-8')
+            res.setHeader('Content-Disposition', `attachment; filename="${runId}.${format === 'json' ? 'json' : 'md'}"`)
+            res.end(bodyText)
+            return
+          }
+
           if (sub === 'trajectory' && method === 'GET') {
             const events = readEvents(logFile).filter((e) => e.runId === runId)
             json(res, 200, { runId, events: events.slice(-2000) })
@@ -4920,16 +4938,6 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
 
           if (sub === 'skills' && method === 'GET') {
             json(res, 200, { skills: session.conv?.skillList() ?? 'no skills loaded' })
-            return
-          }
-
-          if (sub === 'export' && method === 'GET') {
-            const format = url.searchParams.get('format') ?? 'md'
-            if (format === 'json') {
-              json(res, 200, { runId, entries: session.entries, events: readEvents(logFile).filter((e) => e.runId === runId) })
-            } else {
-              text(res, 200, markdownExport(session), 'text/markdown; charset=utf-8')
-            }
             return
           }
 

@@ -1483,3 +1483,34 @@ code, pre { font-family: var(--mono); }
 }
 .tag.ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, var(--border)); }
 #resident-section .checkbox-field { display: flex; padding-top: 8px; font-size: 13px; color: var(--text-2); }
+
+/* Own-message actions (copy / resend / edit), shown on hover or focus. */
+.message.user { flex-direction: column; align-items: flex-end; gap: 2px; }
+.message.user .user-actions { opacity: 0; transition: opacity 120ms var(--ease); gap: 4px; }
+.message.user:hover .user-actions,
+.message.user:focus-within .user-actions { opacity: 0.85; }
+@media (hover: none) { .message.user .user-actions { opacity: 0.85; } }
+.message.user.editing { align-items: stretch; }
+.message-edit { display: flex; flex-direction: column; gap: 8px; width: min(100%, 640px); margin-left: auto; padding: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--panel); }
+.message-edit-input { width: 100%; min-height: 88px; resize: vertical; font: inherit; font-size: 14px; line-height: 1.5; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.message-edit-input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.message-edit-option { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+.message-edit-hint { font-size: 12px; color: var(--muted); }
+.message-edit-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Jump rail: one mark per own message beside the transcript. */
+.transcript-host { flex: 1; min-height: 0; position: relative; display: flex; }
+.transcript-host > .transcript { flex: 1; min-width: 0; }
+.jump-rail { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 3px; max-height: 70%; border: 1px solid var(--border-soft); border-radius: 999px; background: var(--panel); box-shadow: var(--shadow); z-index: 5; }
+.jump-rail[hidden] { display: none; }
+.jump-marks { display: flex; flex-direction: column; gap: 3px; overflow-y: auto; scrollbar-width: none; padding: 2px 0; }
+.jump-marks::-webkit-scrollbar { display: none; }
+.jump-mark { display: flex; align-items: center; justify-content: center; width: 18px; height: 12px; padding: 0; border: 0; background: none; cursor: pointer; }
+.jump-mark span { display: block; width: 8px; height: 3px; border-radius: 2px; background: var(--faint); transition: width 120ms var(--ease), background 120ms var(--ease); }
+.jump-mark:hover span, .jump-mark:focus-visible span { width: 14px; background: var(--accent); }
+.jump-mark.active span { width: 14px; background: var(--accent); }
+.jump-step { display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--muted); cursor: pointer; }
+.jump-step:hover { color: var(--accent); background: var(--accent-soft); }
+.jump-step.down svg { transform: rotate(180deg); }
+.message.jump-flash .message-body { box-shadow: 0 0 0 2px var(--accent); transition: box-shadow 200ms var(--ease); }
+@media (max-width: 640px) { .jump-rail { right: 2px; } }

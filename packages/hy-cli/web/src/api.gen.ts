@@ -305,10 +305,11 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
   {
     method: "POST",
     path: "/api/sessions/:id/undo",
-    summary: "Roll the last turn back, or every turn from toTurn on (rewind).",
+    summary: "Roll the last turn back, or every turn from toTurn on (rewind); keepFiles rewinds only the conversation.",
     errors: [400, 409],
     request: {
     toTurn: { type: "number" },
+    keepFiles: { type: "boolean" },
     },
   },
   {
@@ -529,7 +530,7 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
   {
     method: "GET",
     path: "/api/sessions/:id/export",
-    summary: "Markdown transcript export.",
+    summary: "The full chat history for debugging: every event of the run and its subagents, with thinking, tool arguments and full results (?format=md|markdown|json, ?mask=1).",
     response: "ExportResponse",
   },
   {

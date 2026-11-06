@@ -14,6 +14,8 @@
 | デスクトップ / Web GUI | IDE 連携、app | Web UI、Desktop（`dsh_readme.md:24-27`） | Electron 3 カラム GUI（セッション、チャット、ツールカード、承認、Files / Diff / Plan / Details / Trace、設定、ゴール、Verifier loop）。`hy web` も同じ UI | `tests/integration/web-ui.test.mjs`、`pnpm desktop:screenshot` |
 | 非対話実行と機械可読出力 | `codex exec`（`codex_docs_tree.md:103`） | CLI モード | `hy run --json`（JSONL のイベント）、`--output-last-message`、`--output-schema`（JSON Schema で最終出力を検証） | `chat-resume.test.mjs`、`commands.test.mjs`、`packages/core/src/agent.test.ts` |
 | セッションの再開・一覧・検索 | `codex resume` | session / session-query（`dsh_pkg_readme.md:70`） | `hy resume <run-id>`/`--last`、`hy sessions [--search]` | `chat-resume.test.mjs` |
+| 自分のメッセージの編集・再送信・コピー、メッセージへのジャンプ | 巻き戻して編集 | チャット欄の操作 | GUI で再送信 / 編集（そのターン以降を外して送り直す。ファイルは既定でそのまま、任意でチェックポイントへ戻す）、コピー、右端のジャンプバー（2026-11-06） | `web/test/message-view.test.mjs`、`tests/integration/web-ui.test.mjs` |
+| チャット履歴の全出力（デバッグ） | — | — | Markdown / JSON の書き出し（思考、ツール引数と結果の全文、取り消したターン、サブエージェントを含む。伏せ字は任意） | `transcript-export.test.ts`、`web-ui.test.mjs` |
 | ターン単位の取り消し | `/undo` | — | `/undo`（ターン前のチェックポイントへ戻し、会話からも消す）、`hy undo <run-id>` | `chat-resume.test.mjs` |
 | AGENTS.md の階層読み込み | `agents_md.rs`（`codex_core_agents_md_rs.md:1-18`） | context（`dsh_pkg_readme.md:53`） | ユーザーの `AGENTS.md`、git ルートから作業ディレクトリまで、各ディレクトリで `AGENTS.override.md` 優先（Codex と同じ規則） | `packages/core/src/ledger.test.ts` |
 | スキル | `docs/skills.md`（`codex_docs_tree.md:131`） | skill（`dsh_pkg_readme.md:51`） | `SKILL.md`（ユーザー、`.hy-harness/skills`、`.agents/skills`）、カタログはプロンプトに 1 行ずつ、本文は `skill_load` | `packages/core/src/skills.test.ts` |
