@@ -1,0 +1,15 @@
+# Benchmark overlay for `dsh --profile headless --patch <this>`: OpenCode Go's
+# deepseek-v4.1-flash at max effort, the same route HY-HARNESS uses. The key
+# comes from the OPENCODE_API_KEY environment variable (a reference, no secret
+# here). Applied per invocation only; the user's profiles are not changed.
+- id: llm-pi-ai
+  config:
+    providers:
+      opencode-go:
+        apiKeyEnv: OPENCODE_API_KEY
+
+- id: agent-default-model
+  config:
+    provider: opencode-go
+    model: deepseek-v4.1-flash
+    reasoningEffort: max

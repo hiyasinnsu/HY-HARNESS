@@ -22,3 +22,7 @@ __pycache__/
 
 # Written by `pnpm build` (scripts/write-build-info.mjs)
 /build-info.json
+
+# Harness benchmark raw logs (runs.jsonl / report.md / meta.json are kept)
+bench/results/*/*.stdout.jsonl
+bench/results/*/*.stderr.log
