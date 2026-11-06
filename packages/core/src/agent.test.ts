@@ -84,6 +84,51 @@ test('identical consecutive tool calls get a reminder (RepeatToolReminderGuard)'
   }
 })
 
+test('detectCycle finds a repeated multi-step sequence once per lap', async () => {
+  const { detectCycle } = await import('./agent.js')
+  assert.equal(detectCycle(['a', 'b', 'c', 'a', 'b']), undefined, 'not a full second lap yet')
+  assert.deepEqual(detectCycle(['a', 'b', 'c', 'a', 'b', 'c']), { period: 3, times: 2 })
+  assert.equal(detectCycle(['a', 'b', 'c', 'a', 'b', 'c', 'a']), undefined, 'mid-lap: no repeat of the reminder')
+  assert.deepEqual(detectCycle(['x', 'a', 'b', 'c', 'a', 'b', 'c', 'a', 'b', 'c']), { period: 3, times: 3 })
+  assert.deepEqual(detectCycle(['a', 'b', 'a', 'b']), { period: 2, times: 2 })
+  assert.deepEqual(detectCycle(['a', 'b', 'c', 'd', 'a', 'b', 'c', 'd']), { period: 4, times: 2 })
+  assert.equal(detectCycle(['a', 'a', 'a', 'a']), undefined, 'one call repeated is the repeat guard’s job')
+  assert.equal(detectCycle(['a', 'b', 'c', 'd', 'e', 'a', 'b', 'c', 'd', 'e']), undefined, 'longer cycles are not checked')
+  assert.equal(detectCycle(['a', 'b', 'c', 'a', 'b', 'd']), undefined)
+})
+
+test('a failing read → patch → shell loop tells the model it is looping', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-cycle-'))
+  try {
+    const lap = [
+      JSON.stringify({ tool: 'read_file', args: { path: 'missing.txt' } }),
+      JSON.stringify({ tool: 'apply_patch', args: { patch: 'not a patch' } }),
+      JSON.stringify({ tool: 'read_file', args: { path: 'also-missing.txt' } }),
+    ]
+    const replies = [...lap, ...lap, ...lap, '{"final":"stopped"}']
+    const seen: string[] = []
+    const provider = {
+      name: 'scripted',
+      complete: async (messages: Array<{ role: string; content: string }>) => {
+        seen.push(messages.at(-1)!.content)
+        return { content: replies.shift()!, usage: { inputTokens: 0, outputTokens: 0 } }
+      },
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    const tools = new ToolRuntime({} as never, dir)
+    const result = await new Agent({ provider, tools, sessionLog: log, workspaceRoot: dir }).run('go')
+    assert.equal(result.final, 'stopped')
+    // seen[n] is the result of reply n-1: the 6th step closes the second lap.
+    for (const n of [1, 2, 3, 4, 5, 7, 8]) assert.doesNotMatch(seen[n]!, /You are in a loop/, `step ${n}`)
+    assert.match(seen[6]!, /\[reminder\] You are in a loop: the last 3 steps \(read_file → apply_patch → read_file\) repeat the same calls for the 2nd time, and the calls keep failing/)
+    assert.match(seen[9]!, /for the 3rd time/)
+    const guards = log.events().filter((e) => e.type === 'guard/cycle')
+    assert.deepEqual(guards.map((e) => (e.payload as { times: number }).times), [2, 3])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('CP-13: each turn records a session snapshot with the shell cwd', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-snapshot-'))
   try {

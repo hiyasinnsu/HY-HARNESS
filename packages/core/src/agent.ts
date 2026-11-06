@@ -259,6 +259,43 @@ export function repeatReminder(times: number): string {
   return `\n[reminder] This is the same call with the same arguments ${times} times in a row; its result will not change. Change your approach, or finish if the work is done.`
 }
 
+/**
+ * Finds a repeating cycle at the end of a step history (each entry is one
+ * step's calls and whether they failed): A B C A B C has period 3, seen twice.
+ * Period 1 is left to the consecutive-repeat reminder. Reports only when a
+ * whole new copy of the cycle has just completed, so the model is told once
+ * per lap, not on every step.
+ */
+export function detectCycle(steps: readonly string[], maxPeriod = 4): { period: number; times: number } | undefined {
+  const n = steps.length
+  for (let period = 2; period <= maxPeriod; period++) {
+    if (n < period * 2) break
+    const lap = steps.slice(n - period)
+    if (lap.every((step) => step === lap[0])) continue
+    let matched = 0
+    while (matched < n - period && steps[n - 1 - matched] === steps[n - 1 - matched - period]) matched += 1
+    if (matched >= period && matched % period === 0) return { period, times: matched / period + 1 }
+    if (matched >= period) return undefined
+  }
+  return undefined
+}
+
+/** Appended to the last result of a step that completes a repeated cycle. */
+export function cycleReminder(tools: readonly string[], times: number, failing: boolean): string {
+  const loop = tools.join(' → ')
+  const what = failing ? 'and the calls keep failing the same way' : 'with the same results'
+  return (
+    `\n[reminder] You are in a loop: the last ${tools.length} steps (${loop}) repeat the same calls for the ${times}${ordinal(times)} time, ${what}. ` +
+    'Repeating them will not change the outcome. Stop and rethink: re-read the error messages, check your assumptions ' +
+    '(paths, file contents, the command itself), try a different approach, or finish and explain what is blocking you.'
+  )
+}
+
+function ordinal(n: number): string {
+  if (n % 100 >= 11 && n % 100 <= 13) return 'th'
+  return n % 10 === 1 ? 'st' : n % 10 === 2 ? 'nd' : n % 10 === 3 ? 'rd' : 'th'
+}
+
 export class Agent {
   private readonly maxOutputTokens: number
   private readonly temperature: number
@@ -347,6 +384,8 @@ export class Agent {
     // RepeatToolReminderGuard (design §2, DSH repeat-tool-reminder).
     let lastCall = ''
     let repeats = 0
+    // Loop guard: the same multi-step sequence (A → B → C → A → B → C …).
+    const stepHistory: string[] = []
 
     for (let step = 1; ; step++) {
       // CP-10: `tool_search` may have loaded a deferred tool; refresh the
@@ -602,8 +641,19 @@ export class Agent {
         // tool-result message, so the assistant/user alternation (and the mock's
         // request shape) stays exactly as before.
         const images = this.options.tools.takeImages()
+        stepHistory.push(JSON.stringify([calls, outcomes.map((o) => o.ok)]))
+        if (stepHistory.length > 64) stepHistory.shift()
+        let loopNote = ''
+        const cycle = reminder ? undefined : detectCycle(stepHistory)
+        if (cycle) {
+          const lap = stepHistory.slice(-cycle.period).map((entry) => JSON.parse(entry) as [Array<{ tool: string }>, boolean[]])
+          const tools = lap.map(([stepCalls]) => stepCalls.map((c) => c.tool).join('+'))
+          const failing = lap.some(([, oks]) => oks.some((ok) => !ok))
+          loopNote = cycleReminder(tools, cycle.times, failing)
+          this.options.sessionLog.append('guard/cycle', { tools, period: cycle.period, times: cycle.times, failing })
+        }
         const parts = outcomes.map((o, i) => {
-          const tail = i === outcomes.length - 1 ? reminder : ''
+          const tail = i === outcomes.length - 1 ? reminder + loopNote : ''
           const output = o.output + tail
           this.options.sessionLog.append('tool/result', {
             callId: o.callId,

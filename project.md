@@ -122,7 +122,7 @@ OpenAI Codex（`openai/codex`）と DeepSeek Harness（`deepseek-ai/deepseek-har
   1. **実装**: 自分のメッセージのコピー / 再送信 / 編集、自分のメッセージへのジャンプバー、デバッグ用の履歴書き出し（Markdown / JSON）。詳細は `docs/implementation_status.md` §2.15。
   2. **巻き戻しの選択肢**: 既存の巻き戻し（`/undo` の `toTurn`）は必ずファイルもチェックポイントへ戻していた。編集・再送信では作業を消さないのが既定であるべきなので `keepFiles` を追加し、ファイルを戻すのはユーザーがチェックしたときだけにした。
   3. **書き出しのルート重複**: `GET /api/sessions/:id/export` は表示中のエントリだけの簡易版が既にあり、新しいハンドラーが先に一致して古い方を隠していた（契約テストが重複を検出）。新しい方に統合し、JSON に従来の `entries` を残した。`/export` コマンドも同じダイアログを開く。
-  4. **確認中に気づいた点（報告のみ）**: `maxSteps` の全廃（2026-11-04、ユーザー要望）により、ツールが失敗し続ける循環（モックでは `read_file` → `apply_patch` → `shell` の失敗）を止めるのは停止ボタンだけになっている。GUI の確認中にモックが 2,705 周（約 8,100 エントリ）回り続けた。`RepeatToolReminderGuard` は同じ呼び出しの連続しか検出しないため、この 3 つの循環は検出されない。
+  4. **確認中に気づいた点（報告のみ）**: `maxSteps` の全廃（2026-11-04、ユーザー要望）により、ツールが失敗し続ける循環（モックでは `read_file` → `apply_patch` → `shell` の失敗）を止めるのは停止ボタンだけになっている。GUI の確認中にモックが 2,705 周（約 8,100 エントリ）回り続けた。`RepeatToolReminderGuard` は同じ呼び出しの連続しか検出しないため、この 3 つの循環は検出されない。→ 同日対応: ループガード（`detectCycle` / `cycleReminder`、`agent.ts`）を追加。2〜4 ステップの同じ呼び出し列（失敗 / 成功も同じ）が 2 周目に入るたびに、その周の最後のツール結果へ「ループしている、やり方を変えるか止めて理由を説明せよ」という `[reminder]` を付け、`guard/cycle` をログに残す。ターンは止めない（`maxSteps` 全廃の方針どおり、止めるのはユーザー）。
 - **2026-11-03 (Desktop GUI)**:
   1. **Electron のバイナリが pnpm で入らなかった**: `pnpm add -D electron@45.2.1` はパッケージだけを入れ、`node_modules/electron/dist/electron.exe` がなかった。`node node_modules/electron/install.js` を手動実行して解決。CI / 新しい環境ではインストールスクリプトの実行が必要。
   2. **ターンをまたぐツール ID の衝突**: `Agent` の callId が各ターンで `step-1` に戻るため、GUI のライブ更新が前のターンのツールカードを更新していた（delegate の結果が shell のカードに出た）。`AgentOptions.callIdPrefix` を追加し、`Conversation.turn` が `t<N>-` を渡すようにした。
