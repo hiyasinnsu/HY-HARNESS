@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { LlmError, type ChatMessage, type Completion, type ImageInput, type LlmProvider, type Usage } from './llm.js'
 import type { SessionEvent, SessionLog } from './session-log.js'
-import { buildSystemPrompt, nativeToolDefs, type PromptExtras } from './prompt.js'
+import { buildSystemPrompt, lastSessionContext, nativeToolDefs, sessionContextBlock, type PromptExtras } from './prompt.js'
 import { AbortRunError, type ToolRuntime } from './tools.js'
 import { Ledger, discoverPinned } from './ledger.js'
 import type { SkillInfo } from './skills.js'
@@ -146,6 +146,18 @@ export function toolErrorMessage(name: string, message: string): string {
  * messages, the assistant replies and the tool results exactly as the model saw
  * them. A `turn/undo` drops everything since the matching `turn/start`.
  */
+/**
+ * The rejected reply (when it was not logged as `assistant/message`) and the
+ * correction just pushed, for a `turn/retry` / `turn/nudge` payload, so
+ * `rebuildHistory` reproduces them.
+ */
+function replay(messages: readonly ChatMessage[], withAssistant: boolean): { assistant?: string; nudge: string } {
+  return {
+    ...(withAssistant ? { assistant: messages.at(-2)?.content ?? '' } : {}),
+    nudge: messages.at(-1)?.content ?? '',
+  }
+}
+
 export function rebuildHistory(events: readonly SessionEvent[], runId: string): ChatMessage[] {
   const history: ChatMessage[] = []
   const turnStarts = new Map<number, number>()
@@ -165,7 +177,31 @@ export function rebuildHistory(events: readonly SessionEvent[], runId: string): 
         break
       }
       case 'user/message':
-        history.push({ role: 'user', content: String(p.content ?? '') })
+        // `sent` is what the model got when it differs from what the user typed
+        // (hook context); the rebuilt history must match the cached prefix.
+        history.push({ role: 'user', content: String(p.sent ?? p.content ?? '') })
+        break
+      case 'context/update': {
+        // The session-context block rides on the newest user message.
+        const text = String(p.content ?? '')
+        const prev = history.at(-1)
+        if (prev?.role === 'user') prev.content = `${prev.content}\n\n${text}`
+        else history.push({ role: 'user', content: text })
+        break
+      }
+      case 'image/attached': {
+        const files = Array.isArray(p.files) ? p.files.map(String) : []
+        const prev = history.at(-1)
+        if (files.length > 0 && prev?.role === 'user') prev.content = `${prev.content}\n\n[image attached: ${files.join(', ')}]`
+        break
+      }
+      case 'turn/retry':
+      case 'turn/nudge':
+        // A rejected reply and the correction the agent sent back.
+        if (typeof p.nudge === 'string') {
+          if (typeof p.assistant === 'string') history.push({ role: 'assistant', content: p.assistant })
+          history.push({ role: 'user', content: p.nudge })
+        }
         break
       case 'user/steer':
         // Logged raw (the transcript shows what the user typed); the marker is
@@ -348,12 +384,11 @@ export class Agent {
       ...(this.options.search ? { search: true } : {}),
       ...(this.options.lsp ? { lsp: true } : {}),
       ...(this.options.finalSchema ? { finalSchema: this.options.finalSchema } : {}),
-      // The date once per turn (DSH time context): the model's own sense of "now" is its training cutoff.
-      date: new Date().toISOString().slice(0, 10),
+      // The date and goal are not here: they change during a session, so they
+      // travel in the session-context block (see `sessionContext` below).
       ...(this.options.ask ? { ask: true } : {}),
       ...(this.options.extraTools?.length ? { extraTools: this.options.extraTools } : {}),
       ...(this.options.memory ? { memory: true } : {}),
-      ...(this.options.goal ? { goal: this.options.goal } : {}),
     }
     // Native function calling when the provider supports it; a model that
     // rejects tools switches the turn to the JSON text protocol.
@@ -376,6 +411,8 @@ export class Agent {
     ]
     this.options.sessionLog.append('user/message', {
       content: objective,
+      // What the model actually got, so a rebuilt history matches the cached prefix.
+      ...(promptText !== objective ? { sent: promptText } : {}),
       ...(images.length > 0 ? { images: images.length } : {}),
       ...(source ? { source } : {}),
     })
@@ -414,10 +451,25 @@ export class Agent {
       }
       this.options.onEvent?.({ type: 'step-start', step, role: 'worker', model: this.options.provider.name })
       if (this.options.context) messages = await this.options.context.beforeRequest(messages, lastInputTokens)
-      // Constraints and notes are re-projected verbatim into every request,
-      // independent of any compaction summary (Goal 3).
-      const sections = [ledger.render(), this.options.memory?.render() ?? ''].filter(Boolean).join('\n\n')
-      messages[0] = { role: 'system', content: sections ? `${base}\n\n${sections}` : base }
+      // Prefix cache (DSH "in-history" updates): the system prompt stays
+      // byte-identical for the whole session. The date, goal, constraints,
+      // notes and memory go into a session-context block appended to the
+      // newest user message whenever it differs from the last block the
+      // conversation holds. Compaction or pruning that drops that block makes
+      // it differ, so the current block is always in the request (Goal 3).
+      const context = sessionContextBlock({
+        // The model's own sense of "now" is its training cutoff (DSH time context).
+        date: new Date().toLocaleDateString('sv-SE'),
+        ...(this.options.goal ? { goal: this.options.goal } : {}),
+        sections: [ledger.render(), this.options.memory?.render() ?? ''],
+      })
+      if (lastSessionContext(messages) !== context) {
+        const last = messages.at(-1)
+        if (last?.role === 'user') messages[messages.length - 1] = { ...last, content: `${last.content}\n\n${context}` }
+        else messages.push({ role: 'user', content: context })
+        this.options.sessionLog.append('context/update', { content: context })
+      }
+      messages[0] = { role: 'system', content: base }
       let completion: Completion
       try {
         await this.options.hooks?.modelRequest({ step, model: this.options.provider.name, native })
@@ -511,7 +563,7 @@ export class Agent {
               content:
                 'Your reply looked like a broken tool call. Use a real function call for tools, or reply with a short plain-text summary when finished.',
             })
-            this.options.sessionLog.append('turn/retry', { step, reason: 'broken-tool-call' })
+            this.options.sessionLog.append('turn/retry', { step, reason: 'broken-tool-call', ...replay(messages, true) })
             this.options.onEvent?.({ type: 'retry', step, reason: 'broken-tool-call', content: truncate(content, 2_000) })
             continue
           }
@@ -526,7 +578,7 @@ export class Agent {
               content:
                 'Goal mode: do not reply with a plan, a confirmation request, or a promise. Call a tool now and continue until the goal is complete or genuinely blocked. Use ask_user only for missing credentials or a destructive/irreversible decision.',
             })
-            this.options.sessionLog.append('turn/retry', { step, reason: 'goal-plan-without-action' })
+            this.options.sessionLog.append('turn/retry', { step, reason: 'goal-plan-without-action', ...replay(messages, true) })
             this.options.onEvent?.({
               type: 'retry',
               step,
@@ -558,7 +610,7 @@ export class Agent {
             content:
               'Your reply had no tool call and no text. Call a tool with a function call, or reply with a short plain-text summary if the work is done.',
           })
-          this.options.sessionLog.append('turn/retry', { step, reason: 'empty-reply' })
+          this.options.sessionLog.append('turn/retry', { step, reason: 'empty-reply', ...replay(messages, true) })
           this.options.onEvent?.({ type: 'retry', step, reason: 'empty-reply', content: '' })
           continue
         }
@@ -566,7 +618,7 @@ export class Agent {
           'Your previous reply was not a single valid JSON object. Reply with exactly one JSON object: ' +
           '{"tool":"read_file","args":{"path":"..."}} or {"final":"..."}'
         messages.push({ role: 'user', content: retry })
-        this.options.sessionLog.append('turn/retry', { step, reason: 'invalid-json' })
+        this.options.sessionLog.append('turn/retry', { step, reason: 'invalid-json', ...replay(messages, true) })
         this.options.onEvent?.({ type: 'retry', step, reason: 'invalid-json', content: truncate(content, 2_000) })
         continue
       }
@@ -619,7 +671,7 @@ export class Agent {
               'This run finishes only through claim_complete. If the objective is done and verified, call ' +
               '{"tool":"claim_complete","args":{"summary":"..."}}; otherwise keep working with tools.',
           })
-          this.options.sessionLog.append('turn/nudge', { step, reason: 'final-without-claim' })
+          this.options.sessionLog.append('turn/nudge', { step, reason: 'final-without-claim', ...replay(messages, false) })
           continue
         }
         this.options.sessionLog.append('turn/end', { status: 'completed' })
@@ -689,7 +741,7 @@ export class Agent {
         role: 'user',
         content: 'Reply with either {"tool":"<name>","args":{...}} or {"final":"..."} and nothing else.',
       })
-      this.options.sessionLog.append('turn/retry', { step, reason: 'missing-tool-or-final' })
+      this.options.sessionLog.append('turn/retry', { step, reason: 'missing-tool-or-final', ...replay(messages, false) })
       this.options.onEvent?.({ type: 'retry', step, reason: 'missing-tool-or-final', content: truncate(content, 2_000) })
     }
 

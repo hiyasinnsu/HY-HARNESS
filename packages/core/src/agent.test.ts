@@ -84,6 +84,60 @@ test('identical consecutive tool calls get a reminder (RepeatToolReminderGuard)'
   }
 })
 
+test('prefix cache: one system prompt per session; context changes are appended; the rebuilt history matches what was sent', async () => {
+  const { Ledger } = await import('./ledger.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-prefix-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'x\n')
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-p')
+    const ledger = Ledger.forRun(log, 'run-p', [{ source: 'AGENTS.md', text: 'Never edit vendor/.' }])
+    const replies = [
+      'not json at all', // invalid-json retry
+      JSON.stringify({ tool: 'read_file', args: { path: 'a.txt' } }),
+      '{"final":"first done"}',
+      '{"final":"second done"}',
+    ]
+    const requests: Array<Array<{ role: string; content: string }>> = []
+    const provider = {
+      name: 'scripted',
+      complete: async (messages: Array<{ role: string; content: string }>) => {
+        requests.push(messages.map((m) => ({ role: m.role, content: m.content })))
+        return { content: replies.shift()!, usage: { inputTokens: 0, outputTokens: 0 } }
+      },
+    }
+    const tools = new ToolRuntime({} as never, dir)
+    const agent = () => new Agent({ provider, tools, sessionLog: log, workspaceRoot: dir, ledger })
+    const first = await agent().run('turn one')
+    assert.equal(first.final, 'first done')
+    // A note recorded between turns changes the session context, not the system prompt.
+    ledger.upsert({ key: 'cjs', rule: 'keep CommonJS', rationale: 'the loader needs it' })
+    const second = await agent().run('turn two', first.history)
+    assert.equal(second.final, 'second done')
+
+    const system = requests[0]![0]!.content
+    assert.ok(requests.every((r) => r[0]!.content === system), 'the system prompt never changes')
+    assert.doesNotMatch(system, /Today is|Never edit vendor|hy_session_context/, 'date and constraints are not in the system prompt')
+    // The first request carries the context once, at the end of the user message.
+    assert.match(requests[0]![1]!.content, /^turn one\n\n<hy_session_context>\n[\s\S]*Today is \d{4}-\d{2}-\d{2}\.[\s\S]*Never edit vendor\/\.[\s\S]*<\/hy_session_context>$/)
+    // Unchanged context is not repeated in the same turn.
+    assert.equal(requests[1]!.filter((m) => m.content.includes('<hy_session_context>')).length, 1)
+    // Turn two starts with exactly what turn one sent last, plus its answer: a
+    // pure append, so the whole earlier request is a reusable prefix.
+    const lastOfFirst = requests[2]!
+    const firstOfSecond = requests[3]!
+    assert.deepEqual(firstOfSecond.slice(0, lastOfFirst.length), lastOfFirst)
+    assert.deepEqual(firstOfSecond[lastOfFirst.length], { role: 'assistant', content: '{"final":"first done"}' })
+    // The changed context rides on turn two's message.
+    assert.match(firstOfSecond.at(-1)!.content, /^turn two\n\n<hy_session_context>[\s\S]*keep CommonJS[\s\S]*<\/hy_session_context>$/)
+    // A resume rebuilds the same bytes from the log (retry nudge included).
+    const rebuilt = rebuildHistory(log.events(), 'run-p')
+    assert.deepEqual(rebuilt, second.history.map((m) => ({ role: m.role, content: m.content })))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('detectCycle finds a repeated multi-step sequence once per lap', async () => {
   const { detectCycle } = await import('./agent.js')
   assert.equal(detectCycle(['a', 'b', 'c', 'a', 'b']), undefined, 'not a full second lap yet')

@@ -13,7 +13,7 @@ import {
   type Completion,
   type LlmProvider,
 } from '../../core/dist/index.js'
-import { SpillCompaction, pruneImages } from './spill-compaction.js'
+import { MAX_IMAGE_MESSAGES, SpillCompaction, pruneImages } from './spill-compaction.js'
 
 function tmp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'hy-compact-'))
@@ -148,10 +148,16 @@ test('tier 2 summarizes between pairs and constraints + notes stay verbatim', as
     assert.ok(compacted, 'a request after compaction')
     assertPairsIntact(compacted)
     assert.ok(compacted.length < worker.requests[4]!.length + 2, 'older pairs were removed')
-    assert.match(compacted[1]!.content, /^read the files\n\n<session_summary>\n.*\n- Read f0\.\.f3; nothing changed yet\.\n<\/session_summary>$/)
-    // Re-rendered verbatim, independent of the summary.
-    assert.ok(compacted[0]!.content.includes('--- AGENTS.md ---\nNever edit vendor/.'))
-    assert.ok(compacted[0]!.content.includes('- legacy-cjs: keep src/legacy CommonJS\n  why: the loader requires it'))
+    assert.match(compacted[1]!.content, /^read the files\n\n<hy_session_context>[\s\S]*<\/hy_session_context>\n\n<session_summary>\n.*\n- Read f0\.\.f3; nothing changed yet\.\n<\/session_summary>$/)
+    // Re-sent verbatim, independent of the summary: the summary ends the first
+    // message, so the current session-context block goes on the newest one.
+    const tail = compacted.at(-1)!.content
+    assert.ok(tail.trimEnd().endsWith('</hy_session_context>'))
+    assert.ok(tail.includes('--- AGENTS.md ---\nNever edit vendor/.'))
+    assert.ok(tail.includes('- legacy-cjs: keep src/legacy CommonJS\n  why: the loader requires it'))
+    // The system prompt never carries them (it is the cached prefix).
+    assert.ok(!compacted[0]!.content.includes('legacy-cjs'))
+    assert.ok(worker.requests.every((r) => r[0]!.content === worker.requests[0]![0]!.content), 'one system prompt for the whole run')
     // The compactor was told not to paraphrase the ledger.
     assert.match(compactor.requests[0]![0]!.content, /Do not restate these agent notes.*legacy-cjs/)
     const summary = readEvents(log.file).find((e) => e.type === 'compaction/summary')
@@ -216,7 +222,7 @@ test('CP-17: old image attachments are dropped, recent ones kept', () => {
   assert.deepEqual(pruneImages(messages.slice(3), 2), messages.slice(3))
 })
 
-test('CP-17: pruning happens even below the compaction trigger', async () => {
+test('CP-17: below the trigger images stay (cached prefix) until too many pile up', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-media-'))
   try {
     const compaction = new SpillCompaction({ spillDir: dir, sessionId: 's', contextWindowTokens: 1_000_000 })
@@ -229,10 +235,17 @@ test('CP-17: pruning happens even below the compaction trigger', async () => {
       { role: 'assistant' as const, content: 'b' },
       { role: 'user' as const, content: 'new', images: [image] },
     ]
-    const out = await compaction.beforeRequest(messages, 0)
-    assert.equal(out[1]!.images, undefined)
-    assert.equal(out[3]!.images?.length, 1)
-    assert.equal(out[5]!.images?.length, 1)
+    const kept = await compaction.beforeRequest(messages, 0)
+    assert.deepEqual(kept, messages, 'a few images do not rewrite earlier messages')
+
+    const many: Array<{ role: 'system' | 'user' | 'assistant'; content: string; images?: (typeof image)[] }> = [{ role: 'system', content: 'sys' }]
+    for (let i = 0; i <= MAX_IMAGE_MESSAGES; i++) {
+      many.push({ role: 'user', content: `shot ${i}`, images: [image] }, { role: 'assistant', content: 'ok' })
+    }
+    const out = await compaction.beforeRequest(many, 0)
+    const withImages = out.filter((m) => (m.images?.length ?? 0) > 0)
+    assert.ok(withImages.length < MAX_IMAGE_MESSAGES, 'past the cap they are cut back in one go')
+    assert.equal(out.at(-2)!.images?.length, 1, 'the newest image is kept')
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

@@ -61,6 +61,13 @@ function lineCount(text: string): number {
  * them. A dropped attachment becomes a text note, so the transcript still says
  * an image was there.
  */
+/** Below the compaction trigger, images are kept until this many messages carry them. */
+export const MAX_IMAGE_MESSAGES = 16
+
+function imageMessages(messages: readonly ChatMessage[]): number {
+  return messages.filter((message) => (message.images?.length ?? 0) > 0).length
+}
+
 export function pruneImages(messages: ChatMessage[], keep = 2): ChatMessage[] {
   const withImages = messages
     .map((message, index) => ({ message, index }))
@@ -142,9 +149,9 @@ export class SpillCompaction implements ContextManager {
       .map((segment) =>
         segment
           .map((message) => `${message.role === 'assistant' ? 'ASSISTANT' : 'USER'}: ${message.content.slice(0, 2_000)}`)
-          .join('\\n'),
+          .join('\n'),
       )
-      .join('\\n\\n')
+      .join('\n\n')
     return [
       {
         role: 'system',
@@ -193,10 +200,14 @@ export class SpillCompaction implements ContextManager {
   }
 
   async beforeRequest(messages: ChatMessage[], lastInputTokens: number): Promise<ChatMessage[]> {
-    // CP-17: images are expensive regardless of the token trigger, so older
-    // ones are dropped before anything else (the model can re-read them).
-    const media = pruneImages(messages, this.keepRecentTurns)
-    if (!this.overTrigger(lastInputTokens) || media.length < 2) return media
+    // CP-17: older images are dropped (the model can re-read them), but only
+    // when it pays: dropping one rewrites an earlier message, so the provider's
+    // prefix cache misses from there on. Below the trigger images stay (they
+    // are cached like any other prefix) unless more than MAX_IMAGES pile up;
+    // then they are cut back to the recent ones in one go, not one per request.
+    const over = this.overTrigger(lastInputTokens)
+    const media = over || imageMessages(messages) > MAX_IMAGE_MESSAGES ? pruneImages(messages, this.keepRecentTurns) : messages
+    if (!over || media.length < 2) return media
     const [system, objective, ...rest] = media
     // One step is an assistant message plus the user message(s) that answer it.
     // A steering message (WP-21) adds a second user message to a step, so the

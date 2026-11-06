@@ -8,7 +8,7 @@ test('CP-38: registry defaults and user overrides resolve together', () => {
   assert.equal(defaults.streaming, true)
   const off = resolveFeatures({ streaming: false })
   assert.equal(off.streaming, false)
-  assert.equal(off['tool-search'], true, 'other features keep their defaults')
+  assert.equal(off['tool-search'], false, 'other features keep their defaults (tool-search is off by default)')
   assert.equal(featureEnabled(undefined, 'streaming'), true)
   assert.equal(featureEnabled({ streaming: false }, 'streaming'), false)
   assert.equal(featureEnabled({}, 'unknown-feature'), false, 'an unknown feature is off')

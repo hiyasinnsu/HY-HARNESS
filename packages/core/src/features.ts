@@ -23,8 +23,11 @@ export const FEATURES: readonly FeatureSpec[] = [
   {
     name: 'tool-search',
     maturity: 'stable',
-    defaultOn: true,
-    description: 'Load low-frequency tools with tool_search instead of the initial prompt.',
+    // Off since 2026-11-06: loading a tool mid-session changes the tool list,
+    // which invalidates the provider's prefix cache for the whole history. With
+    // every tool declared up front the request prefix never changes.
+    defaultOn: false,
+    description: 'Load low-frequency tools with tool_search instead of the initial prompt (smaller prompt, but each load re-reads the whole history uncached).',
   },
   {
     name: 'doctor-json',

@@ -503,7 +503,7 @@ test('CP-38: user feature overrides resolve into the config', () => {
     fs.writeFileSync(path.join(user, 'config.json'), JSON.stringify({ features: { streaming: false } }))
     const off = loadConfig({ cwd: ws })
     assert.equal(off.features.streaming, false)
-    assert.equal(off.features['tool-search'], true)
+    assert.equal(off.features['tool-search'], false)
   } finally {
     if (saved === undefined) delete process.env.HY_CONFIG_DIR
     else process.env.HY_CONFIG_DIR = saved

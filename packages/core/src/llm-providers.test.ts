@@ -77,7 +77,12 @@ test('the Anthropic adapter sends Messages API requests and parses tool_use', as
     assert.equal(sent.headers['anthropic-version'], '2023-06-01')
     assert.equal(sent.body.model, 'claude-sonnet-4-5')
     assert.equal(sent.body.max_tokens, 512)
-    assert.equal(sent.body.system, 'You are a coding agent.')
+    // Prompt caching: the system prompt and the last user blocks carry breakpoints.
+    assert.deepEqual(sent.body.system, [{ type: 'text', text: 'You are a coding agent.', cache_control: { type: 'ephemeral' } }])
+    const userBlocks = (sent.body.messages as Array<{ role: string; content: Array<{ cache_control?: unknown }> }>)
+      .filter((m) => m.role === 'user')
+      .map((m) => m.content.at(-1)!.cache_control)
+    assert.deepEqual(userBlocks, [{ type: 'ephemeral' }, { type: 'ephemeral' }])
     // The two consecutive user messages (tool result, then an image) are merged.
     const messages = sent.body.messages as Array<{ role: string; content: Array<{ type: string }> }>
     assert.deepEqual(

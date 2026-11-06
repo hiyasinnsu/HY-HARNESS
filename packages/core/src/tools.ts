@@ -859,7 +859,12 @@ export class ToolRuntime {
     if (spec.exposure === 'deferred' && !this.activated.has(name)) {
       throw new Error(`${name} is not loaded; call tool_search with words from its description first`)
     }
-    const allow = this.allowOverride ?? this.options.allowTools
+    if (this.allowOverride && !this.allowOverride.has(name)) {
+      // Plan mode keeps every tool in the prompt (a stable, cached prefix) and
+      // refuses the changing ones here.
+      throw new Error(`${name} is not available while plan mode is on: only reading and planning tools run. Propose the change in your plan instead.`)
+    }
+    const allow = this.options.allowTools
     if (allow && !allow.has(name)) {
       // A bundle narrows the session's tools; say so, because "read-only" would
       // be misleading when another tool could still write.

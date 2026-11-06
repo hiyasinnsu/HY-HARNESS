@@ -522,8 +522,14 @@ export function isOpenCodeHost(baseUrl: string): boolean {
 }
 
 /** The latest user message that is not a tool result. */
+/** A user message without the trailing `<hy_session_context>` block the agent appends. */
+function withoutSessionContext(text: string): string {
+  return text.replace(/(?:\n\n)?<hy_session_context>\n[\s\S]*<\/hy_session_context>\s*$/, '')
+}
+
 function lastPrompt(messages: ChatMessage[]): string {
-  return [...messages].reverse().find((m) => m.role === 'user' && !m.content.startsWith('TOOL '))?.content ?? ''
+  const prompts = [...messages].reverse().map((m) => (m.role === 'user' ? withoutSessionContext(m.content) : undefined))
+  return prompts.find((text) => text !== undefined && text !== '' && !text.startsWith('TOOL ')) ?? ''
 }
 
 /**
@@ -574,7 +580,8 @@ export class MockProvider implements LlmProvider {
     if (process.env.HY_MOCK_DUMP) {
       fs.appendFileSync(process.env.HY_MOCK_DUMP, `${JSON.stringify(messages.map((m) => [m.role, m.content.slice(0, 120)]))}\n`)
     }
-    const last = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
+    // The session-context block the agent appends is not part of what was asked.
+    const last = withoutSessionContext([...messages].reverse().find((m) => m.role === 'user' && withoutSessionContext(m.content) !== '')?.content ?? '')
     const prompt = stripContext(last)
     let content: string
     // Goal smoke tests: a `COMPLETE ...` objective exercises get_goal,
@@ -651,7 +658,7 @@ export class MockProvider implements LlmProvider {
       const summary = prompt.slice(5).split('\n')[0]?.trim() || 'done'
       content = JSON.stringify({ final: `STATUS: done\n\n${summary}` })
     } else if (prompt === 'REPEAT FIRST') {
-      content = JSON.stringify({ final: `first: ${messages[1]?.content ?? ''}` })
+      content = JSON.stringify({ final: `first: ${withoutSessionContext(messages[1]?.content ?? '')}` })
     } else if (prompt.startsWith('Review the changes')) {
       // hy review: proves the diff reached the reviewer.
       const added = prompt.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).length
@@ -669,7 +676,7 @@ export class MockProvider implements LlmProvider {
     } else if (last.includes('[plan mode: read-only.') && prompt === 'Create the demo file') {
       // In plan mode the mock still tries to write, to prove the tool is refused.
       content = JSON.stringify({ tool: 'apply_patch', args: { file: 'PLAN_ATTEMPT.md', content: 'x\n' } })
-    } else if (last.startsWith('TOOL ERROR (apply_patch)') && last.includes('not allowed')) {
+    } else if (last.startsWith('TOOL ERROR (apply_patch)') && /not allowed|while plan mode is on/.test(last)) {
       content = JSON.stringify({ final: 'plan: write HY_DEMO.md after approval' })
     } else if (prompt.startsWith('JSON ')) {
       // Structured output probe: the rest is the final value as raw JSON.
@@ -872,9 +879,32 @@ export class LazyProvider implements LlmProvider {
 
 const ANTHROPIC_VERSION = '2023-06-01'
 
+type CacheControl = { cache_control?: { type: 'ephemeral' } }
 type AnthropicBlock =
-  | { type: 'text'; text: string }
-  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+  | ({ type: 'text'; text: string } & CacheControl)
+  | ({ type: 'image'; source: { type: 'base64'; media_type: string; data: string } } & CacheControl)
+
+/**
+ * Anthropic caches a prefix only up to a block marked with `cache_control`
+ * (DeepSeek and OpenAI cache automatically). Marks the system prompt (which
+ * also covers the tool definitions before it) and the last block of the last
+ * two user messages: each request writes the cache at its end and reads the
+ * one the previous request wrote. 3 of the 4 allowed breakpoints.
+ */
+export function withAnthropicCacheBreakpoints(
+  messages: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }>,
+): Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> {
+  let marked = 0
+  for (let i = messages.length - 1; i >= 0 && marked < 2; i--) {
+    const message = messages[i]!
+    if (message.role !== 'user') continue
+    const last = message.content.at(-1)
+    if (!last) continue
+    message.content[message.content.length - 1] = { ...last, cache_control: { type: 'ephemeral' } }
+    marked += 1
+  }
+  return messages
+}
 
 /** The Messages API wants alternating roles; the harness can emit two user turns. */
 export function anthropicMessages(messages: readonly ChatMessage[]): Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> {
@@ -917,8 +947,9 @@ export class AnthropicProvider implements LlmProvider {
       model: this.role.model,
       max_tokens: options.maxTokens,
       temperature: options.temperature,
-      ...(system ? { system } : {}),
-      messages: anthropicMessages(messages),
+      // Prompt caching: explicit breakpoints (see withAnthropicCacheBreakpoints).
+      ...(system ? { system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] } : {}),
+      messages: withAnthropicCacheBreakpoints(anthropicMessages(messages)),
       ...(options.tools && options.tools.length > 0
         ? { tools: options.tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })) }
         : {}),

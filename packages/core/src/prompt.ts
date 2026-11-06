@@ -55,7 +55,9 @@ export function promptFeatures(extras: PromptExtras): Set<string> {
   if (extras.memory) features.add('memory')
   if (extras.ask) features.add('ask')
   // CP-10: advertise `tool_search` only when there is something to load.
-  if (deferredTools(features, allSpecs(extras), extras.allowTools).length > 0) features.add('deferred')
+  // With tool search off every deferred tool is active from the start, so
+  // there is nothing left to load and `tool_search` is not offered.
+  if (deferredTools(features, allSpecs(extras), extras.allowTools).some((t) => !extras.activeTools?.has(t.name))) features.add('deferred')
   return features
 }
 
@@ -68,10 +70,50 @@ export function nativeToolDefs(ptc: boolean, objective: boolean, extras: PromptE
   }))
 }
 
+/** The long-running goal and its policy (the agent sends it in the session context). */
+export function goalPrompt(goal: { objective: string }): string {
+  return `Long-running goal (current objective):\n${goal.objective}\nGoal policy:\n- Work autonomously toward the objective. Do not ask for confirmation or approval of a plan, and do not end a turn with a plan, promise, or "I will proceed" message.\n- If work remains, call a tool. Use get_goal before update_goal and pass the exact id and revision.\n- Mark complete only when the objective is achieved. The host's Grader verifies the claim; if it rejects the claim, continue with the unmet criteria.\n- Mark blocked only when the same condition persists for at least three consecutive goal rounds, and report it in blocked_reason. Difficulty or remaining work is not blocked.\n- Use ask_user only for an ambiguous instruction, a prerequisite change that needs approval, or an impossible goal. For a destructive or irreversible action, ask before doing it.\n- If plan mode is active, plan and wait for the user instead of changing files.`
+}
+
+/** Opens / closes the session-context block the agent appends to the conversation. */
+export const SESSION_CONTEXT_OPEN = '<hy_session_context>'
+export const SESSION_CONTEXT_CLOSE = '</hy_session_context>'
+
 /**
- * The static part of the system prompt. Project constraints and agent notes
- * are appended per request by the agent from the Ledger (design §8). Tools
- * that need a feature (skills, MCP) appear only when the session has it.
+ * The parts of the old system prompt that change during a session (date, goal,
+ * project constraints, agent notes, memory), as one block. The agent appends it
+ * to the conversation when it differs from the last one sent, instead of
+ * rewriting the system prompt: the request prefix stays byte-identical, so the
+ * provider's prefix cache keeps the whole history (DSH "in-history" updates).
+ */
+export function sessionContextBlock(parts: { date?: string; goal?: { objective: string }; sections?: readonly string[] }): string {
+  const body = [
+    'Current session context (it replaces any earlier hy_session_context block):',
+    ...(parts.date ? [`Today is ${parts.date}.`] : []),
+    ...(parts.goal ? [goalPrompt(parts.goal)] : []),
+    ...(parts.sections ?? []).filter(Boolean),
+  ]
+  return `${SESSION_CONTEXT_OPEN}\n${body.join('\n\n')}\n${SESSION_CONTEXT_CLOSE}`
+}
+
+/** The last session-context block in the conversation (it always ends a user message). */
+export function lastSessionContext(messages: readonly { role: string; content: string }[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!
+    if (message.role !== 'user') continue
+    const text = message.content.trimEnd()
+    if (!text.endsWith(SESSION_CONTEXT_CLOSE)) continue
+    const start = text.lastIndexOf(SESSION_CONTEXT_OPEN)
+    if (start >= 0) return text.slice(start)
+  }
+  return undefined
+}
+
+/**
+ * The static part of the system prompt. It must not change during a session:
+ * the date, goal, project constraints, agent notes and memory travel in the
+ * conversation as a session-context block (`sessionContextBlock`). Tools that
+ * need a feature (skills, MCP) appear only when the session has it.
  */
 export function buildSystemPrompt(workspaceRoot: string, ptc = false, objective = false, extras: PromptExtras = {}): string {
   const features = promptFeatures(extras)
@@ -79,7 +121,7 @@ export function buildSystemPrompt(workspaceRoot: string, ptc = false, objective 
   const header = `You are HY-HARNESS, a careful autonomous coding agent working in:
 ${workspaceRoot}${extras.date ? `\nToday is ${extras.date}.` : ''}
 ${extras.roleInstruction ? `\n${extras.roleInstruction.trim()}\n` : ''}
-${extras.goal ? `\nLong-running goal (current objective):\n${extras.goal.objective}\nGoal policy:\n- Work autonomously toward the objective. Do not ask for confirmation or approval of a plan, and do not end a turn with a plan, promise, or "I will proceed" message.\n- If work remains, call a tool. Use get_goal before update_goal and pass the exact id and revision.\n- Mark complete only when the objective is achieved. The host's Grader verifies the claim; if it rejects the claim, continue with the unmet criteria.\n- Mark blocked only when the same condition persists for at least three consecutive goal rounds, and report it in blocked_reason. Difficulty or remaining work is not blocked.\n- Use ask_user only for an ambiguous instruction, a prerequisite change that needs approval, or an impossible goal. For a destructive or irreversible action, ask before doing it.\n- If plan mode is active, plan and wait for the user instead of changing files.\n` : ''}
+${extras.goal ? `\n${goalPrompt(extras.goal)}\n` : ''}
 Private reasoning style: write your thinking in Japanese. Use a blunt, concise tone such as 「〜だ。〜する。〜が分かった。」. No polite forms, filler, or restating the request. Start with one sentence saying what you will do next.
 ${
   process.platform === 'win32'

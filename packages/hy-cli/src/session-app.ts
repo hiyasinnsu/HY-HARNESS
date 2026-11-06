@@ -905,7 +905,7 @@ async function runSubagent(
   const mcp = o.readOnly ? undefined : sessionMcp
   const hooks = sessionHooks(config)
   const tools = new ToolRuntime(client, config.workspaceRoot, o.approve, false, {
-    toolSearch: config.features['tool-search'] !== false,
+    toolSearch: config.features['tool-search'] === true,
     spillDir: o.spillDir,
     // Jobs are tagged with the parent run, so its rollback kills them.
     runId: o.parentRunId,
@@ -1285,7 +1285,7 @@ export class Conversation {
         : bundleTools
       : readOnlyTools
     const tools = new ToolRuntime(client, config.workspaceRoot, approve, false, {
-      toolSearch: config.features['tool-search'] !== false,
+      toolSearch: config.features['tool-search'] === true,
       contextWindowTokens: config.role.contextWindowTokens,
       ledger,
       spillDir,
@@ -1371,8 +1371,13 @@ export class Conversation {
     // Rebuilt by /model and /plan-mode; the conversation and tools stay.
     const build = (role: RoleConfig, allowTools?: ReadonlySet<string>, signal?: AbortSignal, callIdPrefix?: string, goalMode = false, goal?: GoalView) => {
       // A subagent conversation only ever offers the reading tools, whatever the
-      // caller passes, and a bundle can only narrow further.
-      const requested = options.planOnly ? planTools : (readOnlyTools ?? allowTools)
+      // caller passes, and a bundle can only narrow further. Plan mode
+      // (`allowTools`) does not narrow the offered set: the tool list is part
+      // of the cached request prefix, so toggling it would re-read the whole
+      // history uncached. The ToolRuntime refuses the other tools instead
+      // (`setAllowTools`), and the turn message says plan mode is on.
+      void allowTools
+      const requested = options.planOnly ? planTools : readOnlyTools
       const allow = bundleTools
         ? requested
           ? new Set([...requested].filter((tool) => bundleTools.has(tool)))

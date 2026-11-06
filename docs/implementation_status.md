@@ -250,6 +250,20 @@ prefix_rule(pattern = [["jest", "vitest"]], sandbox = "low-integrity", match = [
 - **実装**: `packages/hy-cli/src/transcript-export.ts`、`Conversation.undo(keepFiles)` / `rewind(toTurn, keepFiles)`、`web/src/message-view.ts` の `renderUserMessage` / `renderUserMessageEditor`、`app.ts` の `rewindAndSend` / ジャンプバー / 書き出しダイアログ、英・日・中の文言。
 - **テスト**: `transcript-export.test.ts`（3 件）、`web/test/message-view.test.mjs`（2 件追加）、`tests/integration/web-ui.test.mjs`（`keepFiles` の巻き戻しでファイルが残り、送り直したターンが 2 番になること、書き出しに取り消したターンとツール呼び出しが残ること）。内蔵ブラウザでモックの GUI を操作し、ジャンプ、前 / 次、編集して送信、再送信、書き出しダイアログ、通知の日本語化を確認した。
 
+### 2.16 プレフィックスキャッシュ（DSH の in-history 方式、2026-11-07）
+
+- **方針**: リクエストの先頭（system prompt とツール定義）をセッション中ずっと同じバイト列に保ち、変わるものは会話の末尾に追記する。DSH の各パッケージが README の「KV Cache effect」で示している、追記のみ（append-only）の考え方に合わせた。
+- **実測（変更前、11/4〜11/6 の実ログ）**: 3,345 ステップでヒット率 97.4%。大きな取りこぼしは system prompt の変更で 13 回・約 458 万トークン。ほとんどがプランモードの切り替えで、ツール一覧が変わり、40〜50 万トークンの履歴を毎回読み直していた。
+- **セッションコンテキスト**: 日付、ゴールとその方針、プロジェクトの制約（AGENTS.md など）、エージェントのメモ（rationale）、ワークスペースのメモリーを system prompt から外した。これらは `<hy_session_context>` ブロック（`sessionContextBlock`）にまとめ、前回送ったブロックと違うときだけ、最新の user メッセージの末尾に付ける（`context/update` イベント）。圧縮や古い出力の刈り込みでブロックが消えると「違う」と判定されるので、最新のブロックは必ずリクエストに入る（Goal 3 は維持）。
+- **プランモード**: 提示するツール一覧は変えず、書き込み系は ToolRuntime が実行時に「plan mode is on」で断る（`setAllowTools`）。ターンのメッセージにはプランモードの指示が入る。
+- **ツールの遅延ロード**: `tool-search` 機能を既定で無効にし、遅延ツールも最初から宣言する。途中でツールを読み込むと一覧が変わり、履歴全体が読み直しになるため。初期プロンプトは大きくなるが、キャッシュされる。必要なら `features.tool-search = true` で戻せる。
+- **履歴の再構築**: 再開（アプリの再起動を含む）や巻き戻しで作り直す履歴が、送ったものとバイト単位で一致するようにした。`user/message` の `sent`（フックのコンテキスト込み）、`context/update`、`image/attached` の注記、`turn/retry` / `turn/nudge` の却下した返答と差し戻し文を記録し、`rebuildHistory` で再現する。
+- **画像**: 新しい画像が来るたびに古い画像を消すのをやめた（消すと、その位置から後ろがキャッシュに当たらなくなる）。消すのは圧縮のしきい値を超えたときと、画像付きのメッセージが 16 件を超えたときだけで、そのときは一度にまとめて減らす。
+- **Anthropic**: Messages API は `cache_control` を付けた位置までしかキャッシュしないため、system prompt と、最後の 2 つの user メッセージの末尾ブロックに付けた（上限 4 つのうち 3 つ）。DeepSeek / OpenAI は自動でキャッシュされる。
+- **残っている取りこぼし**: プロバイダー側のキャッシュ期限切れ（長い放置）、圧縮（要約で履歴を置き換える）、古いツール出力の刈り込み、スキル / MCP カタログやモデルの変更。要約のリクエストは DSH のように会話の先頭を使い回してはいない。CP-22 の事前生成で待ち時間は隠れており、2,000 文字に切り詰めた要約用の入力と、キャッシュに当たる会話全体とで費用がほぼ同じになるため。
+- **ついでの修正**: 要約用の書き起こしの改行が `\n` という文字のまま入っていたのを直した。
+- **テスト**: `agent.test.ts`（system prompt がセッション中変わらないこと、変わったコンテキストだけが追記されること、次のターンが前のリクエストの純粋な追記になること、再構築した履歴が一致すること）、`tools.test.ts`（プランモードの実行時拒否）、`spill-compaction.test.ts`（画像の保持と上限、圧縮後もコンテキストが末尾に入ること）、`llm-providers.test.ts`（Anthropic のブレークポイント）。
+
 ## 3. 実装中に分かったこと
 
 1. **F: は exFAT**。pnpm は `node-linker=hoisted`、Cargo は `CARGO_INCREMENTAL=0` が必要。

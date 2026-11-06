@@ -228,6 +228,21 @@ test('CP-10: tool_search loads a deferred tool, which then becomes callable', as
   }
 })
 
+test('plan mode refuses changing tools at run time (the prompt keeps the full, cached tool list)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-plan-refuse-'))
+  try {
+    const { tools, patches } = patchRecorder(dir)
+    tools.setAllowTools(new Set(['read_file', 'update_plan']))
+    await assert.rejects(tools.execute('apply_patch', { file: 'x.txt', content: 'x' }), /apply_patch is not available while plan mode is on/)
+    assert.equal(patches.length, 0)
+    tools.setAllowTools(undefined)
+    await tools.execute('apply_patch', { file: 'x.txt', content: 'x' })
+    assert.equal(patches.length, 1, 'plan mode off: the same call runs')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('CP-38: with the tool-search flag off, deferred tools are loaded from the start', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-tool-search-off-'))
   try {
