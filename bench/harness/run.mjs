@@ -1,7 +1,7 @@
 // Harness benchmark: the same tasks, one after another in one session, on
 // HY-HARNESS and DeepSeek Harness, with the same model and effort.
 //
-//   node bench/harness/run.mjs --runs 5 [--harness hy,dsh] [--parallel 2] [--out bench/results]
+//   node bench/harness/run.mjs [--runs 10] [--harness hy,dsh] [--parallel 2] [--out bench/results]
 //
 // Each run gets a fresh copy of the fixture project, gives the tasks in order,
 // then runs the hidden checks and reads tokens, cache hits, tool calls and
@@ -25,7 +25,7 @@ function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`)
   return i >= 0 ? process.argv[i + 1] : fallback
 }
-const runs = Number(arg('runs', '3'))
+const runs = Number(arg('runs', '10'))
 const harnesses = String(arg('harness', 'hy,dsh')).split(',')
 const parallel = Number(arg('parallel', '2'))
 const benchRoot = path.resolve(arg('workdir', 'F:/hy-bench/harness'))

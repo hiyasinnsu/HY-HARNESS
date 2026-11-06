@@ -24,11 +24,11 @@
 ## 実行
 
 ```bash
-pnpm bench:harness -- --runs 5 --parallel 2
+pnpm bench:harness -- --parallel 2
 node bench/harness/report.mjs bench/results/<stamp>
 ```
 
-- `--runs`: ハーネスごとの回数
+- `--runs`: ハーネスごとの回数（既定 10。安定性を見るのが目的なので、課題は易しいまま回数で精度を上げる）
 - `--parallel`: 同時に走らせる数（2 なら HY と DSH を 1 本ずつ並べ、同じ時間帯の混み具合で比べる）
 - `--harness hy` / `--harness dsh`: 片方だけ実行する
 - `--workdir`: 作業フォルダー（既定は `F:/hy-bench/harness`）
