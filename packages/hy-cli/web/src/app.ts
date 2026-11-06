@@ -41,6 +41,7 @@ import { renderTurnQueueHtml } from './turn-queue-view.js'
 import { orchestrationIntent } from './orchestration-intent.js'
 import { SCROLL_ANCHOR_AT_BOTTOM, anchorAfterRender, captureAnchor, type ScrollAnchor } from './scroll-anchor.js'
 import { entryMotionKey, settledFlags, wrapEntryHtml } from './entry-motion.js'
+import { nextTheme, resolveTheme, themeToggleView } from './theme.js'
 import { caretAfterRender, composerDraftKey, readComposerDraft, shouldRebuildComposer, shouldStartSessionOnFocus, writeComposerDraft, type ComposerSnapshot } from './composer-draft.js'
 import { Terminal } from '../vendor/xterm.mjs'
 import { FitAddon } from '../vendor/addon-fit.mjs'
@@ -429,12 +430,18 @@ function workspaceName(): string {
 
 /** WP-61: `system` follows the OS and is re-resolved on every change. */
 function resolvedTheme(): 'light' | 'dark' {
-  if (state.theme !== 'system') return state.theme
+  let prefersDark = false
   try {
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
   } catch {
-    return 'light'
+    // An old engine without matchMedia keeps the light theme.
   }
+  return resolveTheme(state.theme, prefersDark)
+}
+
+function themeToggleHtml(): string {
+  const view = themeToggleView(state.theme)
+  return `${icon(view.icon, 16)} ${tr(view.labelKey)}`
 }
 
 function applyTheme(): void {
@@ -444,6 +451,13 @@ function applyTheme(): void {
   localStorage.setItem('hy-theme-v2', state.theme)
   const meta = document.querySelector('meta[name="theme-color"]')
   if (meta) meta.setAttribute('content', theme === 'light' ? '#fff9fc' : '#171017')
+  // Keep the sidebar toggle in step when the theme changes without a re-render
+  // (Settings, the OS switching while `system` is chosen).
+  const toggle = document.querySelector<HTMLElement>('[data-action="toggle-theme"]')
+  if (toggle) {
+    toggle.innerHTML = themeToggleHtml()
+    toggle.title = `${tr('theme')}: ${tr(`theme_${state.theme}`)} → ${tr(themeToggleView(state.theme).nextKey)}`
+  }
 }
 
 /** WP-61: font stacks are user text, so only safe characters are kept. */
@@ -1487,7 +1501,7 @@ function renderShell(): void {
         </div>
         <div class="sidebar-actions">
           <button class="side-btn" data-action="open-settings">${icon('settings', 16)} ${tr('settings')}</button>
-          <button class="side-btn" data-action="toggle-theme">${state.theme === 'dark' ? icon('sun', 16) : icon('moon', 16)} ${state.theme === 'dark' ? tr('light') : tr('dark')}</button>
+          <button class="side-btn" data-action="toggle-theme" title="${escapeHtml(`${tr('theme')}: ${tr(`theme_${state.theme}`)} → ${tr(themeToggleView(state.theme).nextKey)}`)}">${themeToggleHtml()}</button>
         </div>
         <button class="side-btn archived-toggle" data-action="toggle-archived-filter">${icon('archive', 16)} ${state.showArchived ? tr('hideArchived') : `${tr('showArchived')} (${state.sessions.filter((s) => s.archived).length})`}</button>
         <div class="sidebar-footnote">${escapeHtml(config?.worker.provider ?? '')}/${escapeHtml(config?.worker.model ?? '')} · ${escapeHtml(config?.sandbox ?? '')}</div>
@@ -1533,7 +1547,9 @@ function applyShellState(): void {
   if (!shell) return
   shell.classList.toggle('sidebar-collapsed', !state.sidebarOpen)
   shell.classList.toggle('right-open', state.right !== null)
-  document.documentElement.dataset.theme = state.theme
+  // The resolved light/dark only; writing state.theme here put `system` on
+  // <html>, which has no palette, so `system` always showed the dark default.
+  applyTheme()
 }
 
 function renderRightPanel(): void {
@@ -2200,7 +2216,7 @@ function runShortcut(actionId: string): void {
       applyShellState()
       break
     case 'toggleTheme':
-      setTheme(state.theme === 'light' ? 'dark' : state.theme === 'dark' ? 'system' : 'light')
+      setTheme(nextTheme(state.theme))
       break
     case 'focusComposer':
       document.getElementById('composer-input')?.focus()
@@ -2970,7 +2986,7 @@ function renderModal(): void {
     const rows = state.roots
       .map(
         (root) => `<div class="root-row" data-root-id="${escapeHtml(root.id)}">
-          <div class="root-main"><strong>${escapeHtml(root.label)}</strong><code>${escapeHtml(root.path)}</code><span class="root-kind">${root.writable ? tr('rootWritable') : tr('rootReadOnly')}</span></div>
+          <div class="root-main"><strong>${escapeHtml(root.label)}</strong><code>${escapeHtml(root.path)}</code><span class="root-kind">${root.writable ? tr('rootWritable') : tr('rootReadOnly')}${root.scope === 'global' ? ` · <span title="${escapeHtml(tr('rootGlobalHint'))}">${tr('rootGlobal')}</span>` : ''}</span></div>
           ${root.id === 'main' ? '' : `<button class="link-btn danger" data-action="remove-root" data-root-id="${escapeHtml(root.id)}">${tr('removeRoot')}</button>`}
         </div>`,
       )
@@ -4393,7 +4409,7 @@ async function runCommand(id: string, args = ''): Promise<void> {
       renderModal()
       return
     case 'theme':
-      setTheme(state.theme === 'dark' ? 'light' : 'dark')
+      setTheme(nextTheme(state.theme))
       return
     default:
       toast(`Unknown command ${id}`, 'error')
@@ -5498,7 +5514,7 @@ function onDocumentClick(event: MouseEvent): void {
       break
     case 'toggle-theme':
       // WP-61: light → dark → system → light.
-      setTheme(state.theme === 'light' ? 'dark' : state.theme === 'dark' ? 'system' : 'light')
+      setTheme(nextTheme(state.theme))
       break
     case 'feedback-up':
       if (el.dataset.entryId) void sendFeedback('up', el.dataset.entryId)

@@ -108,7 +108,7 @@ export const userConfigJsonSchema = {
     },
     workspaceRoots: {
       type: 'array',
-      description: 'Additional roots for the same session; the workspace root is always main.',
+      description: 'Additional roots for every workspace; the workspace root is always main. The GUI stores roots per workspace in workspaceRootsByWorkspace instead.',
       items: {
         type: 'object',
         additionalProperties: false,
@@ -119,6 +119,24 @@ export const userConfigJsonSchema = {
           writable: { type: 'boolean' },
         },
         required: ['path'],
+      },
+    },
+    workspaceRootsByWorkspace: {
+      type: 'object',
+      description: 'Additional roots per workspace, keyed by the primary root path (lower-cased on Windows). Written by the GUI roots dialog.',
+      additionalProperties: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string' },
+            path: { type: 'string' },
+            label: { type: 'string' },
+            writable: { type: 'boolean' },
+          },
+          required: ['path'],
+        },
       },
     },
     roles: {

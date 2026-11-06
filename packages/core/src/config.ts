@@ -115,6 +115,40 @@ export interface WorkspaceRootConfig {
   label?: string
   /** Extra roots are read-only unless explicitly made writable. */
   writable?: boolean
+  /**
+   * Where an extra root is configured: `workspace` (added for this workspace,
+   * `workspaceRootsByWorkspace`) or `global` (the legacy `workspaceRoots`,
+   * applied to every workspace). Unset for `main`.
+   */
+  scope?: 'workspace' | 'global'
+}
+
+export type ExtraRootInput = { id?: string; path: string; label?: string; writable?: boolean; scope?: 'workspace' | 'global' }
+
+/** Key of `workspaceRootsByWorkspace`: the resolved primary root, case-folded on Windows. */
+export function workspaceRootsKey(primary: string): string {
+  const resolved = path.resolve(primary)
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+/**
+ * The extra roots configured for `primary`: the legacy global `workspaceRoots`
+ * (every workspace), then the ones added for this workspace. Roots added from
+ * the GUI used to be written to the global list, so they followed the user into
+ * every other workspace; they are now stored per workspace.
+ */
+export function configuredExtraRoots(
+  user: { workspaceRoots?: unknown; workspaceRootsByWorkspace?: unknown } | undefined,
+  primary: string,
+): ExtraRootInput[] {
+  const list = (value: unknown): Array<{ id?: string; path: string; label?: string; writable?: boolean }> =>
+    Array.isArray(value) ? value.filter((root) => root && typeof root === 'object' && typeof (root as { path?: unknown }).path === 'string') : []
+  const byWorkspace = user?.workspaceRootsByWorkspace
+  const own =
+    byWorkspace && typeof byWorkspace === 'object' && !Array.isArray(byWorkspace)
+      ? list((byWorkspace as Record<string, unknown>)[workspaceRootsKey(primary)])
+      : []
+  return [...list(user?.workspaceRoots).map((root) => ({ ...root, scope: 'global' as const })), ...own.map((root) => ({ ...root, scope: 'workspace' as const }))]
 }
 
 export interface HarnessConfig {
@@ -262,8 +296,10 @@ export interface CliOverrides {
 interface UserConfigFile {
   /** Named overlays selected with `--profile` (Codex config profiles). */
   profiles?: Record<string, Omit<UserConfigFile, 'profiles' | 'trustedProjects'>>
-  /** Additional roots for the same session; the workspace root is always `main`. */
+  /** Additional roots for every workspace; the workspace root is always `main`. */
   workspaceRoots?: Array<{ id?: string; path: string; label?: string; writable?: boolean }>
+  /** Additional roots per workspace, keyed by `workspaceRootsKey(primary)` (the GUI writes here). */
+  workspaceRootsByWorkspace?: Record<string, Array<{ id?: string; path: string; label?: string; writable?: boolean }>>
   roles?: {
     worker?: Partial<RoleConfig>
     orchestrator?: Partial<RoleConfig>
@@ -408,7 +444,7 @@ export function canonicalWorkspace(cwd?: string): string {
 /** Validates user-added roots: absolute, existing, unique and outside the primary root. */
 export function workspaceRootsFor(
   primary: string,
-  extras: ReadonlyArray<{ id?: string; path: string; label?: string; writable?: boolean }> = [],
+  extras: ReadonlyArray<ExtraRootInput> = [],
 ): WorkspaceRootConfig[] {
   const roots: WorkspaceRootConfig[] = [
     { id: 'main', path: primary, label: path.basename(primary) || primary, writable: true },
@@ -436,6 +472,7 @@ export function workspaceRootsFor(
       path: real,
       label: (extra.label ?? path.basename(real) ?? id).trim() || id,
       writable: extra.writable === true,
+      ...(extra.scope ? { scope: extra.scope } : {}),
     })
   }
   return roots
@@ -635,7 +672,7 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
   const workspaceRoot = canonicalWorkspace(overrides.cwd)
   const userConfigPath = path.join(userConfigDir(), 'config.json')
   const user = applyProfile(readJson<UserConfigFile>(userConfigPath), overrides.profile)
-  const workspaceRoots = workspaceRootsFor(workspaceRoot, user?.workspaceRoots)
+  const workspaceRoots = workspaceRootsFor(workspaceRoot, configuredExtraRoots(user, workspaceRoot))
   const projectConfigPath = path.join(workspaceRoot, '.hy-harness', 'config.json')
   const project = readJson<ProjectConfigFile>(projectConfigPath)
 

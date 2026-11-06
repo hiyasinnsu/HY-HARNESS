@@ -760,6 +760,68 @@ test('web GUI: adding a root keeps the same chat and separates same-name files',
   }
 })
 
+test('web GUI: an added root stays with its workspace and does not follow a workspace switch', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const other = path.join(dir, 'workspace-b')
+  const extra = path.join(dir, 'extra')
+  const shared = path.join(dir, 'shared')
+  for (const folder of [other, extra, shared]) fs.mkdirSync(folder)
+  const configFile = path.join(dir, 'config', 'config.json')
+  try {
+    // Workspace A adds a root from the GUI.
+    let ctx = await runServer(dir)
+    try {
+      const added = await ctx.request('/api/workspace/roots', { method: 'POST', body: JSON.stringify({ path: extra, label: 'Extra' }) })
+      assert.equal(added.status, 201, added.text)
+      assert.deepEqual(added.json.roots.map((root) => [root.label, root.scope ?? null]), [[path.basename(dir), null], ['Extra', 'workspace']])
+    } finally {
+      await ctx.close()
+    }
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'))
+    assert.equal(saved.workspaceRoots, undefined, 'the GUI no longer writes the global list')
+    assert.equal(Object.values(saved.workspaceRootsByWorkspace).flat().length, 1)
+
+    // Switching to workspace B (same user config) must not bring it along.
+    ctx = await runServer(dir, { cwd: other })
+    try {
+      const roots = await ctx.request('/api/workspace/roots')
+      assert.deepEqual(roots.json.roots.map((root) => root.id), ['main'])
+    } finally {
+      await ctx.close()
+    }
+
+    // Back in workspace A it is still there.
+    ctx = await runServer(dir)
+    try {
+      const roots = await ctx.request('/api/workspace/roots')
+      assert.deepEqual(roots.json.roots.map((root) => root.label), [path.basename(dir), 'Extra'])
+    } finally {
+      await ctx.close()
+    }
+
+    // A legacy global root (config.json workspaceRoots) shows as global in every
+    // workspace, and removing it from one removes it everywhere without
+    // touching the per-workspace list.
+    fs.writeFileSync(configFile, `${JSON.stringify({ ...saved, workspaceRoots: [{ path: shared, label: 'Shared' }] }, null, 2)}\n`, 'utf8')
+    ctx = await runServer(dir, { cwd: other })
+    try {
+      const roots = await ctx.request('/api/workspace/roots')
+      const global = roots.json.roots.find((root) => root.label === 'Shared')
+      assert.equal(global?.scope, 'global')
+      const removed = await ctx.request(`/api/workspace/roots/${encodeURIComponent(global.id)}`, { method: 'DELETE' })
+      assert.equal(removed.status, 200, removed.text)
+      assert.deepEqual(removed.json.roots.map((root) => root.id), ['main'])
+    } finally {
+      await ctx.close()
+    }
+    const after = JSON.parse(fs.readFileSync(configFile, 'utf8'))
+    assert.equal(after.workspaceRoots, undefined)
+    assert.deepEqual(after.workspaceRootsByWorkspace, saved.workspaceRootsByWorkspace)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('web GUI: orchestration spawns ordinary worker sessions and rejects overlap', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
   const dir = fixture()
   const ctx = await runServer(dir)

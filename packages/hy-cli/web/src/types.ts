@@ -100,6 +100,8 @@ export interface WorkspaceRootView {
   path: string
   label: string
   writable: boolean
+  /** `global`: applies to every workspace (legacy config); `workspace`: this workspace only. */
+  scope?: 'workspace' | 'global'
 }
 
 export interface ConfigSummary {

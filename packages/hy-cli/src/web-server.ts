@@ -33,6 +33,8 @@ import {
   switchableSandboxModes,
   userConfigDir,
   workspaceRootsFor,
+  configuredExtraRoots,
+  workspaceRootsKey,
   type AgentEvent,
   type ApprovalRequest,
   type CliOverrides,
@@ -769,6 +771,25 @@ function roleSummary(role: RoleConfig) {
   }
 }
 
+/** `workspaceRootsByWorkspace` from a raw user config, as a fresh mutable object. */
+function rootsByWorkspace(user: Record<string, unknown>): Record<string, Array<{ id?: string; path: string; label?: string; writable?: boolean }>> {
+  const value = user.workspaceRootsByWorkspace
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const out: Record<string, Array<{ id?: string; path: string; label?: string; writable?: boolean }>> = {}
+  for (const [key, list] of Object.entries(value as Record<string, unknown>)) {
+    if (Array.isArray(list)) out[key] = list.filter((entry) => entry && typeof entry === 'object' && typeof (entry as { path?: unknown }).path === 'string')
+  }
+  return out
+}
+
+function realOrSelf(p: string): string {
+  try {
+    return fs.realpathSync.native(p)
+  } catch {
+    return p
+  }
+}
+
 function configSummary(config: HarnessConfig) {
   return {
     workspace: config.workspaceRoot,
@@ -777,6 +798,7 @@ function configSummary(config: HarnessConfig) {
       path: root.path,
       label: root.label ?? path.basename(root.path),
       writable: root.writable === true,
+      ...(root.scope ? { scope: root.scope } : {}),
     })),
     stateDir: config.stateDir,
     sandbox: config.sandbox,
@@ -2955,7 +2977,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     }
   }
 
-  const refreshWorkspaceRoots = (extras: Array<{ id?: string; path: string; label?: string; writable?: boolean }>): void => {
+  const refreshWorkspaceRoots = (extras: ReturnType<typeof configuredExtraRoots>): void => {
     config.workspaceRoots = workspaceRootsFor(config.workspaceRoot, extras)
     for (const session of sessions.values()) {
       if (session.busy) continue
@@ -4755,21 +4777,25 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
           } catch {
             user = {}
           }
-          const extras = [
-            ...config.workspaceRoots.slice(1).map((root) => ({ ...root })),
-            { path: real, ...(typeof body.label === 'string' ? { label: body.label } : {}), writable: body.writable === true },
-          ]
           try {
             if (body.writable === true) await client.sandboxAddRoot(real)
           } catch (error) {
             json(res, 500, { error: errorMessage(error) })
             return
           }
-          config.workspaceRoots = workspaceRootsFor(config.workspaceRoot, extras)
-          user.workspaceRoots = config.workspaceRoots.slice(1)
+          // Roots added here belong to this workspace only. They used to be
+          // written to the global `workspaceRoots`, which every other workspace
+          // also loads, so an added folder followed the user everywhere.
+          const key = workspaceRootsKey(config.workspaceRoot)
+          const byWorkspace = rootsByWorkspace(user)
+          byWorkspace[key] = [
+            ...(byWorkspace[key] ?? []),
+            { path: real, ...(typeof body.label === 'string' ? { label: body.label } : {}), writable: body.writable === true },
+          ]
+          user.workspaceRootsByWorkspace = byWorkspace
           fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
           fs.writeFileSync(settingsPath, `${JSON.stringify(user, null, 2)}\n`, 'utf8')
-          refreshWorkspaceRoots(user.workspaceRoots as Array<{ id?: string; path: string; label?: string; writable?: boolean }>)
+          refreshWorkspaceRoots(configuredExtraRoots(user, config.workspaceRoot))
           broadcastSessions()
           json(res, 201, { roots: configSummary(config).roots })
           return
@@ -4805,12 +4831,29 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             json(res, 500, { error: errorMessage(error) })
             return
           }
-          const extras = config.workspaceRoots.slice(1).filter((root) => root.id !== id)
-          config.workspaceRoots = workspaceRootsFor(config.workspaceRoot, extras)
-          user.workspaceRoots = config.workspaceRoots.slice(1)
+          // Remove only this path from the list it came from. Rebuilding the list
+          // from the resolved roots would also drop entries that are merely
+          // skipped here (missing folder, same as this workspace's main root)
+          // but still apply to other workspaces.
+          const samePath = (entry: unknown): boolean =>
+            !!entry && typeof entry === 'object' && typeof (entry as { path?: unknown }).path === 'string' &&
+            workspaceRootsKey(realOrSelf((entry as { path: string }).path)) === workspaceRootsKey(root.path)
+          if (root.scope === 'global') {
+            const kept = (Array.isArray(user.workspaceRoots) ? user.workspaceRoots : []).filter((entry) => !samePath(entry))
+            if (kept.length > 0) user.workspaceRoots = kept
+            else delete user.workspaceRoots
+          } else {
+            const key = workspaceRootsKey(config.workspaceRoot)
+            const byWorkspace = rootsByWorkspace(user)
+            const kept = (byWorkspace[key] ?? []).filter((entry) => !samePath(entry))
+            if (kept.length > 0) byWorkspace[key] = kept
+            else delete byWorkspace[key]
+            if (Object.keys(byWorkspace).length > 0) user.workspaceRootsByWorkspace = byWorkspace
+            else delete user.workspaceRootsByWorkspace
+          }
           fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
           fs.writeFileSync(settingsPath, `${JSON.stringify(user, null, 2)}\n`, 'utf8')
-          refreshWorkspaceRoots(user.workspaceRoots as Array<{ id?: string; path: string; label?: string; writable?: boolean }>)
+          refreshWorkspaceRoots(configuredExtraRoots(user, config.workspaceRoot))
           broadcastSessions()
           json(res, 200, { roots: configSummary(config).roots })
           return
