@@ -26,12 +26,81 @@ function inline(value: string): string {
   return text
 }
 
+type ListItem = { indent: number; type: 'ul' | 'ol'; text: string }
+
+function indentOf(value: string): number {
+  let width = 0
+  for (const ch of value) {
+    if (ch === ' ') width += 1
+    else if (ch === '\t') width += 4
+    else break
+  }
+  return width
+}
+
+/** Builds nested <ul>/<ol> from items whose indentation marks the depth. */
+function renderList(items: ListItem[]): string {
+  let i = 0
+  const build = (minIndent: number): string => {
+    let html = ''
+    while (i < items.length && items[i]!.indent >= minIndent) {
+      const { type, indent } = items[i]!
+      html += `<${type}>`
+      while (i < items.length && items[i]!.indent === indent && items[i]!.type === type) {
+        const text = items[i]!.text
+        i += 1
+        const child = i < items.length && items[i]!.indent > indent ? build(items[i]!.indent) : ''
+        html += `<li>${inline(text)}${child}</li>`
+      }
+      html += `</${type}>`
+    }
+    return html
+  }
+  return build(0)
+}
+
+/** Splits a table row on `|`, ignoring pipes inside code spans or escaped as `\|`. */
+function tableCells(line: string): string[] {
+  let row = line.trim()
+  if (row.startsWith('|')) row = row.slice(1)
+  if (row.endsWith('|') && !row.endsWith('\\|')) row = row.slice(0, -1)
+  const cells: string[] = []
+  let cell = ''
+  let inCode = false
+  for (let k = 0; k < row.length; k++) {
+    const ch = row[k]!
+    if (ch === '\\' && row[k + 1] === '|') {
+      cell += '|'
+      k += 1
+    } else if (ch === '`') {
+      inCode = !inCode
+      cell += ch
+    } else if (ch === '|' && !inCode) {
+      cells.push(cell.trim())
+      cell = ''
+    } else cell += ch
+  }
+  cells.push(cell.trim())
+  return cells
+}
+
+const TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/
+
+function tableAlign(cell: string): string {
+  const left = cell.startsWith(':')
+  const right = cell.endsWith(':')
+  if (left && right) return ' style="text-align:center"'
+  if (right) return ' style="text-align:right"'
+  if (left) return ' style="text-align:left"'
+  return ''
+}
+
 /** Small, safe Markdown renderer for chat messages (no raw HTML is accepted). */
 export function renderMarkdown(source: string): string {
   const lines = source.replace(/\r\n?/g, '\n').split('\n')
   const out: string[] = []
   let paragraph: string[] = []
-  let list: { type: 'ul' | 'ol'; items: string[] } | undefined
+  let list: ListItem[] = []
 
   const flushParagraph = (): void => {
     if (paragraph.length === 0) return
@@ -39,20 +108,20 @@ export function renderMarkdown(source: string): string {
     paragraph = []
   }
   const flushList = (): void => {
-    if (!list) return
-    out.push(`<${list.type}>${list.items.map((item) => `<li>${inline(item)}</li>`).join('')}</${list.type}>`)
-    list = undefined
+    if (list.length === 0) return
+    out.push(renderList(list))
+    list = []
   }
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!
-    const fence = /^```([a-zA-Z0-9_+-]*)\s*$/.exec(line)
+    const fence = /^\s*```([a-zA-Z0-9_+-]*)\s*$/.exec(line)
     if (fence) {
       flushParagraph()
       flushList()
       const code: string[] = []
       i += 1
-      while (i < lines.length && !/^```\s*$/.test(lines[i]!)) {
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i]!)) {
         code.push(lines[i]!)
         i += 1
       }
@@ -65,6 +134,30 @@ export function renderMarkdown(source: string): string {
       flushParagraph()
       flushList()
       continue
+    }
+    // GFM table: a header row with pipes, then a delimiter row such as |---|:---:|.
+    const next = lines[i + 1]
+    if (line.includes('|') && next !== undefined && next.includes('-') && TABLE_DELIMITER.test(next)) {
+      const header = tableCells(line)
+      const aligns = tableCells(next).map(tableAlign)
+      if (aligns.length === header.length) {
+        flushParagraph()
+        flushList()
+        const row = (tag: 'th' | 'td', cells: string[]): string =>
+          header.map((_, c) => `<${tag}${aligns[c] ?? ''}>${inline(cells[c] ?? '')}</${tag}>`).join('')
+        const body: string[] = []
+        i += 2
+        while (i < lines.length && lines[i]!.trim() && lines[i]!.includes('|')) {
+          body.push(`<tr>${row('td', tableCells(lines[i]!))}</tr>`)
+          i += 1
+        }
+        i -= 1
+        out.push(
+          `<div class="md-table"><table><thead><tr>${row('th', header)}</tr></thead>` +
+            `${body.length ? `<tbody>${body.join('')}</tbody>` : ''}</table></div>`,
+        )
+        continue
+      }
     }
     const heading = /^(#{1,6})\s+(.+)$/.exec(line)
     if (heading) {
@@ -87,24 +180,15 @@ export function renderMarkdown(source: string): string {
       out.push(`<blockquote>${inline(quote[1]!)}</blockquote>`)
       continue
     }
-    const unordered = /^\s*[-*+]\s+(.+)$/.exec(line)
-    if (unordered) {
+    const item = /^(\s*)(?:([-*+])|\d+[.)])\s+(.+)$/.exec(line)
+    if (item) {
       flushParagraph()
-      if (!list || list.type !== 'ul') {
-        flushList()
-        list = { type: 'ul', items: [] }
-      }
-      list.items.push(unordered[1]!)
+      list.push({ indent: indentOf(item[1]!), type: item[2] ? 'ul' : 'ol', text: item[3]! })
       continue
     }
-    const ordered = /^\s*\d+[.)]\s+(.+)$/.exec(line)
-    if (ordered) {
-      flushParagraph()
-      if (!list || list.type !== 'ol') {
-        flushList()
-        list = { type: 'ol', items: [] }
-      }
-      list.items.push(ordered[1]!)
+    // An indented line right after a list item continues that item.
+    if (list.length > 0 && /^\s+\S/.test(line)) {
+      list[list.length - 1]!.text += ` ${line.trim()}`
       continue
     }
     flushList()

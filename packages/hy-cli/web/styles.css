@@ -423,6 +423,13 @@ code, pre { font-family: var(--mono); }
 .message-body pre.code-block { margin: 8px 0; padding: 12px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--code-bg); overflow-x: auto; }
 .message-body pre.code-block code { padding: 0; border: 0; background: transparent; font-size: 12px; line-height: 1.5; color: var(--text-2); }
 .message-body hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+.message-body ul ul, .message-body ul ol, .message-body ol ul, .message-body ol ol { margin: 4px 0; }
+.message-body .md-table { margin: 8px 0 12px; overflow-x: auto; }
+.message-body table { border-collapse: collapse; font-size: 13px; line-height: 1.5; }
+.message-body th, .message-body td { padding: 6px 12px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+.message-body th { background: var(--panel-2); font-weight: 600; }
+.message-body tr > :first-child { white-space: nowrap; }
+.message-body tbody tr:nth-child(even) td { background: var(--panel); }
 .message-body a { text-decoration: none; }
 .message-body a:hover { text-decoration: underline; }
 
