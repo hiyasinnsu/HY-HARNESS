@@ -8,6 +8,7 @@ import { parseSandboxMode, type CliOverrides, type ProviderKind, type SandboxMod
 import { startWebServer, type WebServerHandle } from '../../hy-cli/dist/web-server.js'
 
 import { chooseStartupWorkspace, usableWorkspace } from './startup.js'
+import { pickUpdate, readStagedInfo, type UpdateCandidateView } from './update-pick.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const preloadPath = path.join(here, '..', 'preload.cjs')
@@ -226,9 +227,14 @@ function readExpectedSha256(staged: string): string | undefined {
   }
 }
 
-function applyUpdate(): { ok: boolean; error?: string; from?: string } {
+type UpdateEvaluation =
+  | { ok: true; current: string; pick: UpdateCandidateView }
+  | { ok: false; error: string; reason?: 'unsupported' | 'none' | 'same' | 'downgrade'; newest?: UpdateCandidateView | undefined }
+
+/** Finds the staged build the self-update would apply, without applying it. */
+function evaluateUpdate(): UpdateEvaluation {
   const portable = process.env.PORTABLE_EXECUTABLE_FILE
-  if (!portable) return { ok: false, error: 'self-update is only available in the portable exe' }
+  if (!portable) return { ok: false, reason: 'unsupported', error: 'self-update is only available in the portable exe' }
   const current = path.resolve(portable)
   let currentStat: fs.Stats
   try {
@@ -236,42 +242,57 @@ function applyUpdate(): { ok: boolean; error?: string; from?: string } {
   } catch {
     return { ok: false, error: `current exe is missing: ${current}` }
   }
-  const currentHash = fileHash(current)
-  const evaluated = stagedUpdateCandidates()
+  let currentHash: string | undefined
+  const sameAsCurrent = (file: string, size: number): boolean => {
+    if (size !== currentStat.size) return false
+    currentHash ??= fileHash(current)
+    return fileHash(file) === currentHash
+  }
+  const evaluated: UpdateCandidateView[] = stagedUpdateCandidates()
     .filter((candidate) => path.resolve(candidate.file).toLowerCase() !== current.toLowerCase() && isPortableExe(candidate.file))
     .map((candidate) => {
       const stat = fs.statSync(candidate.file)
-      const same =
-        stat.size === currentStat.size &&
-        fileHash(candidate.file) === currentHash
-      return { ...candidate, mtime: stat.mtimeMs, same }
+      return { ...candidate, mtime: stat.mtimeMs, same: sameAsCurrent(candidate.file, stat.size), info: readStagedInfo(candidate.file) }
     })
-  // In an explicit next/update folder, every staged build is a candidate, even
-  // when it is identical to the running exe (a fresh identical build is allowed
-  // so the restart path can be tested). Sorting by mtime then prefers the
-  // newest staged build; excluding an identical-but-older staged build used to
-  // let an older different build win and silently downgrade the app.
-  const eligible = evaluated.filter((candidate) =>
-    candidate.staged ? true : candidate.mtime > currentStat.mtimeMs && !candidate.same,
-  )
-  const staged = eligible.sort((a, b) => b.mtime - a.mtime)[0]?.file
-  if (!staged) {
-    if (evaluated.some((candidate) => candidate.same)) {
-      return {
-        ok: false,
-        error:
-          'the staged update is identical to the running version and is not newer. Run pnpm desktop:package:next again; it creates a timestamped staged exe.',
-      }
-    }
+  const result = pickUpdate(app.getVersion(), currentStat.mtimeMs, evaluated)
+  if (result.ok) return { ok: true, current, pick: result.pick }
+  if (result.reason === 'downgrade') {
     return {
       ok: false,
-      error:
-        'no staged portable exe found. Run pnpm desktop:package:next, then put the timestamped exe in release/next (or HY-HARNESS.next.exe next to the running exe).',
+      reason: 'downgrade',
+      newest: result.newest,
+      error: `the staged build is older (${result.newest?.info.version ?? '?'}) than the running version ${app.getVersion()}; it was not applied.`,
     }
   }
+  if (result.reason === 'same') {
+    return { ok: false, reason: 'same', error: 'the staged build is identical to the running one. Run pnpm release:local to stage a new build.' }
+  }
+  return { ok: false, reason: 'none', error: 'no staged build found. Run pnpm release:local (it stages into release/next while the app is running).' }
+}
+
+/** For the renderer's "update ready" banner: what would be applied, if anything. */
+function checkUpdate(): { available: boolean; version?: string; commit?: string; builtAt?: string; current: string; reason?: string } {
+  const evaluation = evaluateUpdate()
+  if (!evaluation.ok) return { available: false, current: app.getVersion(), ...(evaluation.reason ? { reason: evaluation.reason } : {}) }
+  const info = evaluation.pick.info
+  return {
+    available: true,
+    current: app.getVersion(),
+    ...(info.version ? { version: info.version } : {}),
+    ...(info.commit ? { commit: info.commit } : {}),
+    builtAt: info.builtAt ?? new Date(evaluation.pick.mtime).toISOString(),
+  }
+}
+
+function applyUpdate(): { ok: boolean; error?: string; from?: string } {
+  const evaluation = evaluateUpdate()
+  if (!evaluation.ok) return { ok: false, error: evaluation.error }
+  const current = evaluation.current
+  const staged = evaluation.pick.file
   // WP-53: `hy update fetch` (or the web server's /api/update/fetch) leaves the
-  // verified installer plus a `.sha256` sidecar here; the swap verifies it again.
-  const expectedSha256 = readExpectedSha256(staged)
+  // verified installer plus a `.sha256` sidecar here; local staged builds get
+  // one from tag-next-artifact.mjs. The swap verifies the copy against it.
+  const expectedSha256 = readExpectedSha256(staged) ?? evaluation.pick.info.sha256
   const updaterSource = path.join(app.getAppPath(), 'packages', 'desktop', 'update.ps1')
   const registerSource = path.join(app.getAppPath(), 'packages', 'desktop', 'update-register.ps1')
   if (!fs.existsSync(updaterSource) || !fs.existsSync(registerSource)) {
@@ -634,6 +655,7 @@ if (!app.requestSingleInstanceLock()) {
     return true
   })
   ipcMain.handle('update:apply', () => applyUpdate())
+  ipcMain.handle('update:check', () => checkUpdate())
   ipcMain.handle('app:versions', () => ({
     app: app.getVersion(),
     electron: process.versions.electron ?? '',

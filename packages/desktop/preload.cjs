@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('hyDesktop', {
   showItemInFolder: (filePath) => ipcRenderer.invoke('shell:showItemInFolder', filePath),
   notify: (title, body) => ipcRenderer.invoke('app:notify', title, body),
   applyUpdate: () => ipcRenderer.invoke('update:apply'),
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
   pickPluginFile: () => ipcRenderer.invoke('plugins:pick'),
   versions: () => ipcRenderer.invoke('app:versions'),
   onMenu: (callback) => {

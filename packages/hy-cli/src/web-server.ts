@@ -9,6 +9,7 @@ import type { AddressInfo } from 'node:net'
 import {
   MemoryStore,
   HARNESS_VERSION,
+  buildInfo,
   canonicalWorkspace,
   loadConfig,
   parseSandboxMode,
@@ -3322,6 +3323,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
           const events = readEvents(logFile)
           json(res, 200, {
             version: HARNESS_VERSION,
+            // Which build this is (commit, build time), so two local builds of
+            // the same version can be told apart in the sidebar.
+            build: buildInfo(),
             desktop: options.desktop === true,
             web: {
               tls: secure,

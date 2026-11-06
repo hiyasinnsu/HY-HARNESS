@@ -136,7 +136,7 @@ Playwright / agent-desktop MCP servers are bundled.
 
 The file name is deliberately fixed: an update replaces the running exe in
 place, so the name must not change between releases. The version is shown in
-the sidebar (`HY-HARNESS / Desktop · v0.4.0`), reported by
+the sidebar (`HY-HARNESS / Desktop · v0.4.1 · <commit> · <build time>`), reported by
 `GET /api/bootstrap`, and published in the signed release feed.
 
 The executable is not code-signed, so Windows SmartScreen may show a warning.
@@ -144,18 +144,29 @@ For distribution, sign it with your own code-signing certificate.
 
 ### Portable exe self-update
 
-Build a staged update without touching the running portable exe:
+One command builds everything (Rust release binaries, TypeScript, version
+check, unit tests) and packages the result:
 
 ```powershell
-pnpm desktop:package:next
-# release\next\HY-HARNESS-next-<timestamp>.exe
+pnpm release:local                 # same version, a new build
+pnpm release:local --bump patch    # 0.4.1 -> 0.4.2 in every package.json and version.ts
+# options: --bump minor|major|x.y.z, --skip-tests, --stage, --replace
 ```
 
-In the running portable app, open **Settings → Update → Restart and apply
-update**. The app registers an interactive scheduled task and quits. The task
-waits for the old process to exit, keeps the old exe as
-`*.bak-<timestamp>.exe`, replaces it with the staged build, and restarts with the
-same workspace. Running turns are interrupted. The task runs from
+While the app is running it stages the build as
+`release\next\HY-HARNESS-<version>-<YYYYMMDD-HHMM>.exe` with a `.sha256` and a
+`.json` (version, commit, build time) next to it; otherwise it writes
+`release\HY-HARNESS.exe`. The sidebar shows which build is running
+(`v0.4.1 · bd1b0ae · 11/06 06:22`; `+` = built with uncommitted changes).
+
+The running app checks for a staged build on start and when its window regains
+focus, and shows **Update ready** in the sidebar (also **Settings → Update →
+Restart and apply update**). A higher version wins; the same version is applied
+only as a newer rebuild; an older version is refused, never installed. The app
+registers an interactive scheduled task and quits. The task waits for the old
+process to exit, keeps the old exe as `*.bak-<timestamp>.exe` (only the newest
+backup is kept), replaces it with the staged build, verifies its SHA-256, and
+restarts with the same workspace. Running turns are interrupted. The task runs from
 `C:\Users\Public\hy-harness-update`, outside the portable app's process job and
 temporary extraction directory, and removes itself after starting the new exe.
 The updater log is `C:\Users\Public\hy-harness-update\update.log`.

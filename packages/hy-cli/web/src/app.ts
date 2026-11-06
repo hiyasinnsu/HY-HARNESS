@@ -42,6 +42,7 @@ import { orchestrationIntent } from './orchestration-intent.js'
 import { SCROLL_ANCHOR_AT_BOTTOM, anchorAfterRender, captureAnchor, type ScrollAnchor } from './scroll-anchor.js'
 import { entryMotionKey, settledFlags, wrapEntryHtml } from './entry-motion.js'
 import { nextTheme, resolveTheme, themeToggleView } from './theme.js'
+import { buildLabel } from './build-label.js'
 import { caretAfterRender, composerDraftKey, readComposerDraft, shouldRebuildComposer, shouldStartSessionOnFocus, writeComposerDraft, type ComposerSnapshot } from './composer-draft.js'
 import { Terminal } from '../vendor/xterm.mjs'
 import { FitAddon } from '../vendor/addon-fit.mjs'
@@ -1484,7 +1485,7 @@ function renderShell(): void {
     <aside class="sidebar" id="sidebar">
       <div class="brand-row">
         <div class="brand-mark"><img src="/HY_icon.png" alt="HY-HARNESS"></div>
-        <div class="brand-text"><strong>HY-HARNESS</strong><span>${isDesktop() ? 'Desktop' : 'Web'} · v${escapeHtml(state.boot?.version ?? 'unknown')}</span></div>
+        <div class="brand-text"><strong>HY-HARNESS</strong><span title="${escapeHtml(buildLabel(state.boot?.version, state.boot?.build).title)}">${isDesktop() ? 'Desktop' : 'Web'} · ${escapeHtml(buildLabel(state.boot?.version, state.boot?.build).text)}</span></div>
         <button class="icon-btn sidebar-collapse" data-action="toggle-sidebar" title="Toggle sidebar">${icon('sidebar', 16)}</button>
       </div>
       <button class="new-chat" data-action="new-session">${icon('plus', 16)} <span>${tr('newChat')}</span><kbd>Ctrl N</kbd></button>
@@ -1495,6 +1496,7 @@ function renderShell(): void {
       <div class="search-box">${icon('search', 16)}<input id="session-search" placeholder="${tr('searchSessions')}" autocomplete="off" value="${escapeHtml(state.search)}"></div>
       <div class="session-list" id="session-list"></div>
       <div class="sidebar-footer">
+        <div id="update-banner">${updateBannerHtml()}</div>
         <div class="workspace-row">
           <button class="workspace-chip" data-action="choose-workspace" title="${escapeHtml(state.boot?.workspace.root ?? '')}">${icon('folder', 16)}<span>${escapeHtml(workspaceName())}</span>${isDesktop() ? icon('chevron-down', 14) : ''}</button>
           <button class="icon-btn workspace-add-root" data-action="open-roots" title="${tr('addRoot')}">${icon('plus', 16)}</button>
@@ -5375,6 +5377,35 @@ async function fetchUpdate(): Promise<void> {
   }
 }
 
+/** A staged build the desktop app can switch to (from `update:check`). */
+let updateReady: { version?: string | undefined; commit?: string | undefined; builtAt?: string | undefined } | undefined
+let lastUpdateCheck = 0
+
+function updateBannerHtml(): string {
+  if (!updateReady) return ''
+  const label = buildLabel(updateReady.version, { commit: updateReady.commit, builtAt: updateReady.builtAt }).text
+  return `<button class="update-banner" data-action="apply-update" title="${escapeHtml(tr('applyUpdate'))}">${icon('refresh', 14)}<span><strong>${tr('updateReady')}</strong><small>${escapeHtml(label)}</small></span></button>`
+}
+
+/**
+ * Asks the desktop shell whether a staged build is ready (on start and when
+ * the window regains focus, at most once a minute), so a new build announces
+ * itself instead of waiting behind Settings › Update.
+ */
+async function checkForUpdate(force = false): Promise<void> {
+  if (!window.hyDesktop?.checkUpdate) return
+  if (!force && Date.now() - lastUpdateCheck < 60_000) return
+  lastUpdateCheck = Date.now()
+  try {
+    const result = await window.hyDesktop.checkUpdate()
+    updateReady = result.available ? { version: result.version, commit: result.commit, builtAt: result.builtAt } : undefined
+  } catch {
+    updateReady = undefined
+  }
+  const el = document.getElementById('update-banner')
+  if (el) el.innerHTML = updateBannerHtml()
+}
+
 async function applyUpdate(): Promise<void> {
   if (!window.hyDesktop?.applyUpdate) {
     toast(tr('updateDesktopOnly'), 'error')
@@ -6377,6 +6408,9 @@ async function init(): Promise<void> {
   window.setInterval(() => {
     if (document.visibilityState === 'visible') renderSidebarSessions()
   }, 60_000)
+  // A staged build announces itself: checked now and when the window regains focus.
+  void checkForUpdate(true)
+  window.addEventListener('focus', () => void checkForUpdate())
   // WP-61: `system` follows the OS while the app is open.
   try {
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {

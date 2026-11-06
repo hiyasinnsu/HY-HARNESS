@@ -70,8 +70,8 @@ A bare URL without the token is 401; a request from another host is 403 unless
   `HY_UPDATE_FEED`, or add `update.feed` to `config.json`.
 - **`signature verification failed`** — the feed is not signed by the configured
   key, or the entry was edited. Re-sign with `hy update sign`.
-- **"the staged update is identical to the running version"** — run
-  `pnpm desktop:package:next` (it creates a timestamped exe) and try again.
+- **"the staged build is identical to the running one"** — run
+  `pnpm release:local` to stage a new build. **"the staged build is older … it was not applied"** means the staged version is lower than the running one (downgrades are refused); bump the version or delete the old staged exe.
 - **The swap failed** — read
   `C:\Users\Public\hy-harness-update\update.log`: `progress n/6` shows the last
   step, and `rollback:` explains a restored backup (exit code 5 is a checksum
@@ -149,7 +149,7 @@ URL は 401、別ホストからのリクエストは 403 です（`--trusted-ho
 
 - `no release feed configured`: `--feed`、`HY_UPDATE_FEED`、`update.feed` のいずれか。
 - `signature verification failed`: 鍵が違うか、エントリが編集されています。
-- `the staged update is identical…`: `pnpm desktop:package:next` で新しい exe を作ります。
+- `the staged build is identical…`: `pnpm release:local` で新しいビルドを作ります。`the staged build is older…` は置いてあるビルドの版が動いている版より古いという意味で、ダウングレードは拒否されます（版を上げるか、古いビルドを消します）。
 - 差し替え失敗: `C:\Users\Public\hy-harness-update\update.log` を見ます。
   `progress n/6` が最後の段階、`rollback:` が復元の理由（終了コード 5 は
   ハッシュ不一致）。

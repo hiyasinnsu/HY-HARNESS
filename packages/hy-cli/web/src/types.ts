@@ -154,6 +154,8 @@ export interface SandboxInfo {
 
 export interface Bootstrap {
   version: string
+  /** Which build is running (build-info.json); empty when unknown. */
+  build?: { commit?: string; dirty?: boolean; builtAt?: string }
   desktop: boolean
   workspace: { root: string; name: string; stateDir: string; roots?: WorkspaceRootView[] }
   config: ConfigSummary
@@ -564,6 +566,8 @@ export interface DesktopBridge {
   showItemInFolder(path: string): Promise<void>
   notify(title: string, body: string): Promise<boolean>
   applyUpdate(): Promise<{ ok: boolean; error?: string; from?: string }>
+  /** Whether a staged build would be applied (older desktop shells lack it). */
+  checkUpdate?(): Promise<{ available: boolean; version?: string; commit?: string; builtAt?: string; current: string; reason?: string }>
   pickPluginFile(): Promise<string | null>
   onMenu(cb: (action: string) => void): () => void
   versions?(): Promise<Record<string, string>>

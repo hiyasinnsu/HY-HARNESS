@@ -13,6 +13,7 @@ directories:
 # repository layout instead of bundling a second entry point.
 files:
   - package.json
+  - build-info.json
   - packages/desktop/dist/**/*
   - packages/desktop/preload.cjs
   - packages/desktop/update.mjs

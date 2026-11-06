@@ -117,6 +117,21 @@ if ($ExpectedSha256) {
 }
 
 Write-Step 5 "replaced $OldExe with $NewExe"
+
+# Each backup is a full ~180 MB exe. Keep only the newest one (the build that
+# was just replaced) so a rollback stays possible without filling the drive.
+try {
+  $dir = [System.IO.Path]::GetDirectoryName($OldExe)
+  $name = [System.IO.Path]::GetFileName($OldExe)
+  $old = Get-ChildItem -LiteralPath $dir -Filter ($name + '.bak-*.exe') -File -ErrorAction Stop |
+    Sort-Object LastWriteTime -Descending | Select-Object -Skip 1
+  foreach ($file in $old) {
+    Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+    Write-UpdateLog ("removed old backup " + $file.Name)
+  }
+} catch {
+  Write-UpdateLog ("backup cleanup skipped: " + $_.Exception.Message)
+}
 Write-Step 6 "starting the new build"
 Start-Harness $OldExe
 Remove-UpdateTask

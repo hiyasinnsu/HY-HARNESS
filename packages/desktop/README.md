@@ -25,9 +25,12 @@ a workspace picker, a native menu, notifications and the portable self-update.
 
 ## Self-update
 
-`pnpm desktop:package` builds the portable exe; `pnpm desktop:package:next`
-builds a staged one under `release\next`. The app finds it, registers a
-scheduled task, quits, and the task swaps the exe and restarts it. See
+`pnpm release:local` builds everything (Rust release binaries, TypeScript,
+checks, tests) and packages it, staged under `release\next` while the app runs;
+`pnpm desktop:package` / `pnpm desktop:package:next` are the single steps. The
+app finds a staged build (picked by version; downgrades are refused), shows
+"Update ready" in the sidebar, registers a scheduled task, quits, and the task
+swaps the exe, verifies its SHA-256, keeps one backup and restarts it. See
 [../README.md](../README.md) and `docs/troubleshooting.md`.
 
 ## Build and run

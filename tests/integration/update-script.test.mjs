@@ -58,6 +58,36 @@ test('self-update PowerShell script swaps the exe and keeps a backup (dry run)',
   }
 })
 
+test('the PowerShell swap keeps only the newest backup', { skip: skipReason('sync') }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-update-prune-'))
+  try {
+    const oldExe = path.join(dir, 'HY-HARNESS.exe')
+    const newExe = path.join(dir, 'HY-HARNESS-0.4.2-20261106-0622.exe')
+    fs.writeFileSync(oldExe, 'OLD', 'utf8')
+    fs.writeFileSync(newExe, 'NEW', 'utf8')
+    // Two backups left by earlier updates (~180 MB each in real life).
+    for (const [stamp, ageMs] of [['20261101000000', 86_400_000 * 5], ['20261102000000', 86_400_000 * 4]]) {
+      const file = path.join(dir, `HY-HARNESS.exe.bak-${stamp}.exe`)
+      fs.writeFileSync(file, 'BACKUP', 'utf8')
+      const when = new Date(Date.now() - ageMs)
+      fs.utimesSync(file, when, when)
+    }
+    const result = spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', updaterPs1, '-OldExe', oldExe, '-NewExe', newExe, '-ProcessId', '999999', '-Log', path.join(dir, 'update.log'), '-DryRun'],
+      { encoding: 'utf8', timeout: 30_000 },
+    )
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    assert.equal(fs.readFileSync(oldExe, 'utf8'), 'NEW')
+    const backups = fs.readdirSync(dir).filter((name) => name.startsWith('HY-HARNESS.exe.bak-'))
+    assert.equal(backups.length, 1, backups.join(', '))
+    assert.equal(fs.readFileSync(path.join(dir, backups[0]), 'utf8'), 'OLD', 'the kept backup is the build just replaced')
+    assert.match(fs.readFileSync(path.join(dir, 'update.log'), 'utf8'), /removed old backup HY-HARNESS\.exe\.bak-20261101000000\.exe/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('self-update swaps the old portable exe and keeps a backup (dry run)', { skip: skipReason('sync') }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-update-'))
   try {
