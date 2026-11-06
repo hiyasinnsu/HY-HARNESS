@@ -5751,6 +5751,21 @@ async function applyUpdate(): Promise<void> {
     toast(tr('updateDesktopOnly'), 'error')
     return
   }
+  // Nothing new staged is not a failure: say what is going on instead.
+  if (window.hyDesktop.checkUpdate) {
+    try {
+      const check = await window.hyDesktop.checkUpdate()
+      if (!check.available) {
+        const reason = check.reason === 'same' ? 'updateNothingSame' : check.reason === 'downgrade' ? 'updateNothingOlder' : check.reason === 'none' ? 'updateNothingStaged' : undefined
+        if (reason) {
+          toast(tr(reason, { version: check.current }), 'info')
+          return
+        }
+      }
+    } catch {
+      // Fall through to the apply call, which reports its own error.
+    }
+  }
   if (!window.confirm(tr('updateConfirm'))) return
   try {
     const result = await window.hyDesktop.applyUpdate()
