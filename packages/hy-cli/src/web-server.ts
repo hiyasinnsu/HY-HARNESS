@@ -4299,13 +4299,21 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
           }
 
           if (sub === 'undo' && method === 'POST') {
-            if (session.kind !== 'chat') {
-              json(res, 409, { error: 'undo is unavailable for orchestration sessions; a shared workspace has one checkpoint owner' })
+            // CP-33: `{ toTurn }` rewinds several turns at once (Esc Esc).
+            const undoBody = await readBody()
+            // Workers share the orchestrator's workspace and own its checkpoints,
+            // so an orchestrator may only drop turns from its conversation
+            // (resend / edit); restoring files stays a plain-chat feature.
+            if (session.kind === 'worker' || (session.kind === 'orchestrator' && undoBody.keepFiles !== true)) {
+              json(res, 409, {
+                error:
+                  session.kind === 'worker'
+                    ? 'undo is unavailable for worker sessions'
+                    : 'an orchestration session can only rewind its conversation (keepFiles: true); workers share the workspace, so files are not restored',
+              })
               return
             }
             const conv = ensureConversation(session)
-            // CP-33: `{ toTurn }` rewinds several turns at once (Esc Esc).
-            const undoBody = await readBody()
             if (undoBody.toTurn !== undefined && (!Number.isInteger(undoBody.toTurn) || Number(undoBody.toTurn) < 1)) {
               json(res, 400, { error: 'toTurn must be a turn number (1 or more)' })
               return

@@ -21,6 +21,8 @@ export interface MessageContext {
   raw?: boolean
   /** User messages may be resent / edited (a chat session that is not running a turn). */
   editable?: boolean
+  /** Editing cannot restore files (an orchestrator: workers share the workspace). */
+  conversationOnly?: boolean
 }
 
 export interface UserMessageEntry {
@@ -74,7 +76,7 @@ export function renderUserMessage(entry: UserMessageEntry, context: MessageConte
 export function renderUserMessageEditor(entry: UserMessageEntry, context: MessageContext): string {
   const t = (key: string) => escapeHtml(translate(context.locale, key))
   const id = escapeHtml(entry.id)
-  return `<article class="message user editing" data-entry-id="${id}"><div class="message-edit"><textarea class="message-edit-input" id="edit-input-${id}" rows="4">${escapeHtml(entry.text)}</textarea><label class="message-edit-option"><input type="checkbox" id="edit-restore-${id}"> ${t('editRestoreFiles')}</label><div class="message-edit-hint">${t('editMessageNote')}</div><div class="message-edit-actions"><button class="btn ghost" data-action="edit-cancel" data-entry-id="${id}">${t('cancel')}</button><button class="btn primary" data-action="edit-send" data-entry-id="${id}">${icon('send', 14)} ${t('editSend')}</button></div></div></article>`
+  return `<article class="message user editing" data-entry-id="${id}"><div class="message-edit"><textarea class="message-edit-input" id="edit-input-${id}" rows="4">${escapeHtml(entry.text)}</textarea>${context.conversationOnly ? '' : `<label class="message-edit-option"><input type="checkbox" id="edit-restore-${id}"> ${t('editRestoreFiles')}</label>`}<div class="message-edit-hint">${t('editMessageNote')}</div><div class="message-edit-actions"><button class="btn ghost" data-action="edit-cancel" data-entry-id="${id}">${t('cancel')}</button><button class="btn primary" data-action="edit-send" data-entry-id="${id}">${icon('send', 14)} ${t('editSend')}</button></div></div></article>`
 }
 
 /** An assistant turn: the answer, its time and the copy/feedback actions. */

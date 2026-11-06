@@ -1830,3 +1830,34 @@ test('web GUI: rewind with keepFiles keeps the work on disk; the history export 
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('web GUI: an orchestrator can resend / edit (conversation only), never restore files', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir)
+  try {
+    const started = await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })
+    assert.equal(started.status, 201, started.text)
+    const runId = started.json.runId
+    await turn(ctx, runId, 'SAY first')
+    await turn(ctx, runId, 'SAY second')
+    const undo = (body) => ctx.request(`/api/sessions/${encodeURIComponent(runId)}/undo`, { method: 'POST', body: JSON.stringify(body) })
+
+    const restore = await undo({ toTurn: 2 })
+    assert.equal(restore.status, 409, 'restoring files is refused: workers share the workspace')
+    assert.match(restore.json.error, /keepFiles/)
+
+    const rewound = await undo({ toTurn: 2, keepFiles: true })
+    assert.equal(rewound.status, 200, rewound.text)
+    assert.match(rewound.json.result, /removed turn 2 from the conversation; files were kept/)
+    const users = rewound.json.entries.filter((e) => e.kind === 'user')
+    assert.equal(users.length, 1)
+    assert.match(users[0].text, /SAY first/)
+    await turn(ctx, runId, 'SAY edited')
+    const after = (await snapshot(ctx, runId)).entries.filter((e) => e.kind === 'user')
+    assert.deepEqual(after.map((e) => e.turn), [1, 2])
+    assert.match(after[1].text, /SAY edited/)
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -67,6 +67,8 @@ test('the inline editor holds the escaped text, the restore option and send / ca
   assert.match(html, /class="message user editing"/)
   assert.match(html, /<textarea class="message-edit-input" id="edit-input-msg-8" rows="4">fix &lt;b&gt;this&lt;\/b&gt;<\/textarea>/)
   assert.match(html, /id="edit-restore-msg-8"/)
+  const orchestrator = renderUserMessageEditor({ id: 'msg-8', text: 'x', ts, turn: 1 }, { ...context, conversationOnly: true })
+  assert.doesNotMatch(orchestrator, /edit-restore/, 'an orchestrator never restores files')
   assert.match(html, /data-action="edit-send" data-entry-id="msg-8"/)
   assert.match(html, /data-action="edit-cancel" data-entry-id="msg-8"/)
 })

@@ -387,9 +387,11 @@ function loadStoredShortcuts(): ShortcutMap {
 
 /** WP-64: the display switches `message-view.ts` needs. */
 function messageContext(): MessageContext {
-  // Resend / edit rewind the conversation, which only ordinary chats support.
-  const editable = (state.current?.state.kind ?? 'chat') === 'chat' && !state.busy && currentRunId() !== undefined
-  return { locale: state.locale, mask: state.maskSecrets, raw: state.rawTranscript, editable }
+  // Resend / edit rewind the conversation: chats and orchestrators (whose
+  // files are never restored, since workers share the workspace), not workers.
+  const kind = state.current?.state.kind ?? 'chat'
+  const editable = kind !== 'worker' && !state.busy && currentRunId() !== undefined
+  return { locale: state.locale, mask: state.maskSecrets, raw: state.rawTranscript, editable, conversationOnly: kind === 'orchestrator' }
 }
 
 let toastId = 0
