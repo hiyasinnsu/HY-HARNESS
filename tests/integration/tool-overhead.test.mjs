@@ -1,4 +1,6 @@
-// Phase 5 exit (design Goal 2): tool + SDK overhead ≤ 1,200 tokens per request,
+// Phase 5 exit (design Goal 2): tool + SDK overhead ≤ 12,000 tokens per request
+// (was 1,200; raised tenfold on 2026-11-06 at the user's request — the old
+// budget left ~5 tokens of headroom and failed on run-to-run noise),
 // measured with the provider's reported usage. Each available provider is
 // measured as (prompt tokens with the tool section) − (without it). A random
 // nonce at the very start of each prompt keeps a provider's prefix cache from
@@ -10,7 +12,7 @@ import { randomBytes } from 'node:crypto'
 const core = await import(new URL('../../packages/core/dist/index.js', import.meta.url).href)
 const { createProvider, renderToolPrompt } = core
 
-const BUDGET = 1_200
+const BUDGET = 12_000
 const OLLAMA = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434'
 const MODEL = process.env.HY_OVERHEAD_MODEL ?? 'qwen2.5:3b'
 

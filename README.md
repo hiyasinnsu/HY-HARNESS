@@ -489,7 +489,7 @@ pnpm bench:startup         # startup / one-turn baseline (docs/bench-baseline.md
   calls). Its `tools` SDK (`readFile`, `applyPatch`, `shell`, `search.*`,
   `jobs.*`) is generated from the same JSON Schemas that validate every call;
   the four wire tools measure about 320 prompt tokens and tools + SDK about
-  1,140 tokens (budget 1,200) with `qwen2.5:3b`.
+  1,200 tokens (budget 12,000) with `qwen2.5:3b`.
 - Large tool outputs are spilled to the state directory (readable via
   `read_file("spill://…")`); at 75 % of the context window old outputs are
   pruned and older turns summarized by the `compactor` role. `AGENTS.md`,

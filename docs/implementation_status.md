@@ -124,7 +124,7 @@ prefix_rule(pattern = [["jest", "vitest"]], sandbox = "low-integrity", match = [
   - 直接呼べるツールは当初 `read_file`、`apply_patch`、`shell`、`run_code` の 4 つだった（Phase 5 時点）。現在は CP-10 / CP-14 で `search_glob` / `search_grep` などが直接ツールになり、初期プロンプトの一覧は §「不変条件」と `tests/regression/golden.test.mjs` の K9 が正。`tools.jobs.{status,output,wait,kill}` と `tools.rationale.*` は今も `run_code` の中でだけ使え、モデルが直接呼ぶと拒否する。
   - 引数の検査は、型、必須、enum、最小値を守らせる。知らないプロパティは無視する（小規模モデルが余計なものを付けるため）。`apply_patch` の `path` は `file` の別名として受け付ける（プロンプトのトークンを増やさないため、スキーマには載せない）。
 - **検索**: `glob`（`*`、`**`、`?`、`{a,b}`）と `grep`（JavaScript の正規表現、`glob` で絞り込み）。`.git`、`node_modules`、`.hy-harness` には入らず、リンクはたどらない。`grep` は 1 MB 超とバイナリを飛ばす。
-- **トークン量（実測）**: `qwen2.5:3b` のトークナイザーで、直接呼べる 4 ツールが約 320、SDK を含めて約 1,140 トークン（設計の上限 1,200。Phase 6 以降のツール追加後。SDK は同じ型を `type Job` / `type NoteCount` として 1 回だけ宣言して参照する）。Ollama が使えるときに `tool-overhead.test.mjs` が毎回測る。
+- **トークン量（実測）**: `qwen2.5:3b` のトークナイザーで、直接呼べる 4 ツールが約 320、SDK を含めて約 1,200 トークン（上限は 2026-11-06 にユーザー指示で 1,200 → 12,000 に引き上げ。Phase 6 以降のツール追加後。SDK は同じ型を `type Job` / `type NoteCount` として 1 回だけ宣言して参照する）。Ollama が使えるときに `tool-overhead.test.mjs` が毎回測る。
 
 ### 2.5 PTC ワーカー（`run_code`、Phase 5 の AppContainer 化、案 F）
 
@@ -199,7 +199,7 @@ prefix_rule(pattern = [["jest", "vitest"]], sandbox = "low-integrity", match = [
   - 既存 4 件（`hy run --mock`、`policy-test`、`ralph` → `undo`、`run_code`）
   - `ptc-appcontainer.test.mjs` 9 件
   - `win10-sandbox.test.mjs` 5 件（confined の子プロセスは専用デスクトップで起動し、`node.exe` / `powershell.exe` / AppContainer で `0xC0000142` が出ないことを確認。ユーザーのデスクトップは変更しない）
-  - `tool-overhead.test.mjs` 1 件（実測: 直接ツール 約 320 トークン、SDK 込み 約 1,140 トークン ≤ 上限 1,200）
+  - `tool-overhead.test.mjs` 1 件（実測: 直接ツール 約 320 トークン、SDK 込み 約 1,200 トークン ≤ 上限 12,000）
   - `guardian.test.mjs` 3 件
   - `web-ui.test.mjs` 8 件（認証 / bootstrap / ファイル / 設定、PWA マニフェストと `mcp-call` 制限、永続PTYの起動 / SSE / 入力 / `cd` 保持 / リサイズ / クリア / 停止、プラグインのカタログと再読み込み、スケジュール / Webhook、チャット / ゴール / サブエージェント / バックグラウンドジョブ / SSE / Trace / ターミナル、実行中 shell のキャンセル、承認拒否、Verifier loop、オーケストレーションの spawn / スコープ重複拒否 / ワーカーのサブエージェント）
   - `automation-mcp.test.mjs` 1 件（Playwright MCP と agent-desktop MCP の起動・ツール検出）
@@ -237,7 +237,7 @@ prefix_rule(pattern = [["jest", "vitest"]], sandbox = "low-integrity", match = [
 - **概要**: DSH との差分分析（[dsh-gap-analysis.md](dsh-gap-analysis.md)、111 項目）から 106 の不足を整理し、24 の作業パッケージに落として M0〜M6 を実装した。各 WP の成果物・設計判断・検証は [dsh-adoption-progress.md](dsh-adoption-progress.md) と [project.md](../project.md) §5.
   に記録している（計画は [dsh-adoption-plan.md](dsh-adoption-plan.md)）。
 - **主な追加**: 実行中ステアリングと永続ターンキュー、バックグラウンドのサブエージェント、`todo_write`/`present`、`write_file`/`edit_file`/`read_image`、永続シェル、FTS5 のセッション検索、Anthropic/Responses プロバイダとモデルカタログ、バンドル、API 契約、ACP、SDK（TS/Python）、文書プレビュー、署名付き更新と初回ウィザード、生成タイトル・計測・fork・`@session` 参照・評価・ショートカット・テーマ・Open In・シークレットマスク・オプトイン OTel。
-- **不変条件**: K1〜K14 は維持。組み込みツールは wire 19（うち 5 つは `tool_search` で遅延ロードする deferred。CP-10）。初期プロンプトは直接 14 + `tool_search`（deferred があるとき）。サンドボックスの既定は `workspace-write`（2026-11-05 の CP-01）。**初期**プロンプト（直接ツール + PTC SDK）は 1,200 トークン以内。
+- **不変条件**: K1〜K14 は維持。組み込みツールは wire 19（うち 5 つは `tool_search` で遅延ロードする deferred。CP-10）。初期プロンプトは直接 14 + `tool_search`（deferred があるとき）。サンドボックスの既定は `workspace-write`（2026-11-05 の CP-01）。**初期**プロンプト（直接ツール + PTC SDK）は 12,000 トークン以内（2026-11-06 に 1,200 から引き上げ）。
 - **未実施（運用）**: 実機での `pnpm desktop:package` とコード署名、外部プロバイダでの有償実走（この環境の DeepSeek キーは残高不足）、ワーカーごとの `git worktree`。
 
 ---

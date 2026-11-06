@@ -624,7 +624,8 @@ interface NsNode {
  * `mirrored` names wire tools whose full signature is already in the same
  * prompt. Those SDK functions are listed once as `tools.x = wire_name`
  * instead of repeating the signature and description: K9 keeps the initial
- * tool prompt within 1,200 tokens, and the repetition alone cost ~300.
+ * tool prompt small (budget 12,000 tokens; 1,200 until 2026-11-06), and the
+ * repetition alone cost ~300.
  */
 export function renderSdk(
   specs: readonly ToolSpec[] = TOOL_SPECS,
