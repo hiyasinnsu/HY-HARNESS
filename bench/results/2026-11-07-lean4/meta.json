@@ -1,0 +1,30 @@
+{
+  "stamp": "2026-11-07-lean4",
+  "model": "deepseek-v4.1-flash",
+  "effort": "max",
+  "runs": 10,
+  "harnesses": [
+    "hy-lean3",
+    "hy-lean4"
+  ],
+  "tasks": [
+    {
+      "id": "implement",
+      "prompt": "src/stats.js に median(values)（中央値）と mode(values)（最頻値。最多が複数あれば最小の値）を追加し、test/stats.test.js にテストを足して。空配列は TypeError にすること。最後に npm test の stats のテストが通ることを確認して。"
+    },
+    {
+      "id": "bugfix",
+      "prompt": "npm test を実行すると format のテストが落ちる。原因を特定して src/format.js を直して。テストファイルは変更しないこと。"
+    },
+    {
+      "id": "cli",
+      "prompt": "bin/stats.js に CLI を追加して。`node bin/stats.js 1 2 3 4` で sum, mean, median, mode を src/format.js の formatTable で表示する（ラベルは sum / mean / median / mode）。数値でない引数があれば標準エラーにメッセージを出して終了コード 1 で終わる。テストも追加して、npm test が全部通ることを確認して。"
+    },
+    {
+      "id": "docs",
+      "prompt": "README.md の Functions に追加した関数を追記し、CLI の使い方の節も追加して。最後に、変更したファイルの一覧と npm test の結果を短く報告して。"
+    }
+  ],
+  "host": "DESKTOP-7800QH8",
+  "started": "2026-11-07T13:35:51.457Z"
+}
