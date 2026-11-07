@@ -74,6 +74,21 @@ test('promptVariant lean2: the user-drafted rules (native function calling)', ()
   assert.match(buildSystemPrompt('C:\\work\\alpha', false, true, { native: true, promptVariant: 'lean2' }), /Finish only by calling claim_complete/)
 })
 
+test('promptVariant lean3: tool use and rules groups; the shell is the fallback', () => {
+  const p = buildSystemPrompt('C:\\work\\alpha', false, false, { native: true, promptVariant: 'lean3' })
+  assert.match(p, /^You are HY-HARNESS, an autonomous coding agent\.\nPrivate reasoning style: use a concise tone\. Do not state uncertain points as certain; present them as possibilities\.\nShell environment: /)
+  for (const line of [
+    'Tool use:\nMake independent calls together, at the same time.\nRead a file before editing it.\n',
+    'If a path is missing, locate it with search_glob / search_grep, not the shell.',
+    'split it into several edit_file / apply_patch calls',
+    'Rules:\nRead the user\'s intent and its background before acting.\nDo not settle for a partial solution.\n',
+    'Do not implement a lot at once; proceed in small, verifiable steps. Inspect shell output before continuing.\n',
+  ]) assert.ok(p.includes(line), line)
+  assert.ok(!p.includes('Use the provided tools through function calls'))
+  assert.match(p, /\nThis session:\nWorkspace root: C:\\work\\alpha\n*$/)
+  assert.match(buildSystemPrompt('C:\\work\\alpha', false, true, { native: true, promptVariant: 'lean3' }), /Finish only by calling claim_complete/)
+})
+
 test('skill and MCP catalogs sit in the session part (only the tools they add change the earlier text)', () => {
   const prompt = buildSystemPrompt('C:\\work\\alpha', true, false, {
     native: true,
