@@ -372,7 +372,7 @@ export const userConfigJsonSchema = {
     reasoningHistory: {
       type: 'string',
       enum: ['none', 'full'],
-      description: 'full: keep the model reasoning in the conversation and send it back (DeepSeek reasoning_content). Default none.',
+      description: 'full: keep the model reasoning in the conversation and send it back (DeepSeek reasoning_content); the default. none: send only replies and tool calls.',
     },
     models: {
       type: 'array',

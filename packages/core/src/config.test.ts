@@ -511,6 +511,25 @@ test('CP-38: user feature overrides resolve into the config', () => {
   }
 })
 
+test('reasoningHistory defaults to full; the user config can turn it off', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-reasoning-config-'))
+  const saved = process.env.HY_CONFIG_DIR
+  try {
+    const user = path.join(dir, 'user')
+    const ws = path.join(dir, 'ws')
+    fs.mkdirSync(user)
+    fs.mkdirSync(ws)
+    process.env.HY_CONFIG_DIR = user
+    assert.equal(loadConfig({ cwd: ws }).reasoningHistory, 'full')
+    fs.writeFileSync(path.join(user, 'config.json'), JSON.stringify({ reasoningHistory: 'none' }))
+    assert.equal(loadConfig({ cwd: ws }).reasoningHistory, 'none')
+  } finally {
+    if (saved === undefined) delete process.env.HY_CONFIG_DIR
+    else process.env.HY_CONFIG_DIR = saved
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('CP-37: profiles override the user layer and unknown profiles fail', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-profile-'))
   const saved = process.env.HY_CONFIG_DIR

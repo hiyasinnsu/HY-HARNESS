@@ -193,7 +193,8 @@ export interface HarnessConfig {
   /**
    * Keep the model's reasoning in the conversation and send it back with each
    * assistant message (DeepSeek `reasoning_content`), so later steps can see
-   * why an earlier one did what it did. `none` sends only the replies and calls.
+   * why an earlier one did what it did (default). `none` sends only the
+   * replies and calls.
    */
   reasoningHistory: ReasoningHistory
   ptc: boolean
@@ -871,7 +872,9 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
     approvalPolicy: overrides.approvalPolicy ?? user?.approvalPolicy ?? 'untrusted',
     autoApprove: overrides.autoApprove ?? user?.autoApprove ?? false,
     fullAuto: overrides.fullAuto ?? user?.fullAuto ?? false,
-    reasoningHistory: user?.reasoningHistory === 'full' ? 'full' : 'none',
+    // Default full since 2026-11-07: in the benchmark it cut tool calls, requests
+    // and output tokens without raising prompt or uncached tokens.
+    reasoningHistory: user?.reasoningHistory === 'none' ? 'none' : 'full',
     ptc: overrides.ptc ?? process.env.HY_PTC === '1',
     projectTrusted: trusted,
     protectedPaths: project?.protectedPaths ?? [],

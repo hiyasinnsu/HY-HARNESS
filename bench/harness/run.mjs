@@ -94,6 +94,7 @@ function benchHyConfigDir(variant, extra = {}) {
 const HY_VARIANTS = {
   hy: {},
   'hy-full': { reasoningHistory: 'full' },
+  'hy-none': { reasoningHistory: 'none' },
 }
 const hyConfigDirs = Object.fromEntries(harnesses.filter((h) => h in HY_VARIANTS).map((h) => [h, benchHyConfigDir(h, HY_VARIANTS[h])]))
 
