@@ -71,7 +71,10 @@ const fmt = (x, metric) => {
   return Math.round(x).toLocaleString('en-US')
 }
 
-const valid = records.filter((r) => !r.logMissing)
+// A provider outage (the run got no answer at all, or every turn failed with
+// an HTTP 429/5xx) says nothing about the harness: excluded and listed.
+const failedByProvider = (r) => r.providerFailure === true || (!r.logMissing && r.requests === 0)
+const valid = records.filter((r) => !r.logMissing && !failedByProvider(r))
 const harnesses = [...new Set(valid.map((r) => r.harness))]
 const by = Object.fromEntries(harnesses.map((h) => [h, valid.filter((r) => r.harness === h)]))
 const lines = []
@@ -79,7 +82,7 @@ const meta = dirs.map((d) => path.join(d, 'meta.json')).filter((f) => fs.existsS
 lines.push(`# Harness benchmark ${meta.map((m) => m.stamp).join(', ')}`)
 lines.push('')
 lines.push(`Model ${meta[0]?.model ?? '?'} (OpenCode Go), effort ${meta[0]?.effort ?? '?'}; ${meta[0]?.tasks?.length ?? '?'} tasks given in one session per run.`)
-lines.push(`Runs: ${harnesses.map((h) => `${h} ${by[h].length}`).join(', ')}${records.length > valid.length ? ` (${records.length - valid.length} without a readable log, excluded)` : ''}.`)
+lines.push(`Runs: ${harnesses.map((h) => `${h} ${by[h].length}`).join(', ')}${records.some((r) => r.logMissing) ? ` (${records.filter((r) => r.logMissing).length} without a readable log, excluded)` : ''}${records.some(failedByProvider) ? ` (${records.filter(failedByProvider).map((r) => `${r.harness} #${r.n}`).join(', ')}: provider outage, excluded)` : ''}.`)
 lines.push('')
 // The difference column compares the first two harnesses: a variant against
 // `hy`, or `hy` against `dsh` (`--pair a,b` picks them explicitly).
@@ -118,6 +121,10 @@ lines.push('')
 lines.push('| Harness | # | Exit | Checks | Prompt | Uncached | Hit % | Tools | Requests | Turn min |')
 lines.push('|---|---|---|---|---|---|---|---|---|---|')
 for (const r of records) {
+  if (failedByProvider(r)) {
+    lines.push(`| ${r.harness} | ${r.n} | ${r.exit} | – | (provider outage: ${r.providerErrors ?? 'no requests'}) | | | | | |`)
+    continue
+  }
   if (r.logMissing) {
     lines.push(`| ${r.harness} | ${r.n} | ${r.exit} | ${Object.values(r.checks).filter(Boolean).length}/5 | (no log) | | | | | |`)
     continue

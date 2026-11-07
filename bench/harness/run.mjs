@@ -98,6 +98,7 @@ const HY_VARIANTS = {
   'hy-legacy': { promptVariant: 'legacy' },
   'hy-lean2': { promptVariant: 'lean2' },
   'hy-lean3': { promptVariant: 'lean3' },
+  'hy-lean4': { promptVariant: 'lean4' },
 }
 const hyConfigDirs = Object.fromEntries(harnesses.filter((h) => h in HY_VARIANTS).map((h) => [h, benchHyConfigDir(h, HY_VARIANTS[h])]))
 
@@ -154,7 +155,27 @@ async function one(harness, n) {
   const originalFormatTest = fs.readFileSync(path.join(ws, 'test/format.test.js'), 'utf8')
   const r = harness in HY_VARIANTS ? await runHy(ws, n, harness) : await runDsh(ws, n)
   const checks = await checkWorkspace(ws, originalFormatTest)
-  const record = { harness, n, stamp, model: MODEL, effort: EFFORT, ws, exit: r.exit, wallMs: r.wallMs, ...(r.sessionId ? { sessionId: r.sessionId } : {}), checks, ...(r.log ?? { logMissing: true }) }
+  // A run the provider never served (every turn failed with an HTTP error such
+  // as "server is overloaded") measures the provider, not the harness: it is
+  // recorded and listed, and report.mjs leaves it out of the statistics.
+  const stderr = fs.readFileSync(path.join(outDir, `${harness in HY_VARIANTS ? harness : 'dsh'}-${n}.stderr.log`), 'utf8')
+  const providerErrors = (stderr.match(/turn failed: \S+ HTTP (429|5\d\d)|dsh: (RATE_LIMIT|SERVER|TRANSPORT|OVERLOADED)/g) ?? []).length
+  const providerFailure = providerErrors > 0 && (r.log?.turns ?? 0) < TASKS.length
+  const record = {
+    harness,
+    n,
+    stamp,
+    model: MODEL,
+    effort: EFFORT,
+    ws,
+    exit: r.exit,
+    wallMs: r.wallMs,
+    ...(r.sessionId ? { sessionId: r.sessionId } : {}),
+    checks,
+    ...(r.log ?? { logMissing: true }),
+    ...(providerErrors > 0 ? { providerErrors } : {}),
+    ...(providerFailure ? { providerFailure: true } : {}),
+  }
   fs.appendFileSync(path.join(outDir, 'runs.jsonl'), `${JSON.stringify(record)}\n`)
   const passed = Object.values(checks).filter(Boolean).length
   console.log(`${harness} #${n}: exit ${r.exit}, ${(r.wallMs / 1000).toFixed(0)}s, checks ${passed}/${Object.keys(checks).length}, input ${r.log?.input ?? '?'}, hit ${r.log?.hitRate ?? '?'}%, tools ${r.log?.toolCalls ?? '?'}`)

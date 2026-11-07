@@ -326,6 +326,19 @@ test('Gemini: Interactions API shape; thinking counts as output; key never in th
   }
 })
 
+test('backoff doubles up to the cap, with ±25% jitter', async () => {
+  const { backoffMs } = await import('./llm.js')
+  const retry = { retries: 6, baseDelayMs: 1_000, maxDelayMs: 15_000 }
+  assert.equal(backoffMs(retry, 0, 0.5), 1_000)
+  assert.equal(backoffMs(retry, 3, 0.5), 8_000)
+  assert.equal(backoffMs(retry, 5, 0.5), 15_000, 'capped')
+  assert.equal(backoffMs(retry, 2, 0), 3_000, '-25%')
+  assert.equal(backoffMs(retry, 2, 1), 5_000, '+25%')
+  // The default schedule waits long enough for a briefly overloaded provider.
+  const total = [0, 1, 2, 3, 4, 5].reduce((sum, attempt) => sum + backoffMs(retry, attempt, 0.5), 0)
+  assert.ok(total >= 40_000 && total <= 50_000, `${total} ms`)
+})
+
 test('retries 429 and 5xx (honoring Retry-After), not other errors', async () => {
   const ok = fixture('ollama-chat.json')
   const flaky = await serve([

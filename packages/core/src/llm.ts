@@ -133,7 +133,15 @@ export interface RetryOptions {
   maxDelayMs: number
 }
 
-const DEFAULT_RETRY: RetryOptions = { retries: 3, baseDelayMs: 500, maxDelayMs: 8_000 }
+// An overloaded provider (OpenCode "server is overloaded", HTTP 429) used to
+// fail a whole turn after ~3.5 s of retries (benchmark 2026-11-07). Six retries
+// with jittered backoff wait up to ~45 s, close to DeepSeek Harness (5 retries).
+const DEFAULT_RETRY: RetryOptions = { retries: 6, baseDelayMs: 1_000, maxDelayMs: 15_000 }
+
+/** Exponential backoff with ±25% jitter, so parallel sessions do not retry in step. */
+export function backoffMs(retry: RetryOptions, attempt: number, random = Math.random()): number {
+  return Math.round(Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** attempt) * (0.75 + random * 0.5))
+}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -165,7 +173,7 @@ export async function postWithRetry(
       })
     } catch (error) {
       if (init.signal?.aborted || attempt >= retry.retries) throw error
-      await sleep(Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** attempt), init.signal)
+      await sleep(backoffMs(retry, attempt), init.signal)
       continue
     }
     const text = await response.text()
@@ -175,8 +183,8 @@ export async function postWithRetry(
       throw new LlmError(`${label} HTTP ${response.status}: ${text.slice(0, 800)}`, response.status, text)
     }
     const after = Number(response.headers.get('retry-after'))
-    const delay = Number.isFinite(after) && after > 0 ? after * 1_000 : retry.baseDelayMs * 2 ** attempt
-    await sleep(Math.min(retry.maxDelayMs, delay), init.signal)
+    const delay = Number.isFinite(after) && after > 0 ? Math.min(retry.maxDelayMs, after * 1_000) : backoffMs(retry, attempt)
+    await sleep(delay, init.signal)
   }
 }
 
@@ -198,7 +206,7 @@ export async function openStreamWithRetry(
       response = await fetch(url, { method: 'POST', headers: init.headers, body: init.body, ...(init.signal !== undefined ? { signal: init.signal } : {}) })
     } catch (error) {
       if (init.signal?.aborted || attempt >= retry.retries) throw error
-      await sleep(Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** attempt), init.signal)
+      await sleep(backoffMs(retry, attempt), init.signal)
       continue
     }
     if (response.ok) return response
@@ -208,8 +216,8 @@ export async function openStreamWithRetry(
       throw new LlmError(`${label} HTTP ${response.status}: ${text.slice(0, 300)}`, response.status, text.slice(0, 300))
     }
     const after = Number(response.headers.get('retry-after'))
-    const delay = Number.isFinite(after) && after > 0 ? after * 1_000 : retry.baseDelayMs * 2 ** attempt
-    await sleep(Math.min(retry.maxDelayMs, delay), init.signal)
+    const delay = Number.isFinite(after) && after > 0 ? Math.min(retry.maxDelayMs, after * 1_000) : backoffMs(retry, attempt)
+    await sleep(delay, init.signal)
   }
 }
 

@@ -1680,9 +1680,10 @@
         "lean",
         "legacy",
         "lean2",
-        "lean3"
+        "lean3",
+        "lean4"
       ],
-      "description": "System-prompt opening. lean (default): short opening and a tone-only reasoning line. legacy: the opening used until 2026-11-07 (Japanese reasoning, longer style rules). lean2 / lean3: under evaluation (fewer rules; intent, no partial solutions, self-contained answers; lean3 makes the shell the fallback)."
+      "description": "System-prompt opening. lean (default): short opening and a tone-only reasoning line. legacy: the opening used until 2026-11-07 (Japanese reasoning, longer style rules). lean2 / lean3: under evaluation (fewer rules; intent, no partial solutions, self-contained answers; lean3 makes the shell the fallback; lean4 adds detailed tool and parameter descriptions and drops what they cover from the prompt)."
     },
     "reasoningHistory": {
       "type": "string",

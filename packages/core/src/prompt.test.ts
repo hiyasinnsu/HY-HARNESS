@@ -89,6 +89,35 @@ test('promptVariant lean3: tool use and rules groups; the shell is the fallback'
   assert.match(buildSystemPrompt('C:\\work\\alpha', false, true, { native: true, promptVariant: 'lean3' }), /Finish only by calling claim_complete/)
 })
 
+test('promptVariant lean4: detailed tool docs, and the prompt drops what they cover', async () => {
+  const { nativeToolDefs } = await import('./prompt.js')
+  const { RICH_TOOL_DOCS } = await import('./tool-docs.js')
+  const { TOOL_SPECS } = await import('./tool-registry.js')
+  const p = buildSystemPrompt('C:\\work\\alpha', false, false, { native: true, promptVariant: 'lean4' })
+  assert.match(p, /^You are HY-HARNESS, an autonomous coding agent\.\nPrivate reasoning style: [^\n]+\nTool use:\nMake independent calls together, at the same time\.\nDo not try to read or write outside the workspace\.\nRules:\n/)
+  assert.doesNotMatch(p, /Shell environment|Read a file before editing|search_glob|apply_patch|edit_file/, 'now in the tool descriptions')
+  assert.match(p, /Inspect shell output before continuing\.\n\nThis session:/)
+
+  // The plugin-provided editors, as the session registers them.
+  const extraTools = [
+    { name: 'edit_file', wire: true, readOnly: false, description: 'short', input: { type: 'object', properties: { file: { type: 'string' }, old: { type: 'string' }, new: { type: 'string' }, count: { type: 'number' } }, required: ['file', 'old', 'new'] } },
+    { name: 'write_file', wire: true, readOnly: false, description: 'short', input: { type: 'object', properties: { file: { type: 'string' }, content: { type: 'string' }, root: { type: 'string' } }, required: ['file', 'content'] } },
+  ] as never
+  const rich = nativeToolDefs(false, false, { promptVariant: 'lean4', extraTools })
+  const plain = nativeToolDefs(false, false, { promptVariant: 'lean3', extraTools })
+  for (const [name, doc] of Object.entries(RICH_TOOL_DOCS)) {
+    const def = rich.find((t) => t.name === name)
+    assert.ok(def, `${name} is offered`)
+    assert.equal(def.description, doc.description)
+    const props = (def.parameters as { properties: Record<string, { description?: string }> }).properties
+    // Every documented parameter exists, and every parameter is documented.
+    assert.deepEqual(Object.keys(doc.params ?? {}).sort(), Object.keys(props).sort(), `${name} parameters`)
+    for (const [param, text] of Object.entries(doc.params ?? {})) assert.equal(props[param]!.description, text)
+    assert.notEqual(plain.find((t) => t.name === name)!.description, doc.description, 'other variants keep the short text')
+  }
+  assert.ok(TOOL_SPECS.length > 0)
+})
+
 test('skill and MCP catalogs sit in the session part (only the tools they add change the earlier text)', () => {
   const prompt = buildSystemPrompt('C:\\work\\alpha', true, false, {
     native: true,

@@ -1,6 +1,7 @@
 import { TOOL_SPECS, deferredTools, jsonSchemaToTs, nativeParameters, offeredTools, renderSdk, renderToolPrompt, type Schema, type ToolSpec } from './tool-registry.js'
 import type { NativeToolDef } from './llm.js'
 import { renderSkillCatalog, type SkillInfo } from './skills.js'
+import { RICH_TOOL_DOCS, withParamDocs } from './tool-docs.js'
 
 export interface PromptExtras {
   skills?: readonly SkillInfo[]
@@ -42,7 +43,7 @@ export interface PromptExtras {
 }
 
 /** System-prompt variants compared in the harness benchmark. */
-export type PromptVariant = 'lean' | 'legacy' | 'lean2' | 'lean3'
+export type PromptVariant = 'lean' | 'legacy' | 'lean2' | 'lean3' | 'lean4'
 
 function allSpecs(extras: PromptExtras): readonly ToolSpec[] {
   return extras.extraTools?.length ? [...TOOL_SPECS, ...extras.extraTools] : TOOL_SPECS
@@ -68,11 +69,16 @@ export function promptFeatures(extras: PromptExtras): Set<string> {
 
 /** The wire tools as native function definitions. */
 export function nativeToolDefs(ptc: boolean, objective: boolean, extras: PromptExtras): NativeToolDef[] {
-  return offeredTools(ptc, allSpecs(extras), objective, promptFeatures(extras), extras.allowTools, extras.activeTools).map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: nativeParameters(t),
-  }))
+  // lean4: the detailed descriptions (tool-docs.ts), with a description for every parameter.
+  const rich = extras.promptVariant === 'lean4'
+  return offeredTools(ptc, allSpecs(extras), objective, promptFeatures(extras), extras.allowTools, extras.activeTools).map((t) => {
+    const doc = rich ? RICH_TOOL_DOCS[t.name] : undefined
+    return {
+      name: t.name,
+      description: doc?.description ?? t.description,
+      parameters: doc ? withParamDocs(nativeParameters(t), doc.params) : nativeParameters(t),
+    }
+  })
 }
 
 /** The long-running goal and its policy (the agent sends it in the session context). */
@@ -177,6 +183,24 @@ To create or replace a whole file, give apply_patch file + content; to edit part
       : extras.finalSchema
         ? `When the work is done, reply without a tool call, with only JSON of type ${jsonSchemaToTs(extras.finalSchema)}.`
         : 'When the work is done, reply without a tool call: a short summary of what changed and what you verified.'
+    if (extras.promptVariant === 'lean4') {
+      // `lean4` (2026-11-07, under evaluation): lean3 with the detailed tool
+      // descriptions (tool-docs.ts); the lines they now cover are dropped here:
+      // the shell line, read-before-edit, where to search, how to patch.
+      const ending = objective || extras.finalSchema ? `\n${finish}` : ''
+      return `You are HY-HARNESS, an autonomous coding agent.
+Private reasoning style: use a concise tone. Do not state uncertain points as certain; present them as possibilities.${sdk}
+Tool use:
+Make independent calls together, at the same time.
+Do not try to read or write outside the workspace.
+Rules:
+Read the user's intent and its background before acting.
+Do not settle for a partial solution.
+To continue working, your reply must contain a tool call. A reply without a tool call is your final answer: make it self-contained, and do not end it with a plan or an offer. Ask the user only when a decision is genuinely theirs; say what you need decided and why (use ask_user when available).
+In the final answer, lead with the conclusion; if you did work, summarize clearly what changed and what you verified.
+Do not implement a lot at once; proceed in small, verifiable steps. Inspect shell output before continuing.${ending}
+${sessionPart}`
+    }
     if (extras.promptVariant === 'lean3') {
       // `lean3` (2026-11-07, user-drafted, under evaluation): lean2 regrouped
       // into tool use and rules; the shell is the fallback when no tool fits,
