@@ -100,6 +100,9 @@ export class SubagentRegistry {
           turns: 0,
           background: p.background === true,
         }
+      // Nothing after `agent/close` reopens the agent (the aborted turn's
+      // `agent/end` is logged after it).
+      if (base.status === 'closed' && event.type !== 'agent/spawn') continue
       switch (event.type) {
         case 'agent/spawn':
           views.set(agentId, { ...base, status: 'idle', updatedAt: event.ts })
@@ -225,7 +228,7 @@ export class SubagentRegistry {
       try {
         const final = await runner.run(message)
         this.host.log('agent/end', { agentId, final: final.slice(0, MAX_FINAL) })
-        this.touch(agentId, { status: 'idle', final: final.slice(0, MAX_FINAL) })
+        this.touch(agentId, { ...(this.isClosed(agentId) ? {} : { status: 'idle' as const }), final: final.slice(0, MAX_FINAL) })
         return final
       } catch (error) {
         const text = error instanceof Error ? error.message : String(error)
@@ -233,7 +236,9 @@ export class SubagentRegistry {
         // restart, the GUI and the log agree it was cut off (K5 discipline).
         const interrupted = this.interrupted.delete(agentId)
         this.host.log('agent/end', { agentId, error: text, ...(interrupted ? { interrupted: true } : {}) })
-        this.touch(agentId, { status: interrupted ? 'interrupted' : 'idle', error: text })
+        // A closed agent stays closed: `close` aborts the turn, and its end
+        // must not reopen the agent for messages.
+        this.touch(agentId, { ...(this.isClosed(agentId) ? {} : { status: interrupted ? ('interrupted' as const) : ('idle' as const) }), error: text })
         throw error
       } finally {
         this.pending.delete(agentId)
@@ -269,6 +274,10 @@ export class SubagentRegistry {
     this.touch(agentId, { status: 'closed' })
     this.host.changed?.(this.views.get(agentId)!, 'close')
     return this.views.get(agentId)!
+  }
+
+  private isClosed(agentId: string): boolean {
+    return this.views.get(agentId)?.status === 'closed'
   }
 
   /** Waits for the current turn (tests and the web API's interrupt path). */

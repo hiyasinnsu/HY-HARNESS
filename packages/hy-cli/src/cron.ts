@@ -75,13 +75,10 @@ function matches(spec: CronSpec, date: Date): boolean {
   if (!spec.month.values.has(date.getMonth() + 1)) return false
   const dayOk = spec.day.values.has(date.getDate())
   const weekdayOk = spec.weekday.values.has(date.getDay())
-  return spec.day.wildcard && spec.weekday.wildcard
-    ? true
-    : spec.day.wildcard
-      ? weekdayOk
-      : spec.weekday.wildcard
-        ? dayOk
-        : dayOk || weekdayOk
+  // Vixie cron: when either field starts with `*` (including `*/n`) both must
+  // match; only two restricted fields use OR. A plain `*` matches every value,
+  // so this reduces to the other field, while `*/2` keeps its step.
+  return spec.day.wildcard || spec.weekday.wildcard ? dayOk && weekdayOk : dayOk || weekdayOk
 }
 
 /** The next matching minute strictly after `from`, or undefined within a year. */

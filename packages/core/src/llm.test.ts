@@ -552,6 +552,33 @@ test('CP-18: the OpenAI-compatible adapter streams deltas and assembles the repl
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
 })
+test('a stream cut off before [DONE] or a finish_reason is an error, not a short answer', async () => {
+  let complete = false
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'partial' } }] })}\n\n`)
+      if (complete) res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)
+      res.end()
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const { port } = server.address() as AddressInfo
+  const provider = new OpenAiProvider(
+    { provider: 'openai-compatible', model: 'm', baseUrl: `http://127.0.0.1:${port}`, apiKey: 'k', contextWindowTokens: 10_000, maxOutputTokens: 100 },
+    { retries: 0, baseDelayMs: 1, maxDelayMs: 5 },
+  )
+  const ask = () => provider.complete([{ role: 'user', content: 'hi' }], { maxTokens: 8, temperature: 0, onDelta: () => undefined })
+  try {
+    await assert.rejects(ask(), /stream ended before the response was complete/)
+    complete = true
+    assert.equal((await ask()).content, 'partial', 'a finish_reason without [DONE] is complete')
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
 test('CP-18: a streaming request retries 503 and 429 before the stream starts; 400 fails at once', async () => {
   let calls = 0
   const server = http.createServer((req, res) => {

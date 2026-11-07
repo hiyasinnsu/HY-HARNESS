@@ -133,6 +133,21 @@ test('the running limit and the closed state are enforced', () => {
   assert.equal(registry.running(), MAX_RUNNING_AGENTS - 1)
 })
 
+test('closing a running agent keeps it closed after its aborted turn ends, live and on replay', async () => {
+  const { host, events } = fakeHost()
+  const registry = new SubagentRegistry(host, 'run-a')
+  registry.spawn('task', true, { background: true, start: 'task' })
+  registry.close('run-a.sub1')
+  await registry.wait('run-a.sub1').catch(() => {})
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(registry.get('run-a.sub1')?.status, 'closed')
+  assert.throws(() => registry.send('run-a.sub1', 'again'), /closed/)
+  // The aborted turn's agent/end comes after agent/close in the log.
+  assert.deepEqual(events.map((e) => e.type).slice(-2), ['agent/close', 'agent/end'])
+  const replayed = SubagentRegistry.replay(events.map((e) => ev(e.type, e.payload)), 'run-a')
+  assert.equal(replayed[0]?.status, 'closed')
+})
+
 test('a restart normalises a running agent to interrupted', () => {
   const events = [
     ev('agent/spawn', { agentId: 'run-a.sub1', task: 'slow', readOnly: true, background: true }),

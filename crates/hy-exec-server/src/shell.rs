@@ -27,9 +27,17 @@ while ($true) {
   $line = [Console]::In.ReadLine()
   if ($null -eq $line) { break }
   if ($line -eq '__HY_EXIT__') { break }
-  try { Invoke-Expression $line } catch { Write-Output ('ERROR: ' + $_.Exception.Message) }
-  $ok = $?
-  Write-Output ('__HY_DONE__' + $__hyId + ':' + $ok + ':' + $LASTEXITCODE)
+  $__hyAt = $line.IndexOf(' ')
+  $__hyId = $line.Substring(0, $__hyAt)
+  $line = $line.Substring($__hyAt + 1)
+  $global:LASTEXITCODE = 0
+  $__hyThrew = $false
+  try { Invoke-Expression $line } catch { $__hyThrew = $true; Write-Output ('ERROR: ' + $_.Exception.Message) }
+  $ok = $? -and -not $__hyThrew
+  $__hyCode = $global:LASTEXITCODE
+  if ($null -eq $__hyCode) { $__hyCode = 0 }
+  if (-not $ok -and $__hyCode -eq 0) { $__hyCode = 1 }
+  Write-Output ('__HY_DONE__' + $__hyId + ':' + $ok + ':' + $__hyCode)
 }
 "#;
 
@@ -205,7 +213,9 @@ impl ShellManager {
         shell.seq += 1;
         let sentinel = format!("hy{}", shell.seq);
         shell.from = shell.buffer.lock().map(|b| b.len()).unwrap_or(0);
-        let line = format!("$__hyId = '{sentinel}'; {data}\n");
+        // The id travels outside the command, so a command that does not parse
+        // still ends with its sentinel instead of hanging the read.
+        let line = format!("{sentinel} {data}\n");
         shell
             .stdin
             .write_all(line.as_bytes())
@@ -258,7 +268,7 @@ impl ShellManager {
                     let body = if body.len() > limit {
                         truncated = true;
                         // Keep the tail: the last lines are usually the answer.
-                        body[body.len() - limit..].to_string()
+                        tail_on_char_boundary(&body, limit).to_string()
                     } else {
                         body
                     };
@@ -361,6 +371,16 @@ impl ShellManager {
 
 /// Finds `__HY_DONE__<sentinel>:<ok>:<code>` in `text`; returns the output
 /// before it, the exit code, and how many bytes of `text` were consumed.
+/// At most the last `limit` bytes of `text`, starting on a char boundary (a
+/// byte slice through a multi-byte char would panic).
+fn tail_on_char_boundary(text: &str, limit: usize) -> &str {
+    let mut start = text.len().saturating_sub(limit);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
 fn find_sentinel(text: &str, sentinel: &str) -> Option<(String, Option<i32>, usize)> {
     let marker = format!("{SENTINEL}{sentinel}");
     let at = text.find(&marker)?;
@@ -407,5 +427,64 @@ mod tests {
         };
         let (_, code, _) = found;
         assert_eq!(code, Some(1));
+    }
+
+    #[test]
+    fn the_tail_never_splits_a_multibyte_char() {
+        let text = "ああああ"; // 3 bytes each
+        assert_eq!(tail_on_char_boundary(text, 4), "あ");
+        assert_eq!(tail_on_char_boundary(text, 6), "ああ");
+        assert_eq!(tail_on_char_boundary(text, 100), text);
+        assert_eq!(tail_on_char_boundary(text, 0), "");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failures_exit_non_zero_and_a_parse_error_still_ends_the_command() {
+        let program = std::path::PathBuf::from("powershell.exe");
+        let manager = ShellManager::new();
+        let env: Vec<(String, String)> = std::env::vars().collect();
+        let opened = manager.open(
+            &ShellOpenParams {
+                run_id: None,
+                cwd: None,
+                sandbox_mode: Some("unconfined".into()),
+                env: Default::default(),
+            },
+            ShellSpec {
+                program,
+                cwd: std::env::temp_dir(),
+                env,
+            },
+        );
+        let id = match opened.shell_id {
+            Some(id) => id,
+            None => panic!("no shell: {:?}", opened.gap),
+        };
+        let run = |command: &str| {
+            if let Err(error) = manager.write(&id, command) {
+                panic!("{error}");
+            }
+            match manager.read(&id, Some(60_000), None) {
+                Ok(result) => {
+                    assert!(!result.timed_out, "{command} timed out");
+                    (result.exit_code, result.data)
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        assert_eq!(run("Write-Output ok").0, Some(0));
+        let (code, data) = run("throw 'boom'");
+        assert_eq!(code, Some(1), "{data}");
+        assert!(data.contains("boom"), "{data}");
+        assert_eq!(run("cmd /c exit 3").0, Some(3));
+        // A command that does not parse still reports, instead of hanging.
+        assert_ne!(run("function (").0, Some(0));
+        assert_eq!(
+            run("Write-Output again").0,
+            Some(0),
+            "an old exit code does not leak"
+        );
+        manager.close_all();
     }
 }

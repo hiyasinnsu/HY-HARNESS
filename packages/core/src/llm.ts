@@ -372,6 +372,10 @@ export class OpenAiProvider implements LlmProvider {
       let reasoning = ''
       const calls = new Map<number, { name: string; args: string }>()
       let usage: Usage = { inputTokens: 0, outputTokens: 0 }
+      // A stream that ends without `[DONE]` or a finish_reason was cut off
+      // (a dropped connection, a proxy timeout): its partial answer must not
+      // pass for a complete one.
+      let finished = false
       for (;;) {
         const { done, value } = await reader.read()
         if (done) break
@@ -382,11 +386,13 @@ export class OpenAiProvider implements LlmProvider {
           buffer = buffer.slice(newline + 1)
           if (!line.startsWith('data:')) continue
           const payload = line.slice(5).trim()
+          if (payload === '[DONE]') finished = true
           if (payload === '' || payload === '[DONE]') continue
           let chunk: {
             error?: { message?: string }
             usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_cache_hit_tokens?: number; prompt_cache_miss_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } }
             choices?: Array<{
+              finish_reason?: string | null
               delta?: {
                 content?: string | null
                 reasoning_content?: string | null
@@ -410,6 +416,7 @@ export class OpenAiProvider implements LlmProvider {
               ...(cached > 0 ? { cacheHitTokens: cached, cacheMissTokens: chunk.usage.prompt_cache_miss_tokens ?? Math.max(0, input - cached) } : {}),
             }
           }
+          if (chunk.choices?.[0]?.finish_reason) finished = true
           const delta = chunk.choices?.[0]?.delta
           if (!delta) continue
           if (typeof delta.content === 'string' && delta.content.length > 0) {
@@ -430,6 +437,7 @@ export class OpenAiProvider implements LlmProvider {
           }
         }
       }
+      if (!finished) throw new LlmError(`${this.role.provider}: the stream ended before the response was complete`)
       const toolCalls = [...calls.values()].filter((call) => call.name.length > 0).map((call) => ({ name: call.name, args: parseArgs(call.args) }))
       return {
         content,

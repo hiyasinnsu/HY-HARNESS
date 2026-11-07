@@ -90,6 +90,23 @@ test('a rollback that could not restore every file stops the run', async () => {
   assert.deepEqual(calls, ['create base', 'create r1', 'rollback r1'])
 })
 
+test('Ctrl-C during the gates stops the run without reporting success', async () => {
+  const calls: string[] = []
+  const stop = new AbortController()
+  const exec = stubExec(calls)
+  let gateSignal: AbortSignal | undefined
+  ;(exec as unknown as { exec: unknown }).exec = async (p: { command: string }, signal?: AbortSignal) => {
+    calls.push(`gate ${p.command}`)
+    gateSignal = signal
+    stop.abort(new Error('interrupted'))
+    return { exitCode: 0, stdout: '', stderr: '', timedOut: false, sandbox: 'unconfined', status: 'completed', durationMs: 1, truncated: false }
+  }
+  const r = await runVerifierRalph(base(calls, { exec, signal: stop.signal, verifyCmds: ['one', 'two'] }))
+  assert.equal(r.outcome, 'interrupted')
+  assert.equal(gateSignal, stop.signal, 'the gate command receives the run signal')
+  assert.deepEqual(calls, ['create base', 'create r1', 'gate one'], 'no second gate, no prune')
+})
+
 test('a grader that runs out of budget ends the run as budget-exhausted', async () => {
   const calls: string[] = []
   const budget = new Budget4D({ maxRounds: 3, maxTotalTokens: 10, maxWallClockMs: 60_000 }, { worker: free, grader: free })

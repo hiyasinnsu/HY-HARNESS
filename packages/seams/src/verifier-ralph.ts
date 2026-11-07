@@ -10,6 +10,7 @@
 // | gate1-failed     | kept                                      | next round, digest  |
 // | gate2-failed     | kept, or rollback if rollbackRecommended  | next round, digest  |
 // | succeeded        | kept; per-round refs pruned, base kept    | stop                |
+// | Ctrl-C in gates  | kept, unverified                          | stop (interrupted)  |
 import {
   ExecRpcError,
   estimateTokens,
@@ -236,14 +237,22 @@ export async function runVerifierRalph(o: RalphOptions): Promise<RalphResult> {
       const failing: NonNullable<FailureDigest['failingCommands']> = []
       let gateOutput = ''
       for (const cmd of o.verifyCmds) {
-        const r = await o.exec.exec({
-          command: cmd,
-          mode: 'gate',
-          userSupplied: true,
-          runId: o.runId,
-          foregroundWaitMs: o.gateTimeoutMs ?? 600_000,
-          hardTimeoutMs: o.gateTimeoutMs ?? 600_000,
-        })
+        if (o.signal?.aborted) throw o.signal.reason
+        const gateTimeoutMs = o.gateTimeoutMs ?? 600_000
+        const r = await o.exec.exec(
+          {
+            command: cmd,
+            mode: 'gate',
+            userSupplied: true,
+            runId: o.runId,
+            foregroundWaitMs: gateTimeoutMs,
+            hardTimeoutMs: gateTimeoutMs,
+          },
+          o.signal,
+          // The RPC must outlive the gate's own timeout, or a slow test suite
+          // fails as an RPC timeout instead of reporting its result.
+          gateTimeoutMs + 60_000,
+        )
         const tail = `${r.stdout}\n${r.stderr}`.trim().slice(-4_000)
         gateOutput += `$ ${cmd}\n${tail}\n`
         const pass = r.exitCode === 0 && !r.timedOut
@@ -283,7 +292,7 @@ export async function runVerifierRalph(o: RalphOptions): Promise<RalphResult> {
                 .join('\n\n'),
             },
           ],
-          { maxTokens: 800, temperature: 0 },
+          { maxTokens: 800, temperature: 0, ...(o.signal ? { signal: o.signal } : {}) },
         )
         const verdict = parseGraderVerdict(completion.content) ?? {
           pass: false,
@@ -307,10 +316,18 @@ export async function runVerifierRalph(o: RalphOptions): Promise<RalphResult> {
         }
       }
 
+      // Ctrl-C during the gates: never report an unverified success.
+      if (o.signal?.aborted) throw o.signal.reason
       await o.exec.checkpointPrune(o.runId, ['base'])
       end('succeeded')
       return { outcome: 'succeeded', rounds: round, final: result.final }
     } catch (e) {
+      // Interrupted during the gates: the claimed work stays in the tree,
+      // unverified, and the run stops.
+      if (o.signal?.aborted && !(e instanceof BudgetExhaustedError)) {
+        end('aborted', { round, outcome: 'aborted', reason: 'interrupted during verification' })
+        return { outcome: 'interrupted', rounds: round, ...(digest ? { digest } : {}) }
+      }
       // The gates themselves ran out of budget (e.g. the grader call).
       if (e instanceof BudgetExhaustedError) {
         end('budget-exhausted', { round, outcome: 'budget-exhausted', reason: e.message })
