@@ -10,6 +10,12 @@ export interface ChatMessage {
   content: string
   /** Attached images (user messages; Codex `--image`). Not logged: the log records their paths. */
   images?: ImageInput[]
+  /**
+   * Assistant messages: the reasoning that produced this reply, kept when
+   * `reasoningHistory` is `full` and sent back where the provider takes it
+   * (DeepSeek `reasoning_content`).
+   */
+  reasoning?: string
 }
 
 export interface ImageInput {
@@ -24,9 +30,16 @@ function ollamaMessages(messages: ChatMessage[]) {
 }
 
 /** Messages in the OpenAI Chat Completions shape: images as data-URL content parts. */
-function openAiMessages(messages: ChatMessage[]) {
+/**
+ * Chat Completions messages. `withReasoning`: assistant messages carry their
+ * reasoning as `reasoning_content` (DeepSeek, including through OpenCode);
+ * other OpenAI-compatible servers may reject the field, so it is opt-in.
+ */
+function openAiMessages(messages: ChatMessage[], withReasoning = false) {
   return messages.map((m) =>
-    m.images?.length
+    withReasoning && m.role === 'assistant' && m.reasoning
+      ? { role: m.role, content: m.content, reasoning_content: m.reasoning }
+      : m.images?.length
       ? {
           role: m.role,
           content: [
@@ -287,6 +300,8 @@ export class OpenAiProvider implements LlmProvider {
   private readonly apiKey: string
   /** Set for models known to reject effort + tools, or after the first 400. */
   private omitEffortWithTools: boolean
+  /** DeepSeek takes earlier reasoning back as `reasoning_content` (also through OpenCode). */
+  private readonly sendsReasoning: boolean
 
   constructor(
     private readonly role: RoleConfig,
@@ -296,6 +311,7 @@ export class OpenAiProvider implements LlmProvider {
     this.name = `${role.provider}:${role.model}`
     this.baseUrl = (role.baseUrl ?? 'https://api.openai.com/v1').replace(/\/+$/, '')
     this.omitEffortWithTools = !effortWithToolsFor(role.provider, role.model)
+    this.sendsReasoning = role.provider === 'deepseek' || /deepseek/i.test(role.model)
     const key = roleApiKey(role)
     if (!key) {
       throw new LlmError(
@@ -325,7 +341,7 @@ export class OpenAiProvider implements LlmProvider {
     const omitEffort = this.omitEffortWithTools
     const body = JSON.stringify({
       model: this.role.model,
-      messages: openAiMessages(messages),
+      messages: openAiMessages(messages, this.sendsReasoning),
       stream: true,
       stream_options: { include_usage: true },
       [tokenField]: options.maxTokens,
@@ -435,7 +451,7 @@ export class OpenAiProvider implements LlmProvider {
     ): string =>
       JSON.stringify({
         model: this.role.model,
-        messages: openAiMessages(messages),
+        messages: openAiMessages(messages, this.sendsReasoning),
         [tokenField]: options.maxTokens,
         ...(withTemperature ? { temperature: options.temperature } : {}),
         ...(options.effort && !(options.tools && omitEffort) ? { reasoning_effort: options.effort } : {}),

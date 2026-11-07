@@ -211,6 +211,30 @@ test('OpenCode: sends the stable session and user-agent headers', async () => { 
   }
 })
 
+test('DeepSeek models get earlier reasoning back as reasoning_content; other servers do not', async () => {
+  process.env.HY_TEST_API_KEY = 'sk-test'
+  const history = [
+    ...messages,
+    { role: 'assistant' as const, content: '{"tool":"read_file","args":{"path":"a"}}', reasoning: 'read a first' },
+    { role: 'user' as const, content: 'TOOL RESULT (read_file):\nx' },
+  ]
+  for (const [r, expected] of [
+    [{ ...role('opencode', ''), model: 'deepseek-v4.1-flash' }, 'read a first'],
+    [{ ...role('deepseek', ''), model: 'deepseek-chat' }, 'read a first'],
+    [role('openai-compatible', ''), undefined],
+  ] as const) {
+    const s = await serve([{ status: 200, body: fixture('openai-chat.json') }])
+    try {
+      await new OpenAiProvider({ ...r, baseUrl: s.base }, fast, 'run-r').complete(history, { maxTokens: 32, temperature: 0 })
+      const sent = (s.seen[0]!.body.messages as Array<{ role: string; reasoning_content?: string }>).find((m) => m.role === 'assistant')!
+      assert.equal(sent.reasoning_content, expected, r.provider)
+    } finally {
+      await s.close()
+    }
+  }
+  delete process.env.HY_TEST_API_KEY
+})
+
 test('OpenAI-compatible: prompt cache usage is parsed', async () => {
   process.env.HY_TEST_API_KEY = 'sk-test'
   const s = await serve([

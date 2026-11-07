@@ -67,6 +67,8 @@ export interface AgentOptions {
   maxOutputTokens?: number
   /** Goal mode: a prose-only plan/confirmation must not end the turn before acting. */
   goalMode?: boolean
+  /** `full`: assistant messages keep their reasoning, which the provider gets back (HarnessConfig.reasoningHistory). */
+  reasoningHistory?: 'none' | 'full'
   /** CP-38: resolved feature flags (streaming can be turned off). */
   features?: Readonly<Record<string, boolean>>
   /** CP-19: lifecycle hooks (userPromptSubmit, modelRequest, …). Default: none. */
@@ -151,9 +153,9 @@ export function toolErrorMessage(name: string, message: string): string {
  * correction just pushed, for a `turn/retry` / `turn/nudge` payload, so
  * `rebuildHistory` reproduces them.
  */
-function replay(messages: readonly ChatMessage[], withAssistant: boolean): { assistant?: string; nudge: string } {
+function replay(messages: readonly ChatMessage[], withAssistant: boolean): { assistant?: string; withReasoning?: boolean; nudge: string } {
   return {
-    ...(withAssistant ? { assistant: messages.at(-2)?.content ?? '' } : {}),
+    ...(withAssistant ? { assistant: messages.at(-2)?.content ?? '', ...(messages.at(-2)?.reasoning ? { withReasoning: true } : {}) } : {}),
     nudge: messages.at(-1)?.content ?? '',
   }
 }
@@ -163,6 +165,10 @@ export function rebuildHistory(events: readonly SessionEvent[], runId: string): 
   const turnStarts = new Map<number, number>()
   const relevant = events.filter((e) => e.runId === runId).sort((a, b) => a.seq - b.seq)
   let lastType = ''
+  // reasoningHistory full: the reasoning logged just before an assistant reply rides on it.
+  let lastThinking: string | undefined
+  const reply = (content: string, withReasoning: unknown): ChatMessage =>
+    withReasoning === true && lastThinking ? { role: 'assistant', content, reasoning: lastThinking } : { role: 'assistant', content }
   for (const e of relevant) {
     const p = (e.payload ?? {}) as Record<string, unknown>
     const prevType = lastType
@@ -199,7 +205,7 @@ export function rebuildHistory(events: readonly SessionEvent[], runId: string): 
       case 'turn/nudge':
         // A rejected reply and the correction the agent sent back.
         if (typeof p.nudge === 'string') {
-          if (typeof p.assistant === 'string') history.push({ role: 'assistant', content: p.assistant })
+          if (typeof p.assistant === 'string') history.push(reply(p.assistant, p.withReasoning))
           history.push({ role: 'user', content: p.nudge })
         }
         break
@@ -208,8 +214,11 @@ export function rebuildHistory(events: readonly SessionEvent[], runId: string): 
         // added the same way the running agent adds it.
         history.push({ role: 'user', content: steerMessage(String(p.content ?? '')) })
         break
+      case 'assistant/thinking':
+        lastThinking = String(p.content ?? '')
+        break
       case 'assistant/message':
-        history.push({ role: 'assistant', content: String(p.content ?? '') })
+        history.push(reply(String(p.content ?? ''), p.withReasoning))
         break
       case 'tool/result': {
         const name = String(p.name ?? '')
@@ -518,6 +527,10 @@ export class Agent {
       usage.outputTokens += completion.usage.outputTokens
       usage.cacheHitTokens = (usage.cacheHitTokens ?? 0) + (completion.usage.cacheHitTokens ?? 0)
       usage.cacheMissTokens = (usage.cacheMissTokens ?? 0) + (completion.usage.cacheMissTokens ?? 0)
+      // reasoningHistory full: this step's reasoning stays on its assistant
+      // message, so later steps see why it acted (DSH / DeepSeek reasoning_content).
+      const kept = this.options.reasoningHistory === 'full' && completion.reasoning?.trim() ? completion.reasoning : undefined
+      const reply = (text: string): ChatMessage => (kept ? { role: 'assistant', content: text, reasoning: kept } : { role: 'assistant', content: text })
       if (completion.reasoning?.trim()) {
         const thinkingEvent = this.options.sessionLog.append('assistant/thinking', { content: completion.reasoning })
         this.options.onEvent?.({ type: 'thinking', step, content: truncate(completion.reasoning, 8_000), seq: thinkingEvent.seq })
@@ -550,7 +563,7 @@ export class Agent {
             // A tool call the model failed to emit as a function call arrives
             // as plain content; showing it as the final answer would present a
             // broken call as the result. Retry once, then stop with a fixed text.
-            messages.push({ role: 'assistant', content })
+            messages.push(reply(content))
             if (brokenRetried) {
               const final = 'The model produced an invalid tool call. No changes were made.'
               this.options.sessionLog.append('turn/end', { status: 'completed' })
@@ -572,7 +585,7 @@ export class Agent {
           // the reply as final instead of looping.
           if (this.options.goalMode && !goalNudged && performedToolCalls === 0) {
             goalNudged = true
-            messages.push({ role: 'assistant', content })
+            messages.push(reply(content))
             messages.push({
               role: 'user',
               content:
@@ -593,7 +606,7 @@ export class Agent {
       }
 
       if (!action && !calls) {
-        messages.push({ role: 'assistant', content })
+        messages.push(reply(content))
         // Native mode has no JSON text protocol: an empty reply carries neither a
         // tool call nor text, so the text-protocol retry below cannot help it and
         // a model that answers with reasoning only would repeat it to the limit.
@@ -623,7 +636,7 @@ export class Agent {
         continue
       }
 
-      this.options.sessionLog.append('assistant/message', { content })
+      this.options.sessionLog.append('assistant/message', { content, ...(kept ? { withReasoning: true } : {}) })
       // Tool calls are rendered from the structured tool-start/tool events.
       // Sending the serialized call here as well lets a 4K truncation cut the
       // JSON in half, which the UI then shows as a broken tool call.
@@ -641,7 +654,7 @@ export class Agent {
           }
         }
         const problems = validate(this.options.finalSchema, value, 'final')
-        messages.push({ role: 'assistant', content })
+        messages.push(reply(content))
         if (problems.length > 0) {
           const retry = `Your final answer does not match the required schema: ${problems.join('; ')}. Reply again with {"final": <JSON matching the schema>}.`
           messages.push({ role: 'user', content: retry })
@@ -660,11 +673,11 @@ export class Agent {
           // A text-only reply is not a claim (OQ-4): one nudge, then a stall.
           if (nudged) {
             this.options.sessionLog.append('turn/end', { status: 'stalled' })
-            messages.push({ role: 'assistant', content })
+            messages.push(reply(content))
             return { outcome: 'stalled', final: action.final, steps: step, usage, history: messages.slice(1) }
           }
           nudged = true
-          messages.push({ role: 'assistant', content })
+          messages.push(reply(content))
           messages.push({
             role: 'user',
             content:
@@ -675,7 +688,7 @@ export class Agent {
           continue
         }
         this.options.sessionLog.append('turn/end', { status: 'completed' })
-        messages.push({ role: 'assistant', content })
+        messages.push(reply(content))
         this.options.onEvent?.({ type: 'final', content: action.final })
         return { outcome: 'final', final: action.final, steps: step, usage, history: messages.slice(1) }
       }
@@ -686,7 +699,7 @@ export class Agent {
         lastCall = key
         const reminder = repeats >= 2 ? repeatReminder(repeats) : ''
         if (reminder) this.options.sessionLog.append('guard/repeat', { tool: calls.map((c) => c.tool).join(','), times: repeats })
-        messages.push({ role: 'assistant', content })
+        messages.push(reply(content))
         const outcomes = await this.executeCalls(step, calls)
         performedToolCalls += calls.length
         // WP-30: `read_image` hands the bytes over out of band. They ride on the
@@ -736,7 +749,7 @@ export class Agent {
         continue
       }
 
-      messages.push({ role: 'assistant', content })
+      messages.push(reply(content))
       messages.push({
         role: 'user',
         content: 'Reply with either {"tool":"<name>","args":{...}} or {"final":"..."} and nothing else.',

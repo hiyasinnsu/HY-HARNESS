@@ -151,6 +151,9 @@ export function configuredExtraRoots(
   return [...list(user?.workspaceRoots).map((root) => ({ ...root, scope: 'global' as const })), ...own.map((root) => ({ ...root, scope: 'workspace' as const }))]
 }
 
+/** Whether the model's reasoning stays in the conversation it is sent. */
+export type ReasoningHistory = 'none' | 'full'
+
 export interface HarnessConfig {
   workspaceRoot: string
   /** Primary (`main`) plus explicitly added roots. */
@@ -187,6 +190,12 @@ export interface HarnessConfig {
   approvalPolicy: ApprovalPolicy
   /** `--full-auto`: workspace-write, and prompts that would run confined are approved. */
   fullAuto: boolean
+  /**
+   * Keep the model's reasoning in the conversation and send it back with each
+   * assistant message (DeepSeek `reasoning_content`), so later steps can see
+   * why an earlier one did what it did. `none` sends only the replies and calls.
+   */
+  reasoningHistory: ReasoningHistory
   ptc: boolean
   projectTrusted: boolean
   protectedPaths: string[]
@@ -366,6 +375,8 @@ interface UserConfigFile {
   /** User-level approval defaults; CLI flags still override them. */
   autoApprove?: boolean
   fullAuto?: boolean
+  /** See HarnessConfig.reasoningHistory. */
+  reasoningHistory?: ReasoningHistory
   /** Reusable model definitions shown in Settings. */
   models?: Array<{
     id: string
@@ -860,6 +871,7 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
     approvalPolicy: overrides.approvalPolicy ?? user?.approvalPolicy ?? 'untrusted',
     autoApprove: overrides.autoApprove ?? user?.autoApprove ?? false,
     fullAuto: overrides.fullAuto ?? user?.fullAuto ?? false,
+    reasoningHistory: user?.reasoningHistory === 'full' ? 'full' : 'none',
     ptc: overrides.ptc ?? process.env.HY_PTC === '1',
     projectTrusted: trusted,
     protectedPaths: project?.protectedPaths ?? [],

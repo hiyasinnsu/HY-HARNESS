@@ -78,19 +78,26 @@ async function prepare(harness, n) {
  * user's global rules are ignored too. The model role, plugins, sandbox and
  * the rest stay as the user runs HY.
  */
-function benchHyConfigDir() {
-  const dir = path.join(benchRoot, `${stamp}-hy-config`)
+function benchHyConfigDir(variant, extra = {}) {
+  const dir = path.join(benchRoot, `${stamp}-${variant}-config`)
   fs.mkdirSync(dir, { recursive: true })
   const userDir = process.env.HY_CONFIG_DIR ?? path.join(process.env.APPDATA, 'hy-harness')
   const userFile = path.join(userDir, 'config.json')
   const user = fs.existsSync(userFile) ? JSON.parse(fs.readFileSync(userFile, 'utf8')) : {}
   for (const key of ['mcpServers', 'automation', 'workspaceRoots', 'workspaceRootsByWorkspace']) delete user[key]
-  fs.writeFileSync(path.join(dir, 'config.json'), `${JSON.stringify(user, null, 2)}\n`)
+  fs.writeFileSync(path.join(dir, 'config.json'), `${JSON.stringify({ ...user, ...extra }, null, 2)}\n`)
   return dir
 }
-const HY_CONFIG_DIR = harnesses.includes('hy') ? benchHyConfigDir() : undefined
 
-async function runHy(ws, n) {
+// HY variants: `hy` is HY as configured; every other variant changes one
+// setting, so comparing it with `hy` measures exactly that change.
+const HY_VARIANTS = {
+  hy: {},
+  'hy-full': { reasoningHistory: 'full' },
+}
+const hyConfigDirs = Object.fromEntries(harnesses.filter((h) => h in HY_VARIANTS).map((h) => [h, benchHyConfigDir(h, HY_VARIANTS[h])]))
+
+async function runHy(ws, n, variant) {
   const state = `${ws}.state`
   fs.rmSync(state, { recursive: true, force: true })
   const input = `${TASKS.map((t) => t.prompt).join('\n')}\n/exit\n`
@@ -98,11 +105,11 @@ async function runHy(ws, n) {
   const r = await exec(process.execPath, [HY_MAIN, 'chat', '--cwd', ws, '--state-dir', state, '--json', '--full-auto', '--exec-server', EXEC_SERVER], {
     cwd: ws,
     input,
-    env: { ...childEnv, HY_CONFIG_DIR },
+    env: { ...childEnv, HY_CONFIG_DIR: hyConfigDirs[variant] },
   })
   const wallMs = Date.now() - started
-  fs.writeFileSync(path.join(outDir, `hy-${n}.stdout.jsonl`), r.stdout)
-  fs.writeFileSync(path.join(outDir, `hy-${n}.stderr.log`), r.stderr)
+  fs.writeFileSync(path.join(outDir, `${variant}-${n}.stdout.jsonl`), r.stdout)
+  fs.writeFileSync(path.join(outDir, `${variant}-${n}.stderr.log`), r.stderr)
   return { exit: r.code, wallMs, log: readHySession(state) }
 }
 
@@ -141,7 +148,7 @@ async function runDsh(ws, n) {
 async function one(harness, n) {
   const ws = await prepare(harness, n)
   const originalFormatTest = fs.readFileSync(path.join(ws, 'test/format.test.js'), 'utf8')
-  const r = harness === 'hy' ? await runHy(ws, n) : await runDsh(ws, n)
+  const r = harness in HY_VARIANTS ? await runHy(ws, n, harness) : await runDsh(ws, n)
   const checks = await checkWorkspace(ws, originalFormatTest)
   const record = { harness, n, stamp, model: MODEL, effort: EFFORT, ws, exit: r.exit, wallMs: r.wallMs, ...(r.sessionId ? { sessionId: r.sessionId } : {}), checks, ...(r.log ?? { logMissing: true }) }
   fs.appendFileSync(path.join(outDir, 'runs.jsonl'), `${JSON.stringify(record)}\n`)

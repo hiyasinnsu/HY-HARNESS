@@ -369,6 +369,11 @@ export const userConfigJsonSchema = {
     },
     autoApprove: { type: 'boolean' },
     fullAuto: { type: 'boolean' },
+    reasoningHistory: {
+      type: 'string',
+      enum: ['none', 'full'],
+      description: 'full: keep the model reasoning in the conversation and send it back (DeepSeek reasoning_content). Default none.',
+    },
     models: {
       type: 'array',
       description: 'Reusable model presets shown in Settings.',

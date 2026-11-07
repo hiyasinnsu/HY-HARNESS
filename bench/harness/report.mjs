@@ -5,7 +5,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-const dirs = process.argv.slice(2)
+const dirs = process.argv.slice(2).filter((a, i, all) => !a.startsWith('--') && all[i - 1] !== '--pair')
 if (dirs.length === 0) {
   console.error('usage: node bench/harness/report.mjs <results-dir> [...]')
   process.exit(2)
@@ -68,18 +68,24 @@ lines.push('')
 lines.push(`Model ${meta[0]?.model ?? '?'} (OpenCode Go), effort ${meta[0]?.effort ?? '?'}; ${meta[0]?.tasks?.length ?? '?'} tasks given in one session per run.`)
 lines.push(`Runs: ${harnesses.map((h) => `${h} ${by[h].length}`).join(', ')}${records.length > valid.length ? ` (${records.length - valid.length} without a readable log, excluded)` : ''}.`)
 lines.push('')
-lines.push(`| Metric | ${harnesses.map((h) => `${h} mean [95% CI]`).join(' | ')}${by.hy && by.dsh ? ' | HY − DSH [95% CI] |' : ' |'}`)
-lines.push(`|---|${harnesses.map(() => '---|').join('')}${by.hy && by.dsh ? '---|' : ''}`)
+// The difference column compares the first two harnesses: a variant against
+// `hy`, or `hy` against `dsh` (`--pair a,b` picks them explicitly).
+const pairArg = process.argv.indexOf('--pair')
+const order = (h) => (h === 'dsh' ? 2 : h === 'hy' ? 1 : 0)
+const [A, B] = pairArg > 0 ? process.argv[pairArg + 1].split(',') : [...harnesses].sort((a, b) => order(a) - order(b) || a.localeCompare(b))
+const paired = Boolean(A && B && by[A] && by[B])
+lines.push(`| Metric | ${harnesses.map((h) => `${h} mean [95% CI]`).join(' | ')}${paired ? ` | ${A} − ${B} [95% CI] |` : ' |'}`)
+lines.push(`|---|${harnesses.map(() => '---|').join('')}${paired ? '---|' : ''}`)
 for (const [key, label, get] of METRICS) {
   const cells = harnesses.map((h) => {
     const c = ci(by[h].map(get))
     return `${fmt(c.m, key)} [${fmt(c.lo, key)}, ${fmt(c.hi, key)}]`
   })
   let diff = ''
-  if (by.hy && by.dsh && by.hy.length > 1 && by.dsh.length > 1) {
-    const w = welch(by.hy.map(get), by.dsh.map(get))
+  if (paired && by[A].length > 1 && by[B].length > 1) {
+    const w = welch(by[A].map(get), by[B].map(get))
     diff = ` ${fmt(w.d, key)} [${fmt(w.lo, key)}, ${fmt(w.hi, key)}]${w.significant ? ' *' : ''} |`
-  } else if (by.hy && by.dsh) diff = ' – |'
+  } else if (paired) diff = ' – |'
   lines.push(`| ${label} | ${cells.join(' | ')} |${diff}`)
 }
 lines.push('')

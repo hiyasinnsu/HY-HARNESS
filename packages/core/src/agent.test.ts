@@ -138,6 +138,38 @@ test('prefix cache: one system prompt per session; context changes are appended;
   }
 })
 
+test('reasoningHistory full: the reasoning rides on its assistant message, and a rebuild keeps it', async () => {
+  for (const mode of ['full', 'none'] as const) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `hy-reason-${mode}-`))
+    try {
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'x\n')
+      const log = new SessionLog(path.join(dir, 'log.jsonl'))
+      log.setRun('run-r')
+      const replies = [
+        { content: JSON.stringify({ tool: 'read_file', args: { path: 'a.txt' } }), reasoning: 'I should read a.txt first.' },
+        { content: '{"final":"done"}', reasoning: 'It says x; done.' },
+      ]
+      const requests: Array<Array<{ role: string; content: string; reasoning?: string }>> = []
+      const provider = {
+        name: 'scripted',
+        complete: async (messages: Array<{ role: string; content: string; reasoning?: string }>) => {
+          requests.push(messages.map((m) => ({ ...m })))
+          return { ...replies.shift()!, usage: { inputTokens: 0, outputTokens: 0 } }
+        },
+      }
+      const tools = new ToolRuntime({} as never, dir)
+      const result = await new Agent({ provider, tools, sessionLog: log, workspaceRoot: dir, reasoningHistory: mode }).run('go')
+      const assistant = requests[1]!.find((m) => m.role === 'assistant')!
+      if (mode === 'full') assert.equal(assistant.reasoning, 'I should read a.txt first.')
+      else assert.equal(assistant.reasoning, undefined, 'none: only the reply goes back')
+      const rebuilt = rebuildHistory(log.events(), 'run-r')
+      assert.deepEqual(rebuilt, result.history.map((m) => ({ role: m.role, content: m.content, ...(m.reasoning ? { reasoning: m.reasoning } : {}) })))
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
 test('detectCycle finds a repeated multi-step sequence once per lap', async () => {
   const { detectCycle } = await import('./agent.js')
   assert.equal(detectCycle(['a', 'b', 'c', 'a', 'b']), undefined, 'not a full second lap yet')
