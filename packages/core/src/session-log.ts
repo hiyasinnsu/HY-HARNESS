@@ -42,6 +42,100 @@ export function readEvents(file: string): SessionEvent[] {
 /** Last seq per log file, shared by every SessionLog of this process. */
 const lastSeq = new Map<string, number>()
 
+const sleepCell = new Int32Array(new SharedArrayBuffer(4))
+function sleepSync(ms: number): void {
+  Atomics.wait(sleepCell, 0, 0, ms)
+}
+
+/**
+ * Runs `write` while holding `<file>.lock`, so the GUI, the CLI and automation
+ * appending to the same log take turns. A lock older than 10 s belongs to a
+ * crashed writer and is taken over; after 5 s of waiting the write goes ahead
+ * without it rather than losing the event.
+ */
+function withFileLock<T>(file: string, write: () => T): T {
+  const lock = `${file}.lock`
+  const deadline = Date.now() + 5_000
+  let fd: number | undefined
+  while (fd === undefined) {
+    try {
+      fd = fs.openSync(lock, 'wx')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') break
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > 10_000) fs.rmSync(lock, { force: true })
+      } catch {
+        // Released meanwhile.
+      }
+      if (Date.now() > deadline) break
+      sleepSync(2)
+    }
+  }
+  try {
+    return write()
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd)
+      fs.rmSync(lock, { force: true })
+    }
+  }
+}
+
+/**
+ * The seq of the file's last complete event, and whether the file ends in a
+ * partial line (a crash mid-write). Reads only the tail.
+ */
+function tailState(file: string): { seq: number; partial: boolean } {
+  let fd: number
+  try {
+    fd = fs.openSync(file, 'r')
+  } catch {
+    return { seq: 0, partial: false }
+  }
+  try {
+    const size = fs.fstatSync(fd).size
+    if (size === 0) return { seq: 0, partial: false }
+    const length = Math.min(size, 256 * 1024)
+    const buffer = Buffer.alloc(length)
+    fs.readSync(fd, buffer, 0, length, size - length)
+    const text = buffer.toString('utf8')
+    const partial = !text.endsWith('\n')
+    const lines = text.split('\n')
+    if (partial) lines.pop()
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]!.trim()
+      if (!line) continue
+      try {
+        const seq = (JSON.parse(line) as { seq?: unknown }).seq
+        if (typeof seq === 'number') return { seq, partial }
+      } catch {
+        // The cut first line of the tail window, or a damaged line.
+      }
+    }
+    return { seq: 0, partial }
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+/**
+ * Appends one event under the file lock. Its seq continues from the larger of
+ * this process's counter and the file itself, so events another process
+ * wrote are never numbered over (the search index skips seq it has seen). A
+ * partial last line left by a crash is ended first, so it stays one bad line
+ * instead of swallowing the new event.
+ */
+function appendEvent(file: string, build: (seq: number) => SessionEvent): SessionEvent {
+  return withFileLock(file, () => {
+    const tail = tailState(file)
+    const seq = Math.max(lastSeq.get(file) ?? 0, tail.seq) + 1
+    const event = build(seq)
+    fs.appendFileSync(file, `${tail.partial ? '\n' : ''}${JSON.stringify(event)}\n`, 'utf8')
+    lastSeq.set(file, seq)
+    return event
+  })
+}
+
 /** Files whose format header this process has already written. */
 const formatHeaders = new Set<string>()
 
@@ -99,9 +193,7 @@ export class SessionLog {
   }
 
   private writeAt(type: string, payload: unknown, ts: number): SessionEvent {
-    const seq = (lastSeq.get(this.file) ?? 0) + 1
-    lastSeq.set(this.file, seq)
-    const event: SessionEvent = {
+    return appendEvent(this.file, (seq) => ({
       v: 1,
       seq,
       ts,
@@ -110,9 +202,7 @@ export class SessionLog {
       ...(this.round !== undefined ? { round: this.round } : {}),
       type,
       payload,
-    }
-    fs.appendFileSync(this.file, JSON.stringify(event) + '\n', 'utf8')
-    return event
+    }))
   }
 
   /**
@@ -130,9 +220,7 @@ export class SessionLog {
     }
     const out: SessionEvent[] = []
     for (const event of events) {
-      const seq = (lastSeq.get(this.file) ?? 0) + 1
-      lastSeq.set(this.file, seq)
-      const written: SessionEvent = {
+      const written = appendEvent(this.file, (seq) => ({
         v: 1,
         seq,
         ts: event.ts,
@@ -141,8 +229,7 @@ export class SessionLog {
         ...(event.round !== undefined ? { round: event.round } : {}),
         type: event.type,
         payload: event.payload,
-      }
-      fs.appendFileSync(this.file, JSON.stringify(written) + '\n', 'utf8')
+      }))
       out.push(written)
     }
     return out
