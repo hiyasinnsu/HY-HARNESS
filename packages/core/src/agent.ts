@@ -70,7 +70,7 @@ export interface AgentOptions {
   /** `full`: assistant messages keep their reasoning, which the provider gets back (HarnessConfig.reasoningHistory). */
   reasoningHistory?: 'none' | 'full'
   /** System-prompt variant (benchmark experiments; HarnessConfig.promptVariant). */
-  promptVariant?: 'default' | 'lean'
+  promptVariant?: 'lean' | 'legacy' | 'lean2'
   /** CP-38: resolved feature flags (streaming can be turned off). */
   features?: Readonly<Record<string, boolean>>
   /** CP-19: lifecycle hooks (userPromptSubmit, modelRequest, …). Default: none. */
@@ -483,8 +483,12 @@ export class Agent {
       }
       messages[0] = { role: 'system', content: base }
       let completion: Completion
+      // Time spent waiting on the provider (the benchmark separates it from the
+      // harness's own time: provider speed varies a lot between requests).
+      let requestStarted = Date.now()
       try {
         await this.options.hooks?.modelRequest({ step, model: this.options.provider.name, native })
+        requestStarted = Date.now()
         completion = await this.options.provider.complete(messages, {
           // CP-18: live deltas for the GUI (the final message is logged as usual).
           ...(this.options.onEvent && featureEnabled(this.options.features, 'streaming')
@@ -510,6 +514,7 @@ export class Agent {
         }
         throw error
       }
+      const latencyMs = Date.now() - requestStarted
       lastInputTokens = completion.usage.inputTokens
       // CP-22: let the context manager warm its next compaction in the background.
       this.options.context?.afterResponse?.(messages, { usage: { inputTokens: completion.usage.inputTokens } })
@@ -543,6 +548,7 @@ export class Agent {
         role: 'worker',
         model: this.options.provider.name,
         usage: completion.usage,
+        latencyMs,
         // Detects prompt-template changes between steps (design §1).
         systemSha256: createHash('sha256').update(messages[0].content).digest('hex').slice(0, 16),
       })

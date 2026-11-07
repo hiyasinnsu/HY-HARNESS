@@ -37,12 +37,12 @@ export interface PromptExtras {
   roleInstruction?: string
   /** CP-10: deferred tools the model has already loaded with `tool_search`. */
   activeTools?: ReadonlySet<string>
-  /** Opening of the system prompt: `default`, or the `lean` benchmark variant. */
+  /** Opening of the system prompt: `lean` (default) or `legacy`. */
   promptVariant?: PromptVariant
 }
 
 /** System-prompt variants compared in the harness benchmark. */
-export type PromptVariant = 'default' | 'lean'
+export type PromptVariant = 'lean' | 'legacy' | 'lean2'
 
 function allSpecs(extras: PromptExtras): readonly ToolSpec[] {
   return extras.extraTools?.length ? [...TOOL_SPECS, ...extras.extraTools] : TOOL_SPECS
@@ -132,11 +132,21 @@ export function buildSystemPrompt(workspaceRoot: string, ptc = false, objective 
 This session:
 Workspace root: ${workspaceRoot}${extras.date ? `\nToday is ${extras.date}.` : ''}
 ${catalog ? `\n${catalog}\n` : ''}${extras.roleInstruction ? `\n${extras.roleInstruction.trim()}\n` : ''}${extras.goal ? `\n${goalPrompt(extras.goal)}\n` : ''}`
-  // `lean` (benchmark experiment, 2026-11-07): no pointer to the session part,
-  // and the reasoning line keeps only the tone (no language, no example, no
-  // "start with one sentence"), to measure what the rest of the prompt does.
-  const opening =
-    extras.promptVariant === 'lean'
+  // `lean` is the default since 2026-11-07: in the benchmark the longer
+  // `legacy` opening (Japanese reasoning, style rules, a pointer to the
+  // session part) made no measurable difference. The reasoning line keeps
+  // only the tone so the rest of the prompt can be measured from here.
+  // `lean2` (2026-11-07, user-drafted, under evaluation): drops the
+  // body-JSON warnings (the agent already retries a broken call), "never
+  // claim success" and "instead of guessing similar paths" (the not-found
+  // error already says how to search); adds intent, no partial solutions, a
+  // self-contained final answer, asking only for real decisions, and hedging
+  // uncertain points in the concise reasoning.
+  const lean2 = extras.promptVariant === 'lean2'
+  const opening = lean2
+    ? `You are HY-HARNESS, an autonomous coding agent.
+Private reasoning style: use a concise tone. Do not state uncertain points as certain; present them as possibilities.`
+    : extras.promptVariant !== 'legacy'
       ? `You are HY-HARNESS, a careful autonomous coding agent.
 Private reasoning style: use a concise tone.`
       : `You are HY-HARNESS, a careful autonomous coding agent. The workspace and this session's role are given at the end of these instructions.
@@ -167,6 +177,24 @@ To create or replace a whole file, give apply_patch file + content; to edit part
       : extras.finalSchema
         ? `When the work is done, reply without a tool call, with only JSON of type ${jsonSchemaToTs(extras.finalSchema)}.`
         : 'When the work is done, reply without a tool call: a short summary of what changed and what you verified.'
+    if (lean2) {
+      // Objective runs and structured output keep their own ending rule.
+      const ending = objective || extras.finalSchema ? `\n${finish}` : ''
+      return `${header}${sdk}
+Rules:
+Use the provided tools through function calls; call several at once when they are independent.
+Read the user's intent and its background before acting.
+Do not settle for a partial solution.
+To continue working, your reply must contain a tool call. A reply without a tool call is your final answer: make it self-contained, and do not end it with a plan or an offer. Ask the user only when a decision is genuinely theirs; say what you need decided and why (use ask_user when available).
+In the final answer, lead with the conclusion; if you did work, summarize clearly what changed and what you verified.${ending}
+Read a file before editing it. apply_patch rejects stale or unread files.
+Prefer small, verifiable steps. Inspect shell output before continuing.
+Do not try to read or write outside the workspace.
+If a path is missing, locate it with ${searchHint}.
+For a large edit, split it into several apply_patch calls; do not emit an entire large file in one response.
+To create or replace a whole file, give apply_patch file + content; to edit part of a file, a unified diff in patch.
+${sessionPart}`
+    }
     return `${header}${sdk}
 Rules:
 Use the provided tools through function calls; call several at once when they are independent.

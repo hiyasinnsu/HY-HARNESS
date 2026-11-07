@@ -10,7 +10,7 @@
 //     sandbox that forbids them, a per-file sweep of packages/*/dist minus the
 //     tests that need child processes (CI runs those on a normal Windows host)
 //
-// The integration suite (`pnpm test:integration`, ~10 minutes) is separate.
+// The integration suite (`pnpm test:integration`, ~2 minutes: files in parallel, then the machine-wide-state files in order) is separate.
 //
 // `node scripts/verify-all.mjs --list` prints the steps without running them.
 

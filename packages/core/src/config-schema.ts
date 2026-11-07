@@ -371,8 +371,8 @@ export const userConfigJsonSchema = {
     fullAuto: { type: 'boolean' },
     promptVariant: {
       type: 'string',
-      enum: ['default', 'lean'],
-      description: 'System-prompt variant. lean is a benchmark experiment (shorter opening and reasoning line). Default default.',
+      enum: ['lean', 'legacy', 'lean2'],
+      description: 'System-prompt opening. lean (default): short opening and a tone-only reasoning line. legacy: the opening used until 2026-11-07 (Japanese reasoning, longer style rules). lean2: under evaluation (fewer rules; intent, no partial solutions, self-contained answers).',
     },
     reasoningHistory: {
       type: 'string',

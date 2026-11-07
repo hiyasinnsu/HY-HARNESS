@@ -4,6 +4,7 @@
 // next to the first runs.jsonl and prints it.
 import fs from 'node:fs'
 import path from 'node:path'
+import { readDshSession, readHySession } from './logs.mjs'
 
 const dirs = process.argv.slice(2).filter((a, i, all) => !a.startsWith('--') && all[i - 1] !== '--pair')
 if (dirs.length === 0) {
@@ -15,6 +16,12 @@ const records = dirs.flatMap((d) =>
     ? fs.readFileSync(path.join(d, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
     : [],
 )
+// Runs recorded before a metric existed: read it from the session log again.
+for (const r of records) {
+  if (r.logMissing || (typeof r.modelWaitMs === 'number' && r.notFound !== undefined)) continue
+  const fresh = r.sessionId ? readDshSession(r.sessionId) : r.logFile && fs.existsSync(r.logFile) ? readHySession(path.dirname(r.logFile)) : undefined
+  if (fresh) for (const key of ['modelWaitMs', 'harnessMs', 'brokenCalls', 'notFound']) if (r[key] === undefined) r[key] = fresh[key]
+}
 
 // Two-sided 95% t quantiles by degrees of freedom.
 const T95 = [NaN, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.16, 2.145, 2.131, 2.12, 2.11, 2.101, 2.093, 2.086, 2.08, 2.074, 2.069, 2.064, 2.06, 2.056, 2.052, 2.048, 2.045, 2.042]
@@ -46,15 +53,21 @@ const METRICS = [
   ['hitRate', 'Cache hit rate (%)', (r) => r.hitRate],
   ['toolCalls', 'Tool calls', (r) => r.toolCalls],
   ['requests', 'Model requests', (r) => r.requests],
+  // Provider speed varies a lot between requests: compare harness time
+  // (time in turns minus model wait) first. Old runs without the split show –.
+  ['harnessMin', 'Time excl. model wait (min)', (r) => (typeof r.harnessMs === 'number' ? r.harnessMs / 60_000 : NaN)],
+  ['waitMin', 'Model wait (min)', (r) => (typeof r.modelWaitMs === 'number' ? r.modelWaitMs / 60_000 : NaN)],
   ['activeMin', 'Time in turns (min)', (r) => r.activeMs / 60_000],
   ['wallMin', 'Wall time (min)', (r) => r.wallMs / 60_000],
+  ['brokenCalls', 'Tool calls written as text (retried)', (r) => r.brokenCalls ?? NaN],
+  ['notFound', 'Reads of missing paths', (r) => r.notFound ?? NaN],
   ['checks', 'Hidden checks passed (of 5)', (r) => Object.values(r.checks).filter(Boolean).length],
 ]
 
 const fmt = (x, metric) => {
   if (!Number.isFinite(x)) return '–'
   if (metric === 'hitRate') return x.toFixed(1)
-  if (metric === 'activeMin' || metric === 'wallMin' || metric === 'checks') return x.toFixed(2)
+  if (['activeMin', 'wallMin', 'harnessMin', 'waitMin', 'checks', 'brokenCalls', 'notFound'].includes(metric)) return x.toFixed(2)
   return Math.round(x).toLocaleString('en-US')
 }
 

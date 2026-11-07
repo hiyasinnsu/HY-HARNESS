@@ -43,15 +43,35 @@ test('the path hint names search tools the model has: run_code only with PTC', (
   }
 })
 
-test('promptVariant lean: the shorter opening; the rest of the prompt is unchanged', () => {
+test('promptVariant: lean is the default; legacy keeps the old opening; the rest is shared', () => {
   for (const native of [true, false]) {
-    const base = buildSystemPrompt('C:\\work\\alpha', false, false, { native })
-    const lean = buildSystemPrompt('C:\\work\\alpha', false, false, { native, promptVariant: 'lean' })
+    const lean = buildSystemPrompt('C:\\work\\alpha', false, false, { native })
+    assert.equal(buildSystemPrompt('C:\\work\\alpha', false, false, { native, promptVariant: 'lean' }), lean)
+    const base = buildSystemPrompt('C:\\work\\alpha', false, false, { native, promptVariant: 'legacy' })
+    assert.match(base, /^You are HY-HARNESS, a careful autonomous coding agent\. The workspace and this session's role are given at the end/)
     assert.match(lean, /^You are HY-HARNESS, a careful autonomous coding agent\.\nPrivate reasoning style: use a concise tone\.\nShell environment:/)
     assert.doesNotMatch(lean, /Japanese|given at the end|Start with one sentence/)
     const rest = (s: string) => s.slice(s.indexOf('Shell environment:'))
     assert.equal(rest(lean), rest(base), 'only the first two lines differ')
   }
+})
+
+test('promptVariant lean2: the user-drafted rules (native function calling)', () => {
+  const p = buildSystemPrompt('C:\\work\\alpha', false, false, { native: true, promptVariant: 'lean2' })
+  assert.match(p, /^You are HY-HARNESS, an autonomous coding agent\.\nPrivate reasoning style: use a concise tone\. Do not state uncertain points as certain; present them as possibilities\.\nShell environment:/)
+  for (const line of [
+    "Read the user's intent and its background before acting.",
+    'Do not settle for a partial solution.',
+    'Ask the user only when a decision is genuinely theirs',
+    'In the final answer, lead with the conclusion; if you did work, summarize clearly what changed and what you verified.',
+    'If a path is missing, locate it with search_glob / search_grep.\n',
+  ]) assert.ok(p.includes(line), line)
+  for (const gone of ['never write JSON such as', 'Such JSON', 'Never claim success', 'instead of guessing similar paths', 'careful']) {
+    assert.ok(!p.includes(gone), `removed: ${gone}`)
+  }
+  assert.match(p, /\nThis session:\nWorkspace root: C:\\work\\alpha\n*$/)
+  // An objective run keeps its own ending rule.
+  assert.match(buildSystemPrompt('C:\\work\\alpha', false, true, { native: true, promptVariant: 'lean2' }), /Finish only by calling claim_complete/)
 })
 
 test('skill and MCP catalogs sit in the session part (only the tools they add change the earlier text)', () => {

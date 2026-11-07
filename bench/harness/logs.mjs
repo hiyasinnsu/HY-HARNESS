@@ -10,7 +10,7 @@ import os from 'node:os'
 import path from 'node:path'
 import zlib from 'node:zlib'
 
-function summarize(steps, toolCalls, turns, extra = {}) {
+function summarize(steps, toolCalls, turns, modelWaitMs, extra = {}) {
   const input = steps.reduce((a, s) => a + s.input, 0)
   const hit = steps.reduce((a, s) => a + s.hit, 0)
   const output = steps.reduce((a, s) => a + s.output, 0)
@@ -26,6 +26,11 @@ function summarize(steps, toolCalls, turns, extra = {}) {
     turns: turns.length,
     turnMs: turns.map((t) => t.end - t.start),
     activeMs,
+    // Provider wait on the main session (its speed varies a lot between
+    // requests); harnessMs is the rest of the time in turns: tools, the
+    // harness itself, and anything else under the harness's control.
+    modelWaitMs,
+    harnessMs: Math.max(0, activeMs - modelWaitMs),
     ...extra,
   }
 }
@@ -61,18 +66,32 @@ export function readHySession(stateDir) {
   let toolCalls = 0
   const turns = []
   const open = new Map()
+  let modelWaitMs = 0
+  let lastTs = 0
+  // A tool call written as body text and sent back (agent retry), and reads of a path that does not exist.
+  let brokenCalls = 0
+  let notFound = 0
   for (const e of events) {
+    const main = !String(e.runId ?? '').includes('.sub')
     if (e.type === 'step/end') {
       const u = e.payload?.usage ?? {}
       steps.push({ input: u.inputTokens ?? 0, hit: u.cacheHitTokens ?? 0, output: u.outputTokens ?? 0 })
-    } else if (e.type === 'tool/result') toolCalls++
+      // latencyMs is logged since 2026-11-07; older logs: since the previous event.
+      if (main) modelWaitMs += typeof e.payload?.latencyMs === 'number' ? e.payload.latencyMs : Math.max(0, e.ts - lastTs)
+    } else if (e.type === 'tool/result') {
+      toolCalls++
+      if (e.payload?.isError === true && /does not exist|ENOENT|not found/i.test(String(e.payload?.output ?? '')) && /read|search/.test(String(e.payload?.name))) notFound++
+    } else if (e.type === 'turn/retry' && e.payload?.reason === 'broken-tool-call') brokenCalls++
     else if (e.type === 'turn/start' && !String(e.runId ?? '').includes('.sub')) open.set(e.runId, e.ts)
     else if (e.type === 'turn/end' && open.has(e.runId)) {
       turns.push({ start: open.get(e.runId), end: e.ts })
       open.delete(e.runId)
     }
+    // Events written after the response arrives (reasoning, the token check)
+    // must not count as the request start in the old-log estimate.
+    if (main && !['step/end', 'assistant/thinking', 'token/estimate'].includes(e.type)) lastTs = e.ts
   }
-  return summarize(steps, toolCalls, turns, { logFile: file })
+  return summarize(steps, toolCalls, turns, modelWaitMs, { logFile: file, brokenCalls, notFound })
 }
 
 // --- DSH: appended zstd frames of JSONL ---
@@ -135,18 +154,33 @@ export function readDshSession(sessionId) {
   const pending = [file]
   const seen = new Set()
   let main = true
+  let modelWaitMs = 0
+  let notFound = 0
+  const names = new Map()
   while (pending.length > 0) {
     const current = pending.shift()
     if (seen.has(current)) continue
     seen.add(current)
     let turnStart
+    let stepStart
     for (const e of dshEvents(current)) {
+      // Provider wait: from step/start to the step's assistant message (main session).
+      if (main && e.type === 'step/start') stepStart = e.time
       if (e.type === 'assistant/message' && e.data?.usage) {
+        if (main && stepStart !== undefined) {
+          modelWaitMs += Math.max(0, e.time - stepStart)
+          stepStart = undefined
+        }
         const u = e.data.usage
         const hit = u.cacheReadTokens ?? 0
         steps.push({ input: (u.inputTokens ?? 0) + hit + (u.cacheWriteTokens ?? 0), hit, output: u.outputTokens ?? 0 })
-      } else if (e.type === 'tool/call') toolCalls++
-      else if (main && e.type === 'turn/start') turnStart = e.time
+      } else if (e.type === 'tool/call') {
+        toolCalls++
+        names.set(e.data?.callId, String(e.data?.name ?? ''))
+      } else if (e.type === 'tool/result' && e.data?.message?.isError) {
+        const text = (e.data.message.content ?? []).map((b) => b.text ?? '').join('')
+        if (/not found|does not exist|ENOENT/i.test(text) && /read|glob|grep/.test(names.get(e.data.message.toolCallId) ?? '')) notFound++
+      } else if (main && e.type === 'turn/start') turnStart = e.time
       else if (main && e.type === 'turn/end' && turnStart !== undefined) {
         turns.push({ start: turnStart, end: e.time })
         turnStart = undefined
@@ -159,5 +193,6 @@ export function readDshSession(sessionId) {
     }
     main = false
   }
-  return summarize(steps, toolCalls, turns, { logFile: file })
+  // DSH has no body-JSON retry path; 0 keeps the column comparable.
+  return summarize(steps, toolCalls, turns, modelWaitMs, { logFile: file, brokenCalls: 0, notFound })
 }

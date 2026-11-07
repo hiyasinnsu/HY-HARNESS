@@ -35,13 +35,14 @@
     "release:local": "node scripts/release-local.mjs",
     "desktop:package:dir": "node scripts/check-portable-lock.mjs && pnpm build && electron-builder --win dir --x64",
     "test": "node --test --test-reporter=spec \"packages/*/dist/**/*.test.js\" \"packages/hy-cli/web/test/*.test.mjs\"",
-    "test:integration": "node --test --import ./tests/integration/isolate.mjs --import ./tests/integration/fresh-build.mjs --test-isolation=none --test-reporter=spec --test-concurrency=1 \"tests/integration/*.test.mjs\"",
+    "test:integration": "node scripts/test-integration.mjs",
     "coverage:ts": "node --test --experimental-test-coverage \"packages/*/dist/**/*.test.js\" \"packages/hy-cli/web/test/*.test.mjs\"",
     "coverage:rust": "node scripts/coverage-rust.mjs",
     "bench:checkpoint": "node tests/bench/checkpoint-bench.mjs",
     "bench:startup": "node scripts/bench-startup.mjs",
     "bench:harness": "node bench/harness/run.mjs",
-    "test:regression": "node --test --import ./tests/integration/isolate.mjs --import ./tests/integration/fresh-build.mjs --test-isolation=none --test-reporter=spec --test-concurrency=1 tests/regression/golden.test.mjs tests/integration/chat-resume.test.mjs tests/integration/guardian.test.mjs tests/integration/verifier-ralph.test.mjs tests/integration/turn-queue.test.mjs tests/integration/mcp-server.test.mjs tests/integration/tool-overhead.test.mjs"
+    "test:regression": "node --test --import ./tests/integration/isolate.mjs --import ./tests/integration/fresh-build.mjs --test-isolation=none --test-reporter=spec --test-concurrency=1 tests/regression/golden.test.mjs tests/integration/chat-resume.test.mjs tests/integration/guardian.test.mjs tests/integration/verifier-ralph.test.mjs tests/integration/turn-queue.test.mjs tests/integration/mcp-server.test.mjs tests/integration/tool-overhead.test.mjs",
+    "test:integration:serial": "node --test --import ./tests/integration/isolate.mjs --import ./tests/integration/fresh-build.mjs --test-isolation=none --test-reporter=spec --test-concurrency=1 \"tests/integration/*.test.mjs\""
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
