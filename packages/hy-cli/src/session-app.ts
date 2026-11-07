@@ -1605,6 +1605,12 @@ export class Conversation {
     }
     if (!this.checkpoints) return 'undo is unavailable: checkpoints are off'
     const result = await this.client.checkpointRollback(this.runId, `t${turn}`)
+    // Files that could not be restored (locked, say): the files and the
+    // conversation would disagree, so the turn stays in the conversation.
+    if (result.skipped && result.skipped.length > 0) {
+      this.log.append('turn/undo-incomplete', { turn, skipped: result.skipped })
+      return `undo of turn ${turn} incomplete: ${result.skipped.length} file(s) could not be restored (${result.skipped.slice(0, 5).join(', ')}); the conversation was not rewound. Close what holds them and undo again.`
+    }
     this.log.append('turn/undo', { turn })
     this.history = rebuildHistory(readEvents(this.log.file), this.runId)
     this.turns -= 1

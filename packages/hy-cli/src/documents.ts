@@ -57,7 +57,18 @@ export function resolvePreviewPath(workspaceRoot: string, roots: readonly { id: 
     throw new DocumentError(`${rel} is outside the workspace`, 400)
   }
   if (!fs.existsSync(lexical)) throw new DocumentError(`${rel} does not exist`, 404)
-  return fs.realpathSync.native(lexical)
+  // Check again after links resolve: a junction or symlink inside the
+  // workspace can point outside it, which the string check above cannot see.
+  const real = fs.realpathSync.native(lexical)
+  if (!isInside(baseReal, real)) throw new DocumentError(`${rel} is outside the workspace`, 400)
+  return real
+}
+
+function isInside(base: string, target: string): boolean {
+  const norm = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p)
+  const b = norm(base)
+  const t = norm(target)
+  return t === b || t.startsWith(b.endsWith(path.sep) ? b : `${b}${path.sep}`)
 }
 
 /** The LibreOffice executable, when this machine has one. */

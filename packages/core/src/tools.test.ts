@@ -228,6 +228,44 @@ test('CP-10: tool_search loads a deferred tool, which then becomes callable', as
   }
 })
 
+/** An exec client with a scripted persistent shell, recording calls. */
+function persistentShellStub(read: () => Promise<{ data: string; exitCode?: number; eof?: boolean; timedOut?: boolean }>) {
+  const calls: string[] = []
+  let next = 0
+  const exec = {
+    shellOpen: async (p: { sandboxMode: string }) => (calls.push(`open ${p.sandboxMode}`), { shellId: `sh${++next}` }),
+    shellWrite: async (id: string, data: string) => (calls.push(`write ${id} ${data}`), {}),
+    shellRead: async (id: string) => (calls.push(`read ${id}`), read()),
+    shellClose: async (id: string) => (calls.push(`close ${id}`), {}),
+    policyEvaluate: async () => ({ decision: 'allow' }),
+  }
+  return { exec, calls }
+}
+
+test('persistent shell: a sandbox mode change closes the old shell and opens one in the new mode', async () => {
+  let mode = 'unconfined'
+  const { exec, calls } = persistentShellStub(async () => ({ data: 'ok', exitCode: 0 }))
+  const tools = new ToolRuntime(exec as never, process.cwd(), undefined, false, { persistentShell: true, sandboxMode: () => mode } as never)
+  await tools.execute('shell', { command: 'echo one' })
+  mode = 'read-only'
+  await tools.execute('shell', { command: 'echo two' })
+  assert.deepEqual(calls, ['open unconfined', 'write sh1 echo one', 'read sh1', 'close sh1', 'open read-only', 'write sh2 echo two', 'read sh2'])
+})
+
+test('persistent shell: stopping the turn closes the running shell', async () => {
+  let release: (v: { data: string; eof: boolean }) => void = () => {}
+  const { exec, calls } = persistentShellStub(() => new Promise((resolve) => (release = resolve)))
+  const tools = new ToolRuntime(exec as never, process.cwd(), undefined, false, { persistentShell: true, sandboxMode: () => 'unconfined' } as never)
+  const controller = new AbortController()
+  tools.setSignal(controller.signal)
+  const running = tools.execute('shell', { command: 'Start-Sleep 600' })
+  await new Promise((r) => setTimeout(r, 20))
+  controller.abort()
+  release({ data: '', eof: true }) // closing the shell ends the read
+  await assert.rejects(running, /cancelled|aborted/)
+  assert.ok(calls.includes('close sh1'), calls.join(' | '))
+})
+
 test('ask_user: no answer is reported as no answer, not as consent', async () => {
   for (const [reply, expected] of [
     ['use postgres', { answer: 'use postgres' }],

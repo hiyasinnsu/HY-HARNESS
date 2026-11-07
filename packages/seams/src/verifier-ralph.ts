@@ -32,7 +32,7 @@ export type RoundOutcome =
   | 'gate2-failed'
   | 'succeeded'
 
-export type RalphOutcome = 'succeeded' | 'budget-exhausted' | 'head-moved' | 'interrupted'
+export type RalphOutcome = 'succeeded' | 'budget-exhausted' | 'head-moved' | 'interrupted' | 'rollback-incomplete'
 
 export interface FailureDigest {
   round: number
@@ -156,17 +156,26 @@ export async function runVerifierRalph(o: RalphOptions): Promise<RalphResult> {
       report(`round ${round}: ${outcome}${d?.reason ? ` (${d.reason})` : ''}`)
       digest = d
     }
-    /** Restores rN; false when HEAD moved (the run must stop). */
-    const rollback = async (): Promise<boolean> => {
+    /**
+     * Restores rN. Returns why the run must stop: HEAD moved, or some files
+     * could not be restored (`skipped`, e.g. locked): the next round must not
+     * start on a half-restored tree.
+     */
+    const rollback = async (): Promise<'head-moved' | 'rollback-incomplete' | undefined> => {
       try {
         const r = await o.exec.checkpointRollback(o.runId, label)
+        if (r.skipped && r.skipped.length > 0) {
+          log('round/end', { round, outcome: 'aborted', rollbackSkipped: r.skipped })
+          report(`round ${round}: rollback incomplete, ${r.skipped.length} file(s) not restored (${r.skipped.slice(0, 5).join(', ')}); stopping`)
+          return 'rollback-incomplete'
+        }
         report(`round ${round}: rolled back (${r.restored.length} restored, ${r.deleted.length} deleted)`)
-        return true
+        return undefined
       } catch (e) {
         if (isHeadMoved(e)) {
           log('round/end', { round, outcome: 'aborted', headMoved: true })
           report(`round ${round}: HEAD moved during the run; stopping without resetting it`)
-          return false
+          return 'head-moved'
         }
         throw e
       }
@@ -197,7 +206,8 @@ export async function runVerifierRalph(o: RalphOptions): Promise<RalphResult> {
     if (failure !== undefined || result === undefined) {
       const exhausted = failure instanceof BudgetExhaustedError
       const reason = failure instanceof Error ? failure.message : String(failure)
-      if (!(await rollback())) return { outcome: 'head-moved', rounds: round }
+      const stopped = await rollback()
+      if (stopped) return { outcome: stopped, rounds: round }
       end(exhausted ? 'budget-exhausted' : 'aborted', { round, outcome: exhausted ? 'budget-exhausted' : 'aborted', reason })
       if (exhausted) return { outcome: 'budget-exhausted', rounds: round, ...(digest ? { digest } : {}) }
       if (o.signal?.aborted) return { outcome: 'interrupted', rounds: round, ...(digest ? { digest } : {}) }
@@ -283,7 +293,10 @@ export async function runVerifierRalph(o: RalphOptions): Promise<RalphResult> {
         }
         log('gate/result', { round, stage: 2, pass: verdict.pass, detail: verdict })
         if (!verdict.pass) {
-          if (verdict.rollbackRecommended && !(await rollback())) return { outcome: 'head-moved', rounds: round }
+          if (verdict.rollbackRecommended) {
+            const stopped = await rollback()
+            if (stopped) return { outcome: stopped, rounds: round }
+          }
           end('gate2-failed', {
             round,
             outcome: 'gate2-failed',

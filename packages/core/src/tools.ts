@@ -497,7 +497,7 @@ export class ToolRuntime {
   /** Session working directory, workspace-relative (`''` = the root), WP-30. */
   private cwd = ''
   /** The session's persistent shell (WP-31), opened on first use. */
-  private shellHandle: { id?: string; gap?: string } | undefined
+  private shellHandle: { id?: string; gap?: string; mode?: string } | undefined
   /** Why the persistent shell was unavailable, reported once on the one-shot path. */
   private persistentGap: string | undefined
   /** Plan mode's read-only set, over `options.allowTools`. */
@@ -773,6 +773,13 @@ export class ToolRuntime {
    */
   private async shellPersistent(command: string, args: Record<string, unknown>): Promise<ToolResult | undefined> {
     const mode = this.options.sandboxMode?.() ?? 'unconfined'
+    // The shell runs with the token of the mode it was opened in. After a mode
+    // change (unconfined → read-only, say) it must not take another command:
+    // close it and open one in the current mode.
+    if (this.shellHandle && this.shellHandle.mode !== mode) {
+      if (this.shellHandle.id) await this.exec.shellClose(this.shellHandle.id).catch(() => undefined)
+      this.shellHandle = undefined
+    }
     if (!this.shellHandle) {
       const opened = await this.exec.shellOpen({
         ...(this.options.runId !== undefined ? { runId: this.options.runId } : {}),
@@ -782,6 +789,7 @@ export class ToolRuntime {
       this.shellHandle = {
         ...(opened.shellId ? { id: opened.shellId } : {}),
         ...(opened.gap ? { gap: opened.gap } : {}),
+        mode,
       }
     }
     const shellId = this.shellHandle?.id
@@ -810,8 +818,25 @@ export class ToolRuntime {
     }
     const timeout =
       this.options.shellTimeoutMs ?? (args.hardTimeoutMs !== undefined ? Number(args.hardTimeoutMs) : 120_000)
-    await this.exec.shellWrite(shellId, command)
-    const read = await this.exec.shellRead(shellId, timeout)
+    // Stop: closing the shell ends the running command and its children (the
+    // read then returns), and the next call opens a fresh shell.
+    const signal = this.signal
+    if (signal?.aborted) throw new Error('turn cancelled')
+    let stopped = false
+    const onAbort = () => {
+      stopped = true
+      this.shellHandle = undefined
+      void this.exec.shellClose(shellId).catch(() => undefined)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    let read: Awaited<ReturnType<typeof this.exec.shellRead>>
+    try {
+      await this.exec.shellWrite(shellId, command)
+      read = await this.exec.shellRead(shellId, timeout)
+    } finally {
+      signal?.removeEventListener('abort', onAbort)
+    }
+    if (stopped) throw new Error('turn cancelled: the persistent shell was closed')
     if (read.timedOut || read.eof) {
       // A timed-out or exited shell cannot be trusted with the next command.
       await this.exec.shellClose(shellId).catch(() => undefined)
@@ -1622,15 +1647,25 @@ export class ToolRuntime {
     } catch {
       throw new Error(`invalid URL: ${rawUrl}`)
     }
-    if (!hostAllowed(url, web.allowDomains)) {
+    // Every host the request reaches, the first and each redirect, must be
+    // allowed or approved.
+    const authorize = async (target: URL, redirect: boolean): Promise<void> => {
+      if (hostAllowed(target, web.allowDomains)) return
+      // A redirect within the origin the user already approved needs no new prompt.
+      if (redirect && target.origin === url.origin) return
       // The request leaves the sandbox's control, so Guardian never approves it.
       const answer = this.approve
-        ? await this.approve({ command: `web_fetch ${url.href}`, justification: 'network request', sandbox: 'unconfined' })
+        ? await this.approve({
+            command: `web_fetch ${target.href}`,
+            justification: redirect ? `network request (redirected from ${url.href})` : 'network request',
+            sandbox: 'unconfined',
+          })
         : false
       const decision: ApprovalDecision = typeof answer === 'boolean' ? { approved: answer, by: 'user' } : answer
-      if (!decision.approved) throw new Error(`web_fetch not approved: ${url.href}`)
+      if (!decision.approved) throw new Error(`web_fetch not approved: ${target.href}${redirect ? ` (redirected from ${url.href})` : ''}`)
     }
-    return { ...(await webFetch(url.href, web)) }
+    await authorize(url, false)
+    return { ...(await webFetch(url.href, web, (next) => authorize(next, true))) }
   }
 
   private async mcpCall(server: string, tool: string, args: unknown): Promise<ToolResult> {

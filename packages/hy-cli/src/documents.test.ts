@@ -137,6 +137,19 @@ test('a conversion is cached by content hash and failures are explained', { skip
   }
 })
 
+test('a junction inside the workspace cannot preview a file outside it', () => {
+  const dir = fixture()
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-doc-outside-'))
+  try {
+    fs.writeFileSync(path.join(outside, 'secret.pdf'), PDF)
+    fs.symlinkSync(outside, path.join(dir, 'link'), 'junction')
+    assert.throws(() => resolvePreviewPath(dir, [], 'link/secret.pdf'), (e: unknown) => e instanceof DocumentError && /outside the workspace/.test(e.message))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+    fs.rmSync(outside, { recursive: true, force: true })
+  }
+})
+
 test('root-qualified previews and detection helpers behave', () => {
   const dir = fixture()
   try {

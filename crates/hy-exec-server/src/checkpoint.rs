@@ -40,6 +40,17 @@ pub enum CheckpointError {
     },
 }
 
+/// Copies through a temporary file in the destination's directory and renames
+/// it into place, so an interrupted copy never leaves a truncated index.
+fn copy_atomically(src: &Path, dst: &Path) -> Result<(), CheckpointError> {
+    let tmp = dst.with_extension("hy-tmp");
+    std::fs::copy(src, &tmp).map_err(|e| CheckpointError::Io(e.to_string()))?;
+    std::fs::rename(&tmp, dst).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        CheckpointError::Io(e.to_string())
+    })
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Meta {
     head: Option<String>,
@@ -148,7 +159,7 @@ impl CheckpointEngine {
         let work_index = dir.join(format!("{label}.work.index"));
         let had_index = index.exists();
         if had_index {
-            std::fs::copy(&index, &user_index).map_err(|e| CheckpointError::Io(e.to_string()))?;
+            copy_atomically(&index, &user_index)?;
         }
         // Snapshot from the run's stat cache when there is one: it carries stat
         // data git refreshed at the previous checkpoint, so only files changed
@@ -258,9 +269,23 @@ impl CheckpointEngine {
             .git(&["rev-parse", &format!("{refname}^{{tree}}")], &[], None)?
             .trim()
             .to_string();
-        let meta: Option<Meta> = std::fs::read(dir.join(format!("{label}.meta.json")))
+        // Without readable metadata the rollback cannot know whether the user
+        // had a staging area: refuse before any file changes, instead of
+        // treating it as "no index" and deleting .git/index.
+        let meta: Meta = std::fs::read(dir.join(format!("{label}.meta.json")))
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok());
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .ok_or_else(|| {
+                CheckpointError::Io(format!(
+                    "checkpoint {label} has missing or unreadable metadata; nothing was restored"
+                ))
+            })?;
+        let user_index = dir.join(format!("{label}.user.index"));
+        if meta.had_index && !user_index.exists() {
+            return Err(CheckpointError::Io(format!(
+                "checkpoint {label} lost its saved staging area; nothing was restored"
+            )));
+        }
 
         let index = self.index_path()?;
         // Work on a copy of the checkpoint's snapshot index: its entries are the
@@ -273,9 +298,7 @@ impl CheckpointEngine {
         let _ = std::fs::remove_file(&cur_index);
         let snap_index = dir.join(format!("{label}.snap.index"));
         let env = self.index_env(&cur_index);
-        let snapped = meta
-            .as_ref()
-            .is_some_and(|m| m.tree.as_deref() == Some(ckpt_tree.as_str()))
+        let snapped = meta.tree.as_deref() == Some(ckpt_tree.as_str())
             && std::fs::copy(&snap_index, &cur_index).is_ok();
         if !snapped {
             self.git(&["read-tree", &ckpt_tree], &env, None)?;
@@ -313,10 +336,8 @@ impl CheckpointEngine {
             &env,
             None,
         )?;
-        let keep_unprotected: BTreeSet<&str> = meta
-            .as_ref()
-            .map(|m| m.unprotected.iter().map(String::as_str).collect())
-            .unwrap_or_default();
+        let keep_unprotected: BTreeSet<&str> =
+            meta.unprotected.iter().map(String::as_str).collect();
         let delete: BTreeSet<String> = others
             .split('\0')
             .filter(|p| !p.is_empty() && !keep_unprotected.contains(p))
@@ -368,25 +389,23 @@ impl CheckpointEngine {
         // The worktree now matches this index, so it becomes the stat cache.
         let _ = std::fs::copy(&cur_index, Self::stat_cache(&dir));
 
-        // Restore the user's staging area exactly as it was before the checkpoint.
-        let user_index = dir.join(format!("{label}.user.index"));
-        if meta.as_ref().is_some_and(|m| m.had_index) && user_index.exists() {
-            std::fs::copy(&user_index, &index).map_err(|e| CheckpointError::Io(e.to_string()))?;
+        // Restore the user's staging area exactly as it was before the checkpoint
+        // (written beside .git/index and renamed over it, never half-written).
+        if meta.had_index {
+            copy_atomically(&user_index, &index)?;
         } else {
             let _ = std::fs::remove_file(&index);
         }
 
         result.duration_ms = started.elapsed().as_millis() as u64;
 
-        if let Some(meta) = meta {
-            let actual = self.git_opt(&["rev-parse", "HEAD"], &[], None)?;
-            if actual != meta.head {
-                return Err(CheckpointError::HeadMoved {
-                    expected: meta.head,
-                    actual,
-                    rollback: Box::new(result),
-                });
-            }
+        let actual = self.git_opt(&["rev-parse", "HEAD"], &[], None)?;
+        if actual != meta.head {
+            return Err(CheckpointError::HeadMoved {
+                expected: meta.head,
+                actual,
+                rollback: Box::new(result),
+            });
         }
         Ok(result)
     }
@@ -749,6 +768,61 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(String::from_utf8_lossy(&staged.stdout).trim(), "b.txt");
         assert!(!repo.path().join("c.txt").exists());
+    }
+
+    #[test]
+    fn unreadable_metadata_refuses_the_rollback_and_keeps_the_index() {
+        if !has_git() {
+            return;
+        }
+        let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let state = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("{e}"));
+            assert!(out.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap_or_else(|e| panic!("{e}"));
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "init"]);
+        std::fs::write(repo.path().join("b.txt"), "staged\n").unwrap_or_else(|e| panic!("{e}"));
+        git(&["add", "b.txt"]);
+        let engine = CheckpointEngine::new(repo.path().to_path_buf(), state.path().to_path_buf());
+        engine
+            .create("run3", "base")
+            .unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(repo.path().join("a.txt"), "two\n").unwrap_or_else(|e| panic!("{e}"));
+
+        // Corrupt the metadata: the rollback must refuse and touch nothing.
+        let meta = state
+            .path()
+            .join("ckpt")
+            .join("run3")
+            .join("base.meta.json");
+        std::fs::write(&meta, "{not json").unwrap_or_else(|e| panic!("{e}"));
+        let index = repo.path().join(".git").join("index");
+        let before = std::fs::read(&index).unwrap_or_else(|e| panic!("{e}"));
+        let err = match engine.rollback("run3", "base") {
+            Ok(r) => panic!("rollback succeeded: {r:?}"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("unreadable metadata"), "{err}");
+        assert_eq!(
+            std::fs::read(&index).unwrap_or_else(|e| panic!("{e}")),
+            before,
+            ".git/index kept"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("a.txt")).unwrap_or_else(|e| panic!("{e}")),
+            "two\n",
+            "no file was restored"
+        );
     }
 
     #[test]

@@ -73,7 +73,16 @@ export function htmlToText(html: string): { title: string; text: string } {
   return { title, text }
 }
 
-export async function webFetch(rawUrl: string, config: WebConfig = {}) {
+/** At most this many redirects are followed (each one checked). */
+const MAX_REDIRECTS = 5
+
+/**
+ * Fetches a page. Redirects are followed one hop at a time, and every new
+ * location goes through `checkRedirect` first (the same allow-list and
+ * approval as the first URL), so an allowed site cannot forward the request
+ * to a host that was never approved.
+ */
+export async function webFetch(rawUrl: string, config: WebConfig = {}, checkRedirect?: (url: URL) => Promise<void>) {
   let url: URL
   try {
     url = new URL(rawUrl)
@@ -81,11 +90,23 @@ export async function webFetch(rawUrl: string, config: WebConfig = {}) {
     throw new Error(`invalid URL: ${rawUrl}`)
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`only http and https URLs can be fetched: ${rawUrl}`)
-  const response = await fetch(url, {
-    redirect: 'follow',
-    signal: AbortSignal.timeout(config.timeoutMs ?? 30_000),
-    headers: { 'user-agent': 'hy-harness web_fetch', accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.5' },
-  })
+  const signal = AbortSignal.timeout(config.timeoutMs ?? 30_000)
+  let response: Response
+  for (let hop = 0; ; hop++) {
+    response = await fetch(url, {
+      redirect: 'manual',
+      signal,
+      headers: { 'user-agent': 'hy-harness web_fetch', accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.5' },
+    })
+    const location = response.headers.get('location')
+    if (response.status < 300 || response.status >= 400 || !location) break
+    if (hop >= MAX_REDIRECTS) throw new Error(`too many redirects from ${rawUrl}`)
+    await response.body?.cancel().catch(() => undefined)
+    const next = new URL(location, url)
+    if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error(`redirect to a non-http URL refused: ${next.href}`)
+    await checkRedirect?.(next)
+    url = next
+  }
   const max = config.maxBytes ?? DEFAULT_MAX_BYTES
   const reader = response.body?.getReader()
   const chunks: Uint8Array[] = []
@@ -111,7 +132,7 @@ export async function webFetch(rawUrl: string, config: WebConfig = {}) {
   const { title, text } = /html/i.test(type) || /^\s*<(!doctype|html)/i.test(body) ? htmlToText(body) : { title: '', text: body }
   const truncated = cut || text.length > MAX_TEXT
   return {
-    url: response.url,
+    url: url.href,
     status: response.status,
     contentType: type,
     ...(title ? { title } : {}),

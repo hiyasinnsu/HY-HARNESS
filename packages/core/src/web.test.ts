@@ -50,6 +50,42 @@ test('webFetch converts HTML, caps the size and refuses other schemes', async ()
   }
 })
 
+test('webFetch checks every redirect target before it connects', async () => {
+  let reachedTarget = 0
+  const target = http.createServer((_req, res) => {
+    reachedTarget++
+    res.writeHead(200, { 'content-type': 'text/plain' }).end('internal secret')
+  })
+  await new Promise<void>((r) => target.listen(0, '127.0.0.1', r))
+  const targetUrl = `http://127.0.0.1:${(target.address() as AddressInfo).port}/secret`
+  const allowed = http.createServer((req, res) => {
+    if (req.url === '/hop') return void res.writeHead(302, { location: '/end' }).end()
+    if (req.url === '/end') return void res.writeHead(200, { 'content-type': 'text/plain' }).end('same host')
+    res.writeHead(302, { location: targetUrl }).end()
+  })
+  await new Promise<void>((r) => allowed.listen(0, '127.0.0.1', r))
+  const base = `http://localhost:${(allowed.address() as AddressInfo).port}`
+  try {
+    const seen: string[] = []
+    await assert.rejects(
+      webFetch(`${base}/`, {}, async (next) => {
+        seen.push(next.href)
+        throw new Error(`web_fetch not approved: ${next.href}`)
+      }),
+      /not approved/,
+    )
+    assert.deepEqual(seen, [targetUrl])
+    assert.equal(reachedTarget, 0, 'the unapproved host was never contacted')
+    // An approved redirect is followed, and the final URL is reported.
+    const page = await webFetch(`${base}/hop`, {}, async () => undefined)
+    assert.equal(page.text, 'same host')
+    assert.equal(page.url, `${base}/end`)
+  } finally {
+    allowed.close()
+    target.close()
+  }
+})
+
 test('webSearch reads a SearXNG-style JSON endpoint', async () => {
   const { webSearch } = await import('./web.js')
   let seen = ''

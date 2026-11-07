@@ -65,6 +65,31 @@ test('Ctrl-C aborts the round, rolls it back and ends the run', async () => {
   assert.deepEqual(calls, ['create base', 'create r1', 'rollback r1'])
 })
 
+test('a rollback that could not restore every file stops the run', async () => {
+  const calls: string[] = []
+  const exec = stubExec(calls)
+  ;(exec as unknown as { checkpointRollback: unknown }).checkpointRollback = async (_r: string, label: string) => (
+    calls.push(`rollback ${label}`), { restored: ['a.txt'], deleted: [], skipped: ['locked.txt'], durationMs: 1 }
+  )
+  const stop = new AbortController()
+  const reports: string[] = []
+  const r = await runVerifierRalph(
+    base(calls, {
+      exec,
+      signal: stop.signal,
+      report: (line: string) => reports.push(line),
+      runRound: (_round, _prompt, signal) =>
+        new Promise((_res, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason))
+          stop.abort()
+        }),
+    } as Partial<RalphOptions>),
+  )
+  assert.equal(r.outcome, 'rollback-incomplete')
+  assert.ok(reports.some((line) => line.includes('rollback incomplete, 1 file(s) not restored (locked.txt)')), reports.join(' | '))
+  assert.deepEqual(calls, ['create base', 'create r1', 'rollback r1'])
+})
+
 test('a grader that runs out of budget ends the run as budget-exhausted', async () => {
   const calls: string[] = []
   const budget = new Budget4D({ maxRounds: 3, maxTotalTokens: 10, maxWallClockMs: 60_000 }, { worker: free, grader: free })
