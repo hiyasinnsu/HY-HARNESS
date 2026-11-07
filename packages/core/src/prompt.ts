@@ -37,7 +37,12 @@ export interface PromptExtras {
   roleInstruction?: string
   /** CP-10: deferred tools the model has already loaded with `tool_search`. */
   activeTools?: ReadonlySet<string>
+  /** Opening of the system prompt: `default`, or the `lean` benchmark variant. */
+  promptVariant?: PromptVariant
 }
+
+/** System-prompt variants compared in the harness benchmark. */
+export type PromptVariant = 'default' | 'lean'
 
 function allSpecs(extras: PromptExtras): readonly ToolSpec[] {
   return extras.extraTools?.length ? [...TOOL_SPECS, ...extras.extraTools] : TOOL_SPECS
@@ -127,8 +132,16 @@ export function buildSystemPrompt(workspaceRoot: string, ptc = false, objective 
 This session:
 Workspace root: ${workspaceRoot}${extras.date ? `\nToday is ${extras.date}.` : ''}
 ${catalog ? `\n${catalog}\n` : ''}${extras.roleInstruction ? `\n${extras.roleInstruction.trim()}\n` : ''}${extras.goal ? `\n${goalPrompt(extras.goal)}\n` : ''}`
-  const header = `You are HY-HARNESS, a careful autonomous coding agent. The workspace and this session's role are given at the end of these instructions.
-Private reasoning style: write your thinking in Japanese. Use a blunt, concise tone such as 「〜だ。〜する。〜が分かった。」. No polite forms, filler, or restating the request. Start with one sentence saying what you will do next.
+  // `lean` (benchmark experiment, 2026-11-07): no pointer to the session part,
+  // and the reasoning line keeps only the tone (no language, no example, no
+  // "start with one sentence"), to measure what the rest of the prompt does.
+  const opening =
+    extras.promptVariant === 'lean'
+      ? `You are HY-HARNESS, a careful autonomous coding agent.
+Private reasoning style: use a concise tone.`
+      : `You are HY-HARNESS, a careful autonomous coding agent. The workspace and this session's role are given at the end of these instructions.
+Private reasoning style: write your thinking in Japanese. Use a blunt, concise tone such as 「〜だ。〜する。〜が分かった。」. No polite forms, filler, or restating the request. Start with one sentence saying what you will do next.`
+  const header = `${opening}
 ${
   process.platform === 'win32'
     ? 'Shell environment: Windows PowerShell. Use PowerShell syntax (Get-ChildItem, Select-String, Get-Content, Get-ChildItem -Recurse). Do not use Unix grep/head/find. The shell cwd is the workspace root; use a relative cwd or an absolute path inside the workspace, and quote paths with spaces.'

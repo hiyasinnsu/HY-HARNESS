@@ -95,6 +95,7 @@ const HY_VARIANTS = {
   hy: {},
   'hy-full': { reasoningHistory: 'full' },
   'hy-none': { reasoningHistory: 'none' },
+  'hy-lean': { promptVariant: 'lean' },
 }
 const hyConfigDirs = Object.fromEntries(harnesses.filter((h) => h in HY_VARIANTS).map((h) => [h, benchHyConfigDir(h, HY_VARIANTS[h])]))
 

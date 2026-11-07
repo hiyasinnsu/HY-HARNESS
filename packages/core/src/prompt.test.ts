@@ -43,6 +43,17 @@ test('the path hint names search tools the model has: run_code only with PTC', (
   }
 })
 
+test('promptVariant lean: the shorter opening; the rest of the prompt is unchanged', () => {
+  for (const native of [true, false]) {
+    const base = buildSystemPrompt('C:\\work\\alpha', false, false, { native })
+    const lean = buildSystemPrompt('C:\\work\\alpha', false, false, { native, promptVariant: 'lean' })
+    assert.match(lean, /^You are HY-HARNESS, a careful autonomous coding agent\.\nPrivate reasoning style: use a concise tone\.\nShell environment:/)
+    assert.doesNotMatch(lean, /Japanese|given at the end|Start with one sentence/)
+    const rest = (s: string) => s.slice(s.indexOf('Shell environment:'))
+    assert.equal(rest(lean), rest(base), 'only the first two lines differ')
+  }
+})
+
 test('skill and MCP catalogs sit in the session part (only the tools they add change the earlier text)', () => {
   const prompt = buildSystemPrompt('C:\\work\\alpha', true, false, {
     native: true,

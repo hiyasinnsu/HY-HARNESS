@@ -197,6 +197,8 @@ export interface HarnessConfig {
    * replies and calls.
    */
   reasoningHistory: ReasoningHistory
+  /** System-prompt variant: `default`, or `lean` (a benchmark experiment). */
+  promptVariant: 'default' | 'lean'
   ptc: boolean
   projectTrusted: boolean
   protectedPaths: string[]
@@ -378,6 +380,8 @@ interface UserConfigFile {
   fullAuto?: boolean
   /** See HarnessConfig.reasoningHistory. */
   reasoningHistory?: ReasoningHistory
+  /** See HarnessConfig.promptVariant. */
+  promptVariant?: 'default' | 'lean'
   /** Reusable model definitions shown in Settings. */
   models?: Array<{
     id: string
@@ -875,6 +879,7 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
     // Default full since 2026-11-07: in the benchmark it cut tool calls, requests
     // and output tokens without raising prompt or uncached tokens.
     reasoningHistory: user?.reasoningHistory === 'none' ? 'none' : 'full',
+    promptVariant: user?.promptVariant === 'lean' ? 'lean' : 'default',
     ptc: overrides.ptc ?? process.env.HY_PTC === '1',
     projectTrusted: trusted,
     protectedPaths: project?.protectedPaths ?? [],

@@ -369,6 +369,11 @@ export const userConfigJsonSchema = {
     },
     autoApprove: { type: 'boolean' },
     fullAuto: { type: 'boolean' },
+    promptVariant: {
+      type: 'string',
+      enum: ['default', 'lean'],
+      description: 'System-prompt variant. lean is a benchmark experiment (shorter opening and reasoning line). Default default.',
+    },
     reasoningHistory: {
       type: 'string',
       enum: ['none', 'full'],

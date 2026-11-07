@@ -1014,6 +1014,7 @@ async function ralph(p: Parsed): Promise<number> {
               workspaceRoot: config.workspaceRoot,
               maxOutputTokens: config.role.maxOutputTokens,
               reasoningHistory: config.reasoningHistory,
+              promptVariant: config.promptVariant,
               temperature: config.role.temperature ?? 0,
               nativeTools: usesNativeTools(config.role),
               ptc: config.ptc,

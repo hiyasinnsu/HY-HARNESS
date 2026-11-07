@@ -69,6 +69,8 @@ export interface AgentOptions {
   goalMode?: boolean
   /** `full`: assistant messages keep their reasoning, which the provider gets back (HarnessConfig.reasoningHistory). */
   reasoningHistory?: 'none' | 'full'
+  /** System-prompt variant (benchmark experiments; HarnessConfig.promptVariant). */
+  promptVariant?: 'default' | 'lean'
   /** CP-38: resolved feature flags (streaming can be turned off). */
   features?: Readonly<Record<string, boolean>>
   /** CP-19: lifecycle hooks (userPromptSubmit, modelRequest, …). Default: none. */
@@ -398,6 +400,7 @@ export class Agent {
       ...(this.options.ask ? { ask: true } : {}),
       ...(this.options.extraTools?.length ? { extraTools: this.options.extraTools } : {}),
       ...(this.options.memory ? { memory: true } : {}),
+      ...(this.options.promptVariant ? { promptVariant: this.options.promptVariant } : {}),
     }
     // Native function calling when the provider supports it; a model that
     // rejects tools switches the turn to the JSON text protocol.
