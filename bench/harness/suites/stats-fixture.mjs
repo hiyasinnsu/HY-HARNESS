@@ -1,6 +1,6 @@
 // The benchmark project: a small ES-module statistics library with one
 // planted bug (formatTable pads labels on the wrong side, so a test fails).
-// `node fixture.mjs <dir>` writes it into an empty directory.
+// `node stats-fixture.mjs <dir>` writes it into an empty directory.
 import fs from 'node:fs'
 import path from 'node:path'
 

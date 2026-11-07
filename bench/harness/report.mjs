@@ -61,13 +61,20 @@ const METRICS = [
   ['wallMin', 'Wall time (min)', (r) => r.wallMs / 60_000],
   ['brokenCalls', 'Tool calls written as text (retried)', (r) => r.brokenCalls ?? NaN],
   ['notFound', 'Reads of missing paths', (r) => r.notFound ?? NaN],
-  ['checks', 'Hidden checks passed (of 5)', (r) => Object.values(r.checks).filter(Boolean).length],
+  ['solved', 'Solved (every hidden check passed)', (r) => (solved(r) ? 1 : 0)],
+  ['checks', 'Hidden checks passed', (r) => passed(r)],
 ]
+
+// `reward` (a suite's all-pass flag) is a summary, not one more check.
+const checkEntries = (r) => Object.entries(r.checks ?? {}).filter(([k]) => k !== 'reward')
+const passed = (r) => checkEntries(r).filter(([, v]) => v).length
+const checkCount = (r) => checkEntries(r).length
+const solved = (r) => (typeof r.checks?.reward === 'boolean' ? r.checks.reward : checkCount(r) > 0 && passed(r) === checkCount(r))
 
 const fmt = (x, metric) => {
   if (!Number.isFinite(x)) return '–'
   if (metric === 'hitRate') return x.toFixed(1)
-  if (['activeMin', 'wallMin', 'harnessMin', 'waitMin', 'checks', 'brokenCalls', 'notFound'].includes(metric)) return x.toFixed(2)
+  if (['activeMin', 'wallMin', 'harnessMin', 'waitMin', 'checks', 'solved', 'brokenCalls', 'notFound'].includes(metric)) return x.toFixed(2)
   return Math.round(x).toLocaleString('en-US')
 }
 
@@ -81,7 +88,7 @@ const lines = []
 const meta = dirs.map((d) => path.join(d, 'meta.json')).filter((f) => fs.existsSync(f)).map((f) => JSON.parse(fs.readFileSync(f, 'utf8')))
 lines.push(`# Harness benchmark ${meta.map((m) => m.stamp).join(', ')}`)
 lines.push('')
-lines.push(`Model ${meta[0]?.model ?? '?'} (OpenCode Go), effort ${meta[0]?.effort ?? '?'}; ${meta[0]?.tasks?.length ?? '?'} tasks given in one session per run.`)
+lines.push(`Model ${meta[0]?.model ?? '?'} (OpenCode Go), effort ${meta[0]?.effort ?? '?'}; suite ${meta[0]?.suite ?? 'stats'}${meta[0]?.suiteDescription ? ` (${meta[0].suiteDescription})` : ''}; ${meta[0]?.tasks?.length ?? '?'} task(s) given in one session per run.`)
 lines.push(`Runs: ${harnesses.map((h) => `${h} ${by[h].length}`).join(', ')}${records.some((r) => r.logMissing) ? ` (${records.filter((r) => r.logMissing).length} without a readable log, excluded)` : ''}${records.some(failedByProvider) ? ` (${records.filter(failedByProvider).map((r) => `${r.harness} #${r.n}`).join(', ')}: provider outage, excluded)` : ''}.`)
 lines.push('')
 // The difference column compares the first two harnesses: a variant against
@@ -126,11 +133,11 @@ for (const r of records) {
     continue
   }
   if (r.logMissing) {
-    lines.push(`| ${r.harness} | ${r.n} | ${r.exit} | ${Object.values(r.checks).filter(Boolean).length}/5 | (no log) | | | | | |`)
+    lines.push(`| ${r.harness} | ${r.n} | ${r.exit} | ${passed(r)}/${checkCount(r)} | (no log) | | | | | |`)
     continue
   }
   lines.push(
-    `| ${r.harness} | ${r.n} | ${r.exit} | ${Object.values(r.checks).filter(Boolean).length}/5 | ${r.input.toLocaleString('en-US')} | ${r.miss.toLocaleString('en-US')} | ${r.hitRate} | ${r.toolCalls} | ${r.requests} | ${(r.activeMs / 60_000).toFixed(1)} |`,
+    `| ${r.harness} | ${r.n} | ${r.exit} | ${passed(r)}/${checkCount(r)} | ${r.input.toLocaleString('en-US')} | ${r.miss.toLocaleString('en-US')} | ${r.hitRate} | ${r.toolCalls} | ${r.requests} | ${(r.activeMs / 60_000).toFixed(1)} |`,
   )
 }
 const text = `${lines.join('\n')}\n`

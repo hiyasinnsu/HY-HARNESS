@@ -1,19 +1,17 @@
 // Harness benchmark: the same tasks, one after another in one session, on
 // HY-HARNESS and DeepSeek Harness, with the same model and effort.
 //
-//   node bench/harness/run.mjs [--runs 10] [--harness hy,dsh] [--parallel 2] [--out bench/results]
+//   node bench/harness/run.mjs [--suite tb2-financial|stats] [--runs 10] [--harness hy,dsh] [--parallel 2] [--out bench/results]
 //
-// Each run gets a fresh copy of the fixture project, gives the tasks in order,
-// then runs the hidden checks and reads tokens, cache hits, tool calls and
-// timing from the harness's own session log. Results append to
+// Each run gets a fresh workspace from the suite, gives its tasks in order,
+// then runs the suite's hidden checks and reads tokens, cache hits, tool calls
+// and timing from the harness's own session log. Results append to
 // <out>/<stamp>/runs.jsonl; `report.mjs` turns them into means and 95% CIs.
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { writeFixture } from './fixture.mjs'
-import { TASKS, checkWorkspace } from './tasks.mjs'
 import { readDshSession, readHySession } from './logs.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -32,6 +30,11 @@ const benchRoot = path.resolve(arg('workdir', 'F:/hy-bench/harness'))
 const stamp = arg('stamp', new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19))
 const outDir = path.resolve(arg('out', path.join(repo, 'bench', 'results')), stamp)
 fs.mkdirSync(outDir, { recursive: true })
+const SUITES = { 'tb2-financial': './suites/tb2-financial.mjs', stats: './suites/stats.mjs' }
+const suiteId = String(arg('suite', 'tb2-financial'))
+if (!(suiteId in SUITES)) throw new Error(`unknown suite ${suiteId}; one of ${Object.keys(SUITES).join(', ')}`)
+const suite = (await import(SUITES[suiteId])).createSuite({ cacheRoot: path.join(path.dirname(benchRoot), 'cache') })
+const TASKS = suite.tasks
 
 const DSH_EXE = path.join(process.env.LOCALAPPDATA, 'Programs', 'DeepSeek Harness', 'DeepSeek Harness.exe')
 const DSH_CLI = path.join(process.env.LOCALAPPDATA, 'Programs', 'DeepSeek Harness', 'resources', 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js')
@@ -63,11 +66,11 @@ async function prepare(harness, n) {
   const ws = path.join(benchRoot, `${stamp}-${harness}-${n}`)
   fs.rmSync(ws, { recursive: true, force: true })
   fs.mkdirSync(ws, { recursive: true })
-  writeFixture(ws)
+  const prepared = await suite.prepare(ws)
   await exec('git', ['init', '-q'], { cwd: ws })
   await exec('git', ['-c', 'core.autocrlf=false', 'add', '-A'], { cwd: ws })
   await exec('git', ['-c', 'user.email=bench@local', '-c', 'user.name=bench', 'commit', '-qm', 'fixture'], { cwd: ws })
-  return ws
+  return { ws, prepared }
 }
 
 /**
@@ -105,13 +108,15 @@ const hyConfigDirs = Object.fromEntries(harnesses.filter((h) => h in HY_VARIANTS
 async function runHy(ws, n, variant) {
   const state = `${ws}.state`
   fs.rmSync(state, { recursive: true, force: true })
-  const input = `${TASKS.map((t) => t.prompt).join('\n')}\n/exit\n`
   const started = Date.now()
-  const r = await exec(process.execPath, [HY_MAIN, 'chat', '--cwd', ws, '--state-dir', state, '--json', '--full-auto', '--exec-server', EXEC_SERVER], {
-    cwd: ws,
-    input,
-    env: { ...childEnv, HY_CONFIG_DIR: hyConfigDirs[variant] },
-  })
+  const common = ['--cwd', ws, '--state-dir', state, '--json', '--full-auto', '--exec-server', EXEC_SERVER]
+  const options = { cwd: ws, env: { ...childEnv, HY_CONFIG_DIR: hyConfigDirs[variant] }, timeoutMs: suite.agentTimeoutMs }
+  // `hy chat` reads one prompt per stdin line; a single (multi-line) task goes
+  // through `hy run` as an argument, the way DSH receives it.
+  const r =
+    TASKS.length === 1
+      ? await exec(process.execPath, [HY_MAIN, 'run', ...common, TASKS[0].prompt], options)
+      : await exec(process.execPath, [HY_MAIN, 'chat', ...common], { ...options, input: `${TASKS.map((t) => t.prompt).join('\n')}\n/exit\n` })
   const wallMs = Date.now() - started
   fs.writeFileSync(path.join(outDir, `${variant}-${n}.stdout.jsonl`), r.stdout)
   fs.writeFileSync(path.join(outDir, `${variant}-${n}.stderr.log`), r.stderr)
@@ -126,7 +131,7 @@ async function runDsh(ws, n) {
   let stderrAll = ''
   for (const task of TASKS) {
     const args = ['--expose-internals', DSH_CLI, '--profile', 'headless', '--patch', DSH_PATCH, '--json', ...(sessionId ? ['--session-id', sessionId] : []), task.prompt]
-    const r = await exec(DSH_EXE, args, { cwd: ws, env: { ...childEnv, ELECTRON_RUN_AS_NODE: '1' } })
+    const r = await exec(DSH_EXE, args, { cwd: ws, env: { ...childEnv, ELECTRON_RUN_AS_NODE: '1' }, timeoutMs: suite.agentTimeoutMs })
     exits.push(r.code)
     stdoutAll += r.stdout
     stderrAll += r.stderr
@@ -151,10 +156,9 @@ async function runDsh(ws, n) {
 }
 
 async function one(harness, n) {
-  const ws = await prepare(harness, n)
-  const originalFormatTest = fs.readFileSync(path.join(ws, 'test/format.test.js'), 'utf8')
+  const { ws, prepared } = await prepare(harness, n)
   const r = harness in HY_VARIANTS ? await runHy(ws, n, harness) : await runDsh(ws, n)
-  const checks = await checkWorkspace(ws, originalFormatTest)
+  const checks = await suite.check(ws, prepared)
   // A run the provider never served (every turn failed with an HTTP error such
   // as "server is overloaded") measures the provider, not the harness: it is
   // recorded and listed, and report.mjs leaves it out of the statistics.
@@ -165,6 +169,7 @@ async function one(harness, n) {
     harness,
     n,
     stamp,
+    suite: suite.id,
     model: MODEL,
     effort: EFFORT,
     ws,
@@ -177,8 +182,9 @@ async function one(harness, n) {
     ...(providerFailure ? { providerFailure: true } : {}),
   }
   fs.appendFileSync(path.join(outDir, 'runs.jsonl'), `${JSON.stringify(record)}\n`)
-  const passed = Object.values(checks).filter(Boolean).length
-  console.log(`${harness} #${n}: exit ${r.exit}, ${(r.wallMs / 1000).toFixed(0)}s, checks ${passed}/${Object.keys(checks).length}, input ${r.log?.input ?? '?'}, hit ${r.log?.hitRate ?? '?'}%, tools ${r.log?.toolCalls ?? '?'}`)
+  const graded = Object.entries(checks).filter(([k]) => k !== 'reward')
+  const passed = graded.filter(([, v]) => v).length
+  console.log(`${harness} #${n}: exit ${r.exit}, ${(r.wallMs / 1000).toFixed(0)}s, checks ${passed}/${graded.length}${checks.reward === undefined ? "" : checks.reward ? " (solved)" : ""}, input ${r.log?.input ?? '?'}, hit ${r.log?.hitRate ?? '?'}%, tools ${r.log?.toolCalls ?? '?'}`)
   return record
 }
 
@@ -186,7 +192,7 @@ async function one(harness, n) {
 // same provider conditions over time.
 const queue = []
 for (let n = 1; n <= runs; n++) for (const h of harnesses) queue.push([h, n])
-fs.writeFileSync(path.join(outDir, 'meta.json'), `${JSON.stringify({ stamp, model: MODEL, effort: EFFORT, runs, harnesses, tasks: TASKS, host: os.hostname(), started: new Date().toISOString() }, null, 2)}\n`)
+fs.writeFileSync(path.join(outDir, 'meta.json'), `${JSON.stringify({ stamp, suite: suite.id, suiteDescription: suite.description, ...(suite.source ? { source: suite.source } : {}), model: MODEL, effort: EFFORT, runs, harnesses, tasks: TASKS, host: os.hostname(), started: new Date().toISOString() }, null, 2)}\n`)
 const workers = Array.from({ length: Math.max(1, parallel) }, async () => {
   for (let item = queue.shift(); item; item = queue.shift()) await one(item[0], item[1])
 })

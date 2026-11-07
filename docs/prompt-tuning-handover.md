@@ -118,7 +118,7 @@ lean からの変更点:
 - **条件**: 両方とも OpenCode Go の `deepseek-v4.1-flash`、effort `max`。
   - **HY**: `hy chat --full-auto`（1 プロセスで 4 ターン）。実行のたびに新しい設定フォルダーを作り、ユーザーの `config.json` から MCP（`mcpServers`、`automation`）と追加ルートを除いて `HY_CONFIG_DIR` に渡す。RULE.md とスキルはコピーしない。
   - **DSH**: `dsh --profile headless --patch bench/harness/dsh.patch.yml`。課題ごとに起動し、`--session-id` で続ける。API キーは環境変数 `OPENCODE_API_KEY` の参照のみ。DSH のプロファイル（`~/.dsh/profiles`）は読まない・変えない。資格情報を含みうるので、読み取りは止められる。
-- **課題**（`fixture.mjs`、`tasks.mjs`）: 小さな統計ライブラリ（`formatTable` にバグを 1 つ仕込み済み）に、1 セッションで次の 4 つを順に指示する。
+- **課題**（`suites/stats-fixture.mjs`、`suites/stats-tasks.mjs`。`--suite stats` で実行）: 小さな統計ライブラリ（`formatTable` にバグを 1 つ仕込み済み）に、1 セッションで次の 4 つを順に指示する。
   1. median / mode の実装とテスト
   2. 落ちているテストの修正（テストファイルは変えない）
   3. CLI（`bin/stats.js`）の追加とテスト
@@ -133,7 +133,7 @@ lean からの変更点:
   - DSH の `inputTokens` はキャッシュ外分だけなので、`cacheReadTokens` と `cacheWriteTokens` を足して揃えている。
 - **実行**:
   ```bash
-  node bench/harness/run.mjs --harness hy,hy-lean2 --runs 10 --parallel 2 --stamp <名前>
+  node bench/harness/run.mjs --suite stats --harness hy,hy-lean2 --runs 10 --parallel 2 --stamp <名前>
   node bench/harness/report.mjs bench/results/<名前> --pair hy-lean2,hy
   ```
   - HY の比較用バリエーションは `run.mjs` の `HY_VARIANTS` にある（`hy` / `hy-full` / `hy-none` / `hy-legacy` / `hy-lean2`）。新しい版を試すときは、設定値を 1 つ変えた行を足す。
