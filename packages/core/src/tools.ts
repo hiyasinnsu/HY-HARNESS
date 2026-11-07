@@ -1122,8 +1122,17 @@ export class ToolRuntime {
               ? 'writes under these roots are allowed for the rest of this session'
               : 'no additional roots were granted',
         }
-      }      case 'ask_user':
-        return { answer: await this.options.askUser!(String(a.question)) }
+      }      case 'ask_user': {
+        const answer = await this.options.askUser!(String(a.question))
+        // Silence is not an answer (OpenClaw): a question that timed out or got
+        // an empty reply must not read as consent to go ahead.
+        return answer.trim()
+          ? { answer }
+          : {
+              answer: '',
+              note: 'No answer from the user (the question timed out or the reply was empty). This is not approval: continue only with work that does not depend on their decision, or stop and say what you need from them.',
+            }
+      }
       case 'memory':
         if (a.action === 'forget') return this.options.memory!.forget(String(a.key))
         if (typeof a.text !== 'string') throw new Error('memory save needs text')

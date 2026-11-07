@@ -88,6 +88,20 @@ prefix_rule(
 prefix_rule(pattern = [["jest", "vitest"]], sandbox = "low-integrity", match = ["jest --ci", "vitest run"])
 ```
 
+（2026-11-07 追記）`jest` / `vitest` / `node --test` / `npm test` などの単独のコマンドは、既定ポリシーで `low-integrity` になった（`docs/enforcement-gaps.md` S4）。上の `npx` 経由の規則は、引き続きユーザーポリシーで指定する。
+
+- **`instead`（2026-11-07）**: 規則に代わりのコマンドを書くと、拒否（`deny`）や確認（`prompt`）の理由に「use instead: …」として付く。エージェントは次の手ですぐ正しいコマンドに直せる（記事「Harness Engineering in Five Popular OSS Projects」にある Bun のフックの考え方）。繰り返し起きる誤りを、文章の指示ではなく仕組みで止めるときに使う。
+
+```python
+prefix_rule(
+    pattern = ["rustfmt"],
+    decision = "deny",
+    justification = "formats one file with the wrong config",
+    instead = "cargo fmt --all",
+    match = ["rustfmt src/main.rs"],
+)
+```
+
 ---
 
 ## 2. 実装したもの

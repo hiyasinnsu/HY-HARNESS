@@ -4488,7 +4488,8 @@ async function runCommand(id: string, args = ''): Promise<void> {
       await runAction(id)
       return
     case 'init':
-      await sendMessage('Create an AGENTS.md at the workspace root for coding agents working in this repository. Inspect the repository first (README, package manifests, build and test scripts, directory layout). Include: what the project is, how to build, test and lint it (exact commands), the code layout, and conventions a contributor must follow. Keep it short and factual; do not invent commands. If AGENTS.md already exists, improve it instead of replacing what is still right.')
+      // Same text as INIT_PROMPT in src/main.ts (index and traps, not a map).
+      await sendMessage('Create an AGENTS.md at the workspace root for coding agents working in this repository. Inspect the repository first (README, package manifests, build and test scripts, directory layout). Write an index and the traps, not a map; keep it under 60 lines. Include: (1) one or two lines on what the project is; (2) the exact commands to build, test and lint, and how to run a single test; (3) where things live, one line per area, only where the names do not make it obvious; (4) traps: mistakes an experienced contributor would still make here. Add a trap only if it is non-obvious, specific enough to act on, and backed by something you saw in this repository, not general good practice. Do not describe the code structure in detail: agents read the code, and such descriptions go stale. Do not invent commands. If AGENTS.md already exists, rewrite it the same way and keep what is still right.')
       return
     case 'model':
       if (args) await runAction('model', args)

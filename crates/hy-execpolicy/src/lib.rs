@@ -75,6 +75,7 @@ struct RawRule {
     examples_match: serde_json::Value,
     examples_not_match: serde_json::Value,
     sandbox: Option<String>,
+    instead: Option<String>,
 }
 
 #[derive(Debug, Default, ProvidesStaticType)]
@@ -91,8 +92,22 @@ fn missing() -> anyhow::Error {
     anyhow::anyhow!("policy collector missing")
 }
 
+/// The justification, with the replacement command a rule names (`instead`).
+fn with_instead(justification: Option<String>, instead: Option<&str>) -> Option<String> {
+    match (
+        justification,
+        instead.map(str::trim).filter(|s| !s.is_empty()),
+    ) {
+        (j, None) => j,
+        (None, Some(cmd)) => Some(format!("use instead: {cmd}")),
+        (Some(j), Some(cmd)) => Some(format!("{j}; use instead: {cmd}")),
+    }
+}
+
 #[starlark_module]
 fn policy_builtins(builder: &mut GlobalsBuilder) {
+    // Starlark keyword arguments, one Rust parameter each.
+    #[allow(clippy::too_many_arguments)]
     fn prefix_rule<'v>(
         #[starlark(require = named)] pattern: Value<'v>,
         #[starlark(require = named, default = "allow")] decision: &str,
@@ -100,6 +115,7 @@ fn policy_builtins(builder: &mut GlobalsBuilder) {
         #[starlark(require = named)] r#match: Option<Value<'v>>,
         #[starlark(require = named)] not_match: Option<Value<'v>>,
         #[starlark(require = named)] sandbox: Option<&str>,
+        #[starlark(require = named)] instead: Option<&str>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<NoneType> {
         let rule = RawRule {
@@ -115,6 +131,7 @@ fn policy_builtins(builder: &mut GlobalsBuilder) {
                 None => serde_json::Value::Array(vec![]),
             },
             sandbox: sandbox.map(str::to_owned),
+            instead: instead.map(str::to_owned),
         };
         eval.extra
             .and_then(|e| e.downcast_ref::<Collector>())
@@ -328,7 +345,10 @@ impl PolicySet {
                 id: id.clone(),
                 pattern,
                 decision,
-                justification: raw.justification,
+                // `instead` (Bun-style guard): a denied or prompted command
+                // also says what to run instead, so the agent can fix its
+                // next step at once rather than guess.
+                justification: with_instead(raw.justification, raw.instead.as_deref()),
                 sandbox,
                 layer,
             };
@@ -585,6 +605,29 @@ prefix_rule(pattern = ["npm", "test"], sandbox = "unconfined")
         assert_eq!(
             s.evaluate("npm test", Dialect::PowerShell).sandbox,
             Some(SandboxMode::WorkspaceWrite)
+        );
+    }
+
+    #[test]
+    fn instead_names_the_command_to_run() {
+        let user = r#"
+prefix_rule(pattern = ["rustfmt"], decision = "deny", justification = "formats one file with the wrong config", instead = "cargo fmt --all", match = ["rustfmt src/main.rs"])
+prefix_rule(pattern = ["make", "release"], decision = "prompt", instead = "make release-dry-run")
+"#;
+        let s = match PolicySet::load_layers(Some(("u.star", user)), None) {
+            Ok(s) => s,
+            Err(e) => panic!("{e}"),
+        };
+        let deny = s.evaluate("rustfmt src/main.rs", Dialect::PowerShell);
+        assert_eq!(deny.decision, Decision::Deny);
+        assert_eq!(
+            deny.justification.as_deref(),
+            Some("formats one file with the wrong config; use instead: cargo fmt --all")
+        );
+        let prompt = s.evaluate("make release", Dialect::PowerShell);
+        assert_eq!(
+            prompt.justification.as_deref(),
+            Some("use instead: make release-dry-run")
         );
     }
 

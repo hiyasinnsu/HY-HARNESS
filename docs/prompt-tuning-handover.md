@@ -170,7 +170,25 @@ lean からの変更点:
 - **推論の送り返し**: `reasoningHistory: full`（既定）。DeepSeek には `reasoning_content` で返す。
 - **テスト**: `pnpm test:integration` は並列実行で約 100 秒（`scripts/test-integration.mjs`）。
 
+## 6.5 参考にした記事と、そこから入れたもの（2026-11-07）
+
+記事: 「Harness Engineering in Five Popular OSS Projects, Compared by AI Trust」（https://gibberishlab.com/blog/oss-ai-agent-harness-philosophy）。Zed、Sentry、OpenClaw、Bun、PostHog の AGENTS.md・ルール・スキル・フックを比べ、「AI をどこまで信頼するかで、書く量と機械で強制する量が変わる」と論じる。
+
+- **プロンプト調整の方針（PostHog）**: 強制力の強い仕組みを優先し、文章は最後の手段にする。ツールやガードで強制できることは文章にしない（本文 JSON の禁止、読んでから編集、を消せたのはこの考え方）。
+- **入れたもの**:
+  - **規則の `instead`（Bun）**: 拒否や確認の理由に、代わりのコマンドを付ける（`docs/implementation_status.md` に書き方）。
+  - **AGENTS.md の生成指示（Zed / Sentry）**: 地図ではなく、目次と罠を 60 行以内で書かせる（`/init` と GUI のボタン）。
+  - **質問に返事がないとき（OpenClaw「沈黙は承認ではない」）**: `ask_user` の結果に「返事なし。承認ではない」と明記する。承認は以前から、5 分で時間切れになると拒否になる。
+- **まだのもの（候補）**:
+  - サブフォルダーの AGENTS.md を、そのフォルダーを初めて触ったときに会話へ追記する（Sentry）。`hy_session_context` と同じ追記の仕組みに乗せられる。
+  - エージェントが自分で書く永続的なメモ（`rationale_upsert`、自動のメモリー抽出）に、Zed の 3 条件（慣れた人でも間違える、2 回以上起きた、行動できるほど具体的）か、人の確認を挟む。
+
 ## 7. 残っている候補と注意
+
+- **OpenClaw のやめどき条件（プロンプトかガードで試す）**:
+  - 同じ失敗が新しい手がかりなしに 2 回続いたら方針を変える（HY のループ検出に近い）。
+  - 一定時間（OpenClaw は 10 分）進展がなければ方針を変える（HY には未実装。ガードとして足せる）。
+  - 動作が証明され必要な検査が通ったら、頼まれていない磨き込みをせずに終える（Codex の「テストが通ったら理由なく広げない」と同じ。lean2 で確認の実行が増えた件への対策候補）。
 
 - **次に測る候補**（1 つずつ）:
   - シェル環境の行（「Select-String / Get-Content を使え」とシェルでの読み取り・検索を勧めている。DSH は逆に専用ツールへ誘導）

@@ -294,10 +294,17 @@ function reviewTask(base: string | undefined, diff: string, untracked: string[])
 
 /** `/init` (Codex): draft an AGENTS.md from the repository. */
 const INIT_PROMPT =
+  // Index and traps, not a map (Zed / Sentry, 2026-11-07): every session loads
+  // AGENTS.md, structure descriptions go stale, and agents read the code.
+  // Keep in sync with the GUI's copy in web/src/app.ts.
   'Create an AGENTS.md at the workspace root for coding agents working in this repository. Inspect the repository first ' +
-  '(README, package manifests, build and test scripts, directory layout). Include: what the project is, how to build, ' +
-  'test and lint it (exact commands), the code layout, and conventions a contributor must follow. Keep it short and ' +
-  'factual; do not invent commands. If AGENTS.md already exists, improve it instead of replacing what is still right.'
+  '(README, package manifests, build and test scripts, directory layout). Write an index and the traps, not a map; ' +
+  'keep it under 60 lines. Include: (1) one or two lines on what the project is; (2) the exact commands to build, test ' +
+  'and lint, and how to run a single test; (3) where things live, one line per area, only where the names do not make it ' +
+  'obvious; (4) traps: mistakes an experienced contributor would still make here. Add a trap only if it is non-obvious, ' +
+  'specific enough to act on, and backed by something you saw in this repository, not general good practice. Do not ' +
+  'describe the code structure in detail: agents read the code, and such descriptions go stale. Do not invent commands. ' +
+  'If AGENTS.md already exists, rewrite it the same way and keep what is still right.'
 
 /** Custom prompts (Codex custom prompts): `prompts/<name>.md` in the user directory or `.hy-harness/prompts`. */
 function loadPrompts(workspaceRoot: string): Map<string, string> {

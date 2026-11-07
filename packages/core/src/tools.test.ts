@@ -228,6 +228,22 @@ test('CP-10: tool_search loads a deferred tool, which then becomes callable', as
   }
 })
 
+test('ask_user: no answer is reported as no answer, not as consent', async () => {
+  for (const [reply, expected] of [
+    ['use postgres', { answer: 'use postgres' }],
+    ['', undefined],
+    ['   ', undefined],
+  ] as const) {
+    const tools = new ToolRuntime({} as never, process.cwd(), undefined, false, { askUser: async () => reply } as never)
+    const result = (await tools.execute('ask_user', { question: 'which db?' })) as { answer: string; note?: string }
+    if (expected) assert.deepEqual(result, expected)
+    else {
+      assert.equal(result.answer, '')
+      assert.match(result.note!, /This is not approval/)
+    }
+  }
+})
+
 test('a spawn EPERM in shell output points at the plain test-runner command', async () => {
   const { pipeChildGap } = await import('./tools.js')
   assert.match(pipeChildGap({ stderr: 'Error: spawn EPERM\n    at ChildProcess.spawn' })!, /Run the test command on its own/)
