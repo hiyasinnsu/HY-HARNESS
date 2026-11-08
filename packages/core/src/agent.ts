@@ -307,6 +307,9 @@ function parseAction(text: string): Action | undefined {
   return undefined
 }
 
+/** Tools that hand work to another session; its report arrives later. */
+const DELEGATING_TOOLS: ReadonlySet<string> = new Set(['orchestrator_spawn', 'orchestrator_send', 'delegate', 'send_message'])
+
 /** Sent once when a final answer announced the agent's next step instead of taking it. */
 export const ANNOUNCED_WITHOUT_ACTION =
   'Your reply ends by announcing something you are about to do, but it has no tool call, so nothing was done and the turn would end here. ' +
@@ -429,6 +432,10 @@ export class Agent {
     let degenerateRetried = false
     // Set once a reply that announced its next step without acting was nudged.
     let announceNudged = false
+    // The previous step handed work to a worker or subagent: a final that
+    // describes that work ("回帰テストまで行います") is the right way to end
+    // the turn and wait for the report, not an empty announcement.
+    let lastStepDelegated = false
     // Goal mode: one nudge when a plan/promise arrives before any tool call.
     let goalNudged = false
     let performedToolCalls = 0
@@ -758,7 +765,7 @@ export class Agent {
       // ("ここを確認します。", "I'll add the test now.") did nothing: the turn
       // would stop and leave the user waiting. Nudge once, in every mode; the
       // model either acts or says plainly that it is waiting.
-      if (!calls && action && typeof action.final === 'string' && !objectiveMode && !announceNudged && announcesNextStep(action.final)) {
+      if (!calls && action && typeof action.final === 'string' && !objectiveMode && !announceNudged && !lastStepDelegated && announcesNextStep(action.final)) {
         announceNudged = true
         messages.push(reply(content))
         messages.push({ role: 'user', content: ANNOUNCED_WITHOUT_ACTION })
@@ -800,6 +807,7 @@ export class Agent {
         if (reminder) this.options.sessionLog.append('guard/repeat', { tool: calls.map((c) => c.tool).join(','), times: repeats })
         messages.push(reply(content))
         const outcomes = await this.executeCalls(step, calls)
+        lastStepDelegated = outcomes.some((o) => o.ok && DELEGATING_TOOLS.has(o.call.tool))
         performedToolCalls += calls.length
         // WP-30: `read_image` hands the bytes over out of band. They ride on the
         // tool-result message, so the assistant/user alternation (and the mock's

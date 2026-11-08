@@ -594,6 +594,27 @@ test('a final that announces its next step is nudged once: the model acts, a rep
     const repeated = await run(['確認します。', '確認します。'])
     assert.equal(repeated.r.final, '確認します。')
     assert.equal(repeated.seen.length, 2)
+    // Right after handing work to a worker, describing that work is how the turn should end.
+    const dispatched = await (async () => {
+      const seen: string[] = []
+      const provider = {
+        name: 'dispatching',
+        complete: async (messages: Array<{ role: string; content: string }>) => {
+          seen.push(messages.at(-1)!.content)
+          return seen.length === 1
+            ? { content: '', toolCalls: [{ name: 'delegate', args: { task: 'add the regression test' } }], usage: { inputTokens: 1, outputTokens: 1 } }
+            : { content: '回帰テストと型検査まで行います。', usage: { inputTokens: 1, outputTokens: 1 } }
+        },
+      }
+      const tools = new ToolRuntime({} as never, dir)
+      ;(tools as unknown as { execute: unknown }).execute = async () => ({ ok: true })
+      const log = new SessionLog(path.join(dir, `log-${Math.random()}.jsonl`))
+      log.setRun('run-d2')
+      const r = await new Agent({ provider, tools, sessionLog: log, workspaceRoot: dir, nativeTools: true }).run('delegate it')
+      return { r, seen, log }
+    })()
+    assert.equal(dispatched.r.final, '回帰テストと型検査まで行います。')
+    assert.equal(dispatched.seen.length, 2, 'no nudge after a successful hand-off')
     // A final that hands back is not nudged at all.
     const handsBack = await run(['どちらを先に進めますか？'])
     assert.equal(handsBack.seen.length, 1)
