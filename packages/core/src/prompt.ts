@@ -5,8 +5,10 @@ import { RICH_TOOL_DOCS, withParamDocs } from './tool-docs.js'
 
 export interface PromptExtras {
   skills?: readonly SkillInfo[]
-  /** `McpManager.renderCatalog()`; empty when no MCP tools. */
+  /** `McpManager.renderCatalog()` in the system prompt (callers that build one prompt directly). The agent sends it in the session context instead. */
   mcpCatalog?: string
+  /** MCP servers are configured: offer `mcp_call` (the catalog itself travels in the session context). */
+  mcp?: boolean
   /** Offer `delegate` (top-level sessions only: subagents cannot delegate). */
   delegate?: boolean
   /** Only these tools are offered (read-only subagents, `hy review`). */
@@ -53,7 +55,7 @@ function allSpecs(extras: PromptExtras): readonly ToolSpec[] {
 export function promptFeatures(extras: PromptExtras): Set<string> {
   const features = new Set<string>()
   if ((extras.skills ?? []).length > 0) features.add('skills')
-  if (extras.mcpCatalog) features.add('mcp')
+  if (extras.mcpCatalog || extras.mcp) features.add('mcp')
   if (extras.delegate) features.add('delegate')
   if (extras.web) features.add('web')
   if (extras.search) features.add('search')

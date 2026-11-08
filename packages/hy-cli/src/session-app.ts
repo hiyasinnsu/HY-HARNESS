@@ -963,7 +963,7 @@ async function runSubagent(
     ...(config.memory ? { memory: MemoryStore.forStateDir(config.stateDir) } : {}),
     ...(o.roleInstruction ? { roleInstruction: o.roleInstruction } : {}),
     ...(allowTools ? { allowTools } : {}),
-    ...(mcp ? { mcpCatalog: mcp.renderCatalog() } : {}),
+    ...(mcp ? { mcpCatalog: mcp.renderCatalog() || 'MCP servers are configured, but none is running; mcp_call has no tools to call.' } : {}),
     onEvent: (event) => o.print({ ...event, subagent: runId }),
   })
   const result = await agent.run(o.task)
@@ -1443,7 +1443,7 @@ export class Conversation {
         ...(config.memory ? { memory: MemoryStore.forStateDir(config.stateDir) } : {}),
         ask: answer !== undefined,
         ...(allow ? { allowTools: allow } : {}),
-        ...(mcp ? { mcpCatalog: mcp.renderCatalog() } : {}),
+        ...(mcp ? { mcpCatalog: mcp.renderCatalog() || 'MCP servers are configured, but none is running; mcp_call has no tools to call.' } : {}),
         ...(sessionOutputSchema ? { finalSchema: sessionOutputSchema } : {}),
         ...(signal ? { signal } : {}),
         ...(callIdPrefix ? { callIdPrefix } : {}),

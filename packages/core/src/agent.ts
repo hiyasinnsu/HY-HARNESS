@@ -93,7 +93,13 @@ export interface AgentOptions {
   objective?: boolean
   /** Skills listed in the system prompt (the same list as the ToolRuntime's). */
   skills?: readonly SkillInfo[]
-  /** MCP tool catalog for the system prompt (`McpManager.renderCatalog()`). */
+  /**
+   * MCP tool catalog (`McpManager.renderCatalog()`); set (even empty) when MCP
+   * servers are configured, which offers `mcp_call`. The text travels in the
+   * session context, not the system prompt: which servers started can differ
+   * between launches, and a resumed session whose system prompt changed lost
+   * its whole cached prefix (154K uncached tokens in one step).
+   */
   mcpCatalog?: string
   /** Offer `delegate` (the ToolRuntime must have a delegate handler). */
   delegate?: boolean
@@ -392,7 +398,7 @@ export class Agent {
     })
     const extras: PromptExtras = {
       ...(this.options.skills ? { skills: this.options.skills } : {}),
-      ...(this.options.mcpCatalog ? { mcpCatalog: this.options.mcpCatalog } : {}),
+      ...(this.options.mcpCatalog !== undefined ? { mcp: true } : {}),
       ...(this.options.delegate ? { delegate: true } : {}),
       ...(this.options.roleInstruction ? { roleInstruction: this.options.roleInstruction } : {}),
       ...(this.options.allowTools ? { allowTools: this.options.allowTools } : {}),
@@ -482,7 +488,7 @@ export class Agent {
         // The model's own sense of "now" is its training cutoff (DSH time context).
         date: new Date().toLocaleDateString('sv-SE'),
         ...(this.options.goal ? { goal: this.options.goal } : {}),
-        sections: [ledger.render(), this.options.memory?.render() ?? ''],
+        sections: [ledger.render(), this.options.memory?.render() ?? '', this.options.mcpCatalog ?? ''],
       })
       if (lastSessionContext(messages) !== context) {
         const last = messages.at(-1)

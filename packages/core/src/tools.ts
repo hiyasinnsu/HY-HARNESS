@@ -314,14 +314,20 @@ function ignoredTarget(roots: readonly { path: string }[], pattern: string): str
 function withIgnoreNote<T extends object>(result: T, dir: string | undefined): T & { note?: string } {
   return dir ? { ...result, note: `${dir}/ is not searched (.gitignore or a built-in skip); read_file still opens files there by path.` } : result
 }
-const GREP_MAX_FILE_BYTES = 1024 * 1024
 
 /**
  * How long one search_glob / search_grep may run and how much grep may read
  * before it returns what it has. An unfiltered grep over a large workspace
  * (725 MB of small files) otherwise ran for minutes. Exposed for tests.
  */
-export const searchBudget = { maxMs: 15_000, maxBytes: 256 * 1024 * 1024 }
+export const searchBudget = {
+  maxMs: 15_000,
+  maxBytes: 256 * 1024 * 1024,
+  // grep skips larger files and names them in the result. It was 1 MB,
+  // silently: a 1.7 MB project.md came back as `filesSearched: 0`, and the
+  // model concluded that glob was broken.
+  maxFileBytes: 16 * 1024 * 1024,
+}
 
 type SearchStop = 'time' | 'bytes'
 
@@ -336,6 +342,14 @@ function searchBudgetFor(signal: AbortSignal | undefined): { spent: (bytes: numb
       if (Date.now() - started > searchBudget.maxMs) return 'time'
       return undefined
     },
+  }
+}
+
+/** Files grep left out for size, and how to read them instead. */
+function skippedLarge(files: readonly string[]): { skippedLarge: string[]; skippedNote: string } {
+  return {
+    skippedLarge: files.slice(0, 20),
+    skippedNote: `${files.length} file(s) over ${searchBudget.maxFileBytes / (1024 * 1024)} MB were not searched; read them with read_file startLine / endLine.`,
   }
 }
 
@@ -1381,6 +1395,7 @@ export class ToolRuntime {
     const selected = args.root === '*' ? this.roots : [this.root(typeof args.root === 'string' ? args.root : undefined)]
     const matches: Array<{ path: string; line: number; text: string }> = []
     let filesSearched = 0
+    const tooLarge: string[] = []
     const budget = searchBudgetFor(this.signal)
     for (const root of selected) {
       for await (const rel of this.walk(root.path)) {
@@ -1388,7 +1403,11 @@ export class ToolRuntime {
         const full = path.join(root.path, rel)
         let bytes: Buffer
         try {
-          if ((await fs.promises.stat(full)).size > GREP_MAX_FILE_BYTES) continue
+          const size = (await fs.promises.stat(full)).size
+          if (size > searchBudget.maxFileBytes) {
+            tooLarge.push(`${this.qualified(root, rel)} (${(size / (1024 * 1024)).toFixed(1)} MB)`)
+            continue
+          }
           bytes = await fs.promises.readFile(full)
         } catch {
           continue
@@ -1397,7 +1416,7 @@ export class ToolRuntime {
         // the first file however small the budget.
         const stop = budget.spent(bytes.length)
         if (bytes.subarray(0, 8192).includes(0)) {
-          if (stop) return { matches, truncated: true, filesSearched, stoppedEarly: stop, note: budgetNote(stop) }
+          if (stop) return { matches, truncated: true, filesSearched, stoppedEarly: stop, note: budgetNote(stop), ...(tooLarge.length > 0 ? { skippedLarge: tooLarge.slice(0, 20) } : {}) }
           continue
         }
         filesSearched += 1
@@ -1407,11 +1426,12 @@ export class ToolRuntime {
           if (matches.length >= max) return { matches, truncated: true, filesSearched }
           matches.push({ path: this.qualified(root, rel), line: i + 1, text: lines[i]!.slice(0, 300) })
         }
-        if (stop) return { matches, truncated: true, filesSearched, stoppedEarly: stop, note: budgetNote(stop) }
+        if (stop) return { matches, truncated: true, filesSearched, stoppedEarly: stop, note: budgetNote(stop), ...(tooLarge.length > 0 ? { skippedLarge: tooLarge.slice(0, 20) } : {}) }
       }
     }
     const target = matches.length === 0 && typeof args.glob === 'string' ? ignoredTarget(selected, args.glob) : undefined
-    return withIgnoreNote({ matches, truncated: false, filesSearched }, target)
+    const result = withIgnoreNote({ matches, truncated: false, filesSearched }, target)
+    return tooLarge.length > 0 ? { ...result, ...skippedLarge(tooLarge) } : result
   }
 
   private readFile(args: Record<string, unknown>): ToolResult {

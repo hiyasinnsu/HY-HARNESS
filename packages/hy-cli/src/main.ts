@@ -1062,7 +1062,7 @@ async function ralph(p: Parsed): Promise<number> {
               lsp: lspFor(config) !== undefined,
               extraTools: pluginSpecs(),
               ...(config.memory ? { memory: MemoryStore.forStateDir(config.stateDir) } : {}),
-              ...(mcp ? { mcpCatalog: mcp.renderCatalog() } : {}),
+              ...(mcp ? { mcpCatalog: mcp.renderCatalog() || 'MCP servers are configured, but none is running; mcp_call has no tools to call.' } : {}),
               onEvent: (event) => {
                 if (event.type === 'tool') console.error(`[r${round}] tool ${String(event.name)}`)
                 if (event.type === 'tool-error') console.error(`[r${round}] tool error: ${String(event.message)}`)

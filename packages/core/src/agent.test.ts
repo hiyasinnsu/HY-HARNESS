@@ -106,6 +106,32 @@ test('switching work mode appends context while preserving the cached conversati
   }
 })
 
+test('MCP availability does not change the system prompt or the tools; the catalog rides in the session context', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-mcp-context-'))
+  try {
+    const seen: Array<{ system: string; last: string; tools: string[] }> = []
+    const provider = {
+      name: 'scripted',
+      complete: async (messages: Array<{ role: string; content: string }>, options: { tools?: Array<{ name: string }> }) => {
+        seen.push({ system: messages[0]!.content, last: messages.at(-1)!.content, tools: (options.tools ?? []).map((t) => t.name) })
+        return { content: 'done', usage: { inputTokens: 1, outputTokens: 1 } }
+      },
+    }
+    // The same session launched twice: once every MCP server started, once none did.
+    for (const mcpCatalog of ['MCP tools (call with mcp_call {"server","tool","args"}):\n- docs/search(args: { q: string })', 'MCP servers are configured, but none is running.']) {
+      await new Agent({ provider, tools: new ToolRuntime({} as never, dir), sessionLog: new SessionLog(path.join(dir, 'log.jsonl')), workspaceRoot: dir, nativeTools: true, mcpCatalog }).run('hi')
+    }
+    assert.equal(seen[0]!.system, seen[1]!.system, 'the cached prefix survives a change in which servers started')
+    assert.doesNotMatch(seen[0]!.system, /docs\/search/)
+    // The offered tools do not depend on which servers started either.
+    assert.deepEqual(seen[0]!.tools, seen[1]!.tools)
+    assert.match(seen[0]!.last, /docs\/search/)
+    assert.match(seen[1]!.last, /none is running/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('switching work mode preserves native tools, including the PTC SDK', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-work-mode-native-'))
   assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir()) + path.sep))

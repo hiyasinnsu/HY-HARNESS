@@ -146,3 +146,26 @@ test('a search over its budget returns partial results with a note to narrow it'
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('grep searches large text files and names any it skipped for size', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-walk-large-'))
+  const saved = { ...searchBudget }
+  try {
+    // Over the old 1 MB limit: still searched.
+    fs.writeFileSync(path.join(dir, 'project.md'), `${'filler line\n'.repeat(150_000)}## A. 現在の状態\n`)
+    fs.writeFileSync(path.join(dir, 'huge.log'), 'x\n'.repeat(1000))
+    const tools = new ToolRuntime({} as never, dir, undefined, false, { roots: workspaceRootsFor(dir, []), spillDir: path.join(dir, '.spill') })
+    const found = (await tools.execute('search_grep', { pattern: '^## A\.', glob: 'project.md' }, true)) as { matches: Array<{ line: number }>; filesSearched: number; skippedLarge?: string[] }
+    assert.equal(found.filesSearched, 1)
+    assert.deepEqual(found.matches.map((m) => m.line), [150_001])
+    assert.equal(found.skippedLarge, undefined)
+    // A file over the limit is named, not silently dropped.
+    Object.assign(searchBudget, { maxFileBytes: 1_000 })
+    const skipped = (await tools.execute('search_grep', { pattern: 'x' }, true)) as { filesSearched: number; skippedLarge?: string[]; skippedNote?: string }
+    assert.deepEqual(skipped.skippedLarge?.map((s) => s.split(' ')[0]).sort(), ['huge.log', 'project.md'])
+    assert.match(skipped.skippedNote!, /not searched; read them with read_file/)
+  } finally {
+    Object.assign(searchBudget, saved)
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
