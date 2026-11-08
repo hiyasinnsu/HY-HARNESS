@@ -4,6 +4,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
+// Windows' own tar: a GNU tar earlier on PATH (Git Bash) reads `C:` as a remote host.
+const TAR = process.platform === 'win32' ? path.join(process.env.SystemRoot ?? 'C:/Windows', 'System32', 'tar.exe') : 'tar'
+
 export function createSuite({ cacheRoot }) {
   const source = path.join(cacheRoot, 'security-holdout-2fd12b88aafd')
   const archive = path.join(source, 'bottle-lf.tar')
@@ -16,7 +19,7 @@ export function createSuite({ cacheRoot }) {
     tasks: [{ id: 'security-holdout', prompt }],
     agentTimeoutMs: 900_000,
     async prepare(ws) {
-      const extracted = spawnSync('tar', ['-xf', archive, '-C', ws], { encoding: 'utf8', timeout: 60_000, windowsHide: true })
+      const extracted = spawnSync(TAR, ['-xf', archive, '-C', ws], { encoding: 'utf8', timeout: 60_000, windowsHide: true })
       if (extracted.status !== 0) throw new Error(`extract fixture: ${extracted.stderr || extracted.error?.message}`)
       const file = path.join(ws, 'bottle.py')
       const lines = fs.readFileSync(file, 'utf8').split('\n')
@@ -39,7 +42,7 @@ export function createSuite({ cacheRoot }) {
       fs.writeFileSync(testFile, tests)
       const pytestConfig = path.join(grader, 'pytest.ini')
       fs.writeFileSync(pytestConfig, '[pytest]\naddopts = -ra\n')
-      const extracted = spawnSync('tar', ['-xf', archive, '-C', grader, 'test'], { encoding: 'utf8', timeout: 60_000, windowsHide: true })
+      const extracted = spawnSync(TAR, ['-xf', archive, '-C', grader, 'test'], { encoding: 'utf8', timeout: 60_000, windowsHide: true })
       if (extracted.status !== 0) throw new Error(`extract frozen tests: ${extracted.stderr || extracted.error?.message}`)
       const env = { ...process.env, PYTHONPATH: `${grader}${path.delimiter}${ws}`, PYTHONIOENCODING: 'utf-8' }
       const run = (args, name) => {

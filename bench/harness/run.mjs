@@ -34,7 +34,7 @@ if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(stamp)) throw new Error('stamp must be 
 const outDir = path.resolve(arg('out', path.join(repo, 'bench', 'results')), stamp)
 if (fs.existsSync(path.join(outDir, 'meta.json')) || fs.existsSync(path.join(outDir, 'runs.jsonl'))) throw new Error(`benchmark results already exist: ${outDir}`)
 fs.mkdirSync(outDir, { recursive: true })
-const SUITES = { 'tb2-financial': './suites/tb2-financial.mjs', 'tb2-async-windows': './suites/async-cancel.mjs', stats: './suites/stats.mjs' }
+const SUITES = { 'tb2-financial': './suites/tb2-financial.mjs', 'tb2-async-windows': './suites/async-cancel.mjs', 'security-holdout': './suites/security-holdout.mjs', stats: './suites/stats.mjs' }
 const suiteId = String(arg('suite', 'tb2-financial'))
 if (!(suiteId in SUITES)) throw new Error(`unknown suite ${suiteId}; one of ${Object.keys(SUITES).join(', ')}`)
 const suite = (await import(SUITES[suiteId])).createSuite({ cacheRoot: path.join(path.dirname(benchRoot), 'cache') })

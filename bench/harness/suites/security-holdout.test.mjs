@@ -25,7 +25,7 @@ test('security verifier rejects the vulnerable fixture and accepts the pinned or
     fs.mkdirSync(good)
     await suite.prepare(good)
     const archive = path.join(cacheRoot, 'security-holdout-2fd12b88aafd', 'bottle-lf.tar')
-    const original = spawnSync('tar', ['-xOf', archive, 'bottle.py'], { encoding: 'utf8', maxBuffer: 10_000_000 })
+    const original = spawnSync(process.platform === 'win32' ? path.join(process.env.SystemRoot ?? 'C:/Windows', 'System32', 'tar.exe') : 'tar', ['-xOf', archive, 'bottle.py'], { encoding: 'utf8', maxBuffer: 10_000_000 })
     assert.equal(original.status, 0, original.stderr)
     fs.writeFileSync(path.join(good, 'bottle.py'), original.stdout)
     fs.writeFileSync(path.join(good, 'report.jsonl'), JSON.stringify({ file_path: path.join(good, 'bottle.py'), cwe_id: ['cwe-93'] }) + '\n')
