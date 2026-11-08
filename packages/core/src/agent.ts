@@ -248,6 +248,8 @@ interface Action {
   args?: unknown
   /** Several independent calls in one step. */
   calls?: unknown[]
+  /** The same list under the name models sometimes use (`{"tools":[...]}`). */
+  tools?: unknown[]
   /** A string; with `finalSchema`, a JSON value (or its JSON text). */
   final?: unknown
 }
@@ -596,6 +598,10 @@ export class Agent {
         content = JSON.stringify(calls.length === 1 ? calls[0] : { calls })
       } else {
         action = parseAction(content)
+        // `{"tools":[...]}` is the same batch under another name. As valid JSON
+        // it is not a broken call, so without this it was taken as the final
+        // answer and the turn ended mid-task (security-holdout thorough #4).
+        if (action && !Array.isArray(action.calls) && Array.isArray(action.tools) && action.final === undefined) action.calls = action.tools
         if (action && Array.isArray(action.calls)) {
           calls = action.calls.filter((c): c is Call => !!c && typeof (c as Call).tool === 'string')
         } else if (action && typeof action.tool === 'string') {

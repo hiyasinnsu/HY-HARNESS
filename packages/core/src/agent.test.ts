@@ -503,6 +503,35 @@ test('a broken pseudo tool call in native mode is retried once, then ends with a
   }
 })
 
+test('a {"tools":[...]} batch written as text runs like calls instead of ending the turn', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const { ToolRuntime } = await import('./tools.js')
+  const { SessionLog } = await import('./session-log.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-tools-batch-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'secret-marker\n')
+    const seen: string[] = []
+    const replies = ['{"tools":[{"tool":"read_file","args":{"path":"a.txt"}}]}', 'Done.']
+    const provider = {
+      name: 'batch',
+      complete: async (messages: Array<{ role: string; content: string }>) => {
+        seen.push(messages.map((m) => m.content).join('\n'))
+        return { content: replies.shift()!, usage: { inputTokens: 1, outputTokens: 1 } }
+      },
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-t')
+    const r = await new Agent({ provider, tools: new ToolRuntime({} as never, dir), sessionLog: log, workspaceRoot: dir, nativeTools: true }).run('read a')
+    assert.equal(r.final, 'Done.')
+    assert.equal(seen.length, 2, 'the batch did not end the turn')
+    assert.match(seen[1]!, /secret-marker/, 'the read ran and its result was sent')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a broken pseudo tool call in native mode is retried and the next plain reply is final', async () => {
   const fs = await import('node:fs')
   const os = await import('node:os')
