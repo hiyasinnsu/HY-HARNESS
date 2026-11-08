@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { workspaceRootsFor } from './config.js'
-import { ToolRuntime } from './tools.js'
+import { ToolRuntime, searchBudget } from './tools.js'
 
 // Regression: the walker used to yield paths relative to the directory being
 // listed, so nested files came back as bare basenames. `docs/*.md` matched
@@ -85,6 +85,64 @@ test('search_grep reads each nested file once, under its own path', async () => 
     assert.equal(headings.filesSearched, 2)
     assert.deepEqual(headings.matches.map((m) => m.path), ['docs/adr/0001.md', 'docs/intro.md'])
   } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// Regression: the search ran synchronously in the process that also serves the
+// GUI, so an unfiltered grep over a large workspace froze the desktop window.
+function manyFiles(count: number) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-walk-many-'))
+  for (let d = 0; d < 20; d++) {
+    const sub = path.join(dir, 'scratch', `run${d}`)
+    fs.mkdirSync(sub, { recursive: true })
+    for (let i = 0; i < count / 20; i++) fs.writeFileSync(path.join(sub, `out${i}.json`), `{"step": ${i}, "loss": 1.${i}}\n`.repeat(40))
+  }
+  fs.writeFileSync(path.join(dir, 'README.md'), '## A. target\n')
+  const tools = new ToolRuntime({} as never, dir, undefined, false, { roots: workspaceRootsFor(dir, []), spillDir: path.join(dir, '.spill') })
+  return { dir, tools }
+}
+
+test('an unfiltered grep over many files leaves the event loop free', async () => {
+  const { dir, tools } = manyFiles(2_000)
+  try {
+    let ticks = 0
+    const timer = setInterval(() => (ticks += 1), 5)
+    const started = Date.now()
+    const result = (await tools.execute('search_grep', { pattern: '^## A\.' }, true)) as { matches: Array<{ path: string }>; filesSearched: number }
+    const elapsed = Date.now() - started
+    clearInterval(timer)
+    assert.deepEqual(result.matches.map((m) => m.path), ['README.md'])
+    assert.equal(result.filesSearched, 2_001)
+    // A synchronous walk lets no timer run until it returns; here the timer
+    // keeps firing throughout (at least a few times per 100 ms of search).
+    assert.ok(ticks >= Math.min(10, Math.floor(elapsed / 100)), `${ticks} ticks in ${elapsed} ms`)
+    assert.ok(ticks > 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a search over its budget returns partial results with a note to narrow it', async () => {
+  const { dir, tools } = manyFiles(400)
+  const saved = { ...searchBudget }
+  try {
+    Object.assign(searchBudget, { maxBytes: 20_000 })
+    const grep = (await tools.execute('search_grep', { pattern: 'loss' , maxResults: 100_000 }, true)) as { truncated: boolean; stoppedEarly?: string; note?: string; filesSearched: number }
+    assert.equal(grep.truncated, true)
+    assert.equal(grep.stoppedEarly, 'bytes')
+    assert.match(grep.note!, /stopped early.*partial.*glob/s)
+    assert.ok(grep.filesSearched >= 1 && grep.filesSearched < 400, `${grep.filesSearched}`)
+    Object.assign(searchBudget, { maxBytes: saved.maxBytes, maxMs: 0 })
+    const glob = (await tools.execute('search_glob', { pattern: '**/*.md' }, true)) as { truncated: boolean; stoppedEarly?: string }
+    assert.equal(glob.stoppedEarly, 'time')
+    assert.equal(glob.truncated, true)
+    // Within budget nothing changes: a glob-narrowed grep is complete.
+    Object.assign(searchBudget, saved)
+    const narrow = (await tools.execute('search_grep', { pattern: '^## A', glob: '*.md' }, true)) as { truncated: boolean; stoppedEarly?: string; matches: unknown[] }
+    assert.deepEqual([narrow.truncated, narrow.stoppedEarly, narrow.matches.length], [false, undefined, 1])
+  } finally {
+    Object.assign(searchBudget, saved)
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

@@ -316,6 +316,34 @@ function withIgnoreNote<T extends object>(result: T, dir: string | undefined): T
 }
 const GREP_MAX_FILE_BYTES = 1024 * 1024
 
+/**
+ * How long one search_glob / search_grep may run and how much grep may read
+ * before it returns what it has. An unfiltered grep over a large workspace
+ * (725 MB of small files) otherwise ran for minutes. Exposed for tests.
+ */
+export const searchBudget = { maxMs: 15_000, maxBytes: 256 * 1024 * 1024 }
+
+type SearchStop = 'time' | 'bytes'
+
+function searchBudgetFor(signal: AbortSignal | undefined): { spent: (bytes: number) => SearchStop | undefined } {
+  const started = Date.now()
+  let read = 0
+  return {
+    spent(bytes) {
+      if (signal?.aborted) throw new AbortRunError('round aborted')
+      read += bytes
+      if (read > searchBudget.maxBytes) return 'bytes'
+      if (Date.now() - started > searchBudget.maxMs) return 'time'
+      return undefined
+    },
+  }
+}
+
+function budgetNote(stop: SearchStop): string {
+  const limit = stop === 'time' ? `${Math.round(searchBudget.maxMs / 1000)} s` : `${Math.round(searchBudget.maxBytes / (1024 * 1024))} MB`
+  return `The search stopped early (${limit} limit) and the results are partial. Narrow it: pass glob (e.g. "**/*.md") or a more specific pattern, or search a subdirectory.`
+}
+
 /** `read_image` limits (WP-30): a vision model cannot use more than this. */
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 // High-resolution document scans fit without an agent-created thumbnail; bytes stay capped at 8 MiB.
@@ -1281,7 +1309,12 @@ export class ToolRuntime {
    * directory being listed: otherwise every result collapses to its basename,
    * `docs/*.md` never matches, and grep re-reads `<root>/<basename>`.
    */
-  private *walk(root: string): Generator<string> {
+  /**
+   * Asynchronous on purpose: in the desktop app and `hy web` the tools run in
+   * the same process as the UI server, and a synchronous walk of a large tree
+   * (18,000 files, no .gitignore) froze the window until it finished.
+   */
+  private async *walk(root: string): AsyncGenerator<string> {
     yield* this.walkDir(root, '', rootIgnoreRules(root))
   }
 
@@ -1290,17 +1323,17 @@ export class ToolRuntime {
    * `.git/info/exclude`), then each nested `.gitignore` below its directory.
    * An ignored directory is not entered at all.
    */
-  private *walkDir(dir: string, rel: string, inherited: readonly IgnoreRule[]): Generator<string> {
+  private async *walkDir(dir: string, rel: string, inherited: readonly IgnoreRule[]): AsyncGenerator<string> {
     let entries: fs.Dirent[]
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true })
+      entries = await fs.promises.readdir(dir, { withFileTypes: true })
     } catch {
       return
     }
     let rules = inherited
     if (rel !== '' && entries.some((e) => e.name === '.gitignore' && e.isFile())) {
       try {
-        rules = [...inherited, ...parseGitignore(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), rel)]
+        rules = [...inherited, ...parseGitignore(await fs.promises.readFile(path.join(dir, '.gitignore'), 'utf8'), rel)]
       } catch {
         // An unreadable nested .gitignore only means its rules do not apply.
       }
@@ -1317,14 +1350,17 @@ export class ToolRuntime {
     }
   }
 
-  private searchGlob(args: Record<string, unknown>): ToolResult {
+  private async searchGlob(args: Record<string, unknown>): Promise<ToolResult> {
     const pattern = String(args.pattern)
     const re = globToRegExp(pattern)
     const max = Number(args.maxResults ?? 200)
     const selected = args.root === '*' ? this.roots : [this.root(typeof args.root === 'string' ? args.root : undefined)]
     const files: string[] = []
+    const budget = searchBudgetFor(this.signal)
     for (const root of selected) {
-      for (const rel of this.walk(root.path)) {
+      for await (const rel of this.walk(root.path)) {
+        const stop = budget.spent(0)
+        if (stop) return { files, truncated: true, stoppedEarly: stop, note: budgetNote(stop) }
         if (!re.test(rel)) continue
         if (files.length >= max) return { files, truncated: true }
         files.push(this.qualified(root, rel))
@@ -1333,7 +1369,7 @@ export class ToolRuntime {
     return withIgnoreNote({ files, truncated: false }, files.length === 0 ? ignoredTarget(selected, pattern) : undefined)
   }
 
-  private searchGrep(args: Record<string, unknown>): ToolResult {
+  private async searchGrep(args: Record<string, unknown>): Promise<ToolResult> {
     let re: RegExp
     try {
       re = new RegExp(String(args.pattern), args.ignoreCase === true ? 'i' : '')
@@ -1345,18 +1381,25 @@ export class ToolRuntime {
     const selected = args.root === '*' ? this.roots : [this.root(typeof args.root === 'string' ? args.root : undefined)]
     const matches: Array<{ path: string; line: number; text: string }> = []
     let filesSearched = 0
+    const budget = searchBudgetFor(this.signal)
     for (const root of selected) {
-      for (const rel of this.walk(root.path)) {
+      for await (const rel of this.walk(root.path)) {
         if (only && !only.test(rel)) continue
         const full = path.join(root.path, rel)
         let bytes: Buffer
         try {
-          if (fs.statSync(full).size > GREP_MAX_FILE_BYTES) continue
-          bytes = fs.readFileSync(full)
+          if ((await fs.promises.stat(full)).size > GREP_MAX_FILE_BYTES) continue
+          bytes = await fs.promises.readFile(full)
         } catch {
           continue
         }
-        if (bytes.subarray(0, 8192).includes(0)) continue
+        // Checked after the read, so a search always gets through at least
+        // the first file however small the budget.
+        const stop = budget.spent(bytes.length)
+        if (bytes.subarray(0, 8192).includes(0)) {
+          if (stop) return { matches, truncated: true, filesSearched, stoppedEarly: stop, note: budgetNote(stop) }
+          continue
+        }
         filesSearched += 1
         const lines = bytes.toString('utf8').split(/\r?\n/)
         for (let i = 0; i < lines.length; i++) {
@@ -1364,6 +1407,7 @@ export class ToolRuntime {
           if (matches.length >= max) return { matches, truncated: true, filesSearched }
           matches.push({ path: this.qualified(root, rel), line: i + 1, text: lines[i]!.slice(0, 300) })
         }
+        if (stop) return { matches, truncated: true, filesSearched, stoppedEarly: stop, note: budgetNote(stop) }
       }
     }
     const target = matches.length === 0 && typeof args.glob === 'string' ? ignoredTarget(selected, args.glob) : undefined
