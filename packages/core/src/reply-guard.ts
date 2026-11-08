@@ -87,6 +87,9 @@ export function looksLikeBrokenToolCall(text: string): boolean {
   if (t.includes('{') && CLOSING_FRAGMENTS.some((f) => t.includes(f))) return true
   // A reply that parses as a whole is an answer, however broken it looks in parts.
   if (isJson(t)) return false
+  // A readable first object followed by more calls: running only the first
+  // would drop the others silently.
+  if (hasCallsAfterFirstObject(t)) return true
   const pairs = closingBraces(t)
   let sawUnclosed = false
   for (let i = t.indexOf('{'); i >= 0; i = t.indexOf('{', i + 1)) {
@@ -156,4 +159,90 @@ export function recoverTemplateCall(text: string): string | undefined {
     return undefined
   }
   return undefined
+}
+
+/**
+ * Splits text into its top-level JSON values separated by commas. Returns the
+ * values' texts and what follows the last one, or undefined when a bracket
+ * does not match. String-aware.
+ */
+function topLevelValues(text: string): { values: string[]; rest: string } | undefined {
+  const values: string[] = []
+  let depth = 0
+  let start = -1
+  let inString = false
+  let escape = false
+  let i = 0
+  for (; i < text.length; i++) {
+    const c = text[i]!
+    if (inString) {
+      if (escape) escape = false
+      else if (c === BACKSLASH) escape = true
+      else if (c === '"') inString = false
+      continue
+    }
+    if (c === '"') {
+      if (depth === 0) return undefined
+      inString = true
+    } else if (c === '{' || c === '[') {
+      if (depth === 0) start = i
+      depth += 1
+    } else if (c === '}' || c === ']') {
+      if (depth === 0) break
+      depth -= 1
+      if (depth === 0) values.push(text.slice(start, i + 1))
+    } else if (depth === 0 && c !== ',' && !/\s/.test(c)) {
+      break
+    }
+  }
+  if (inString || depth !== 0) return undefined
+  return { values, rest: text.slice(i) }
+}
+
+const BACKSLASH = String.fromCharCode(92)
+
+function isCall(value: unknown): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { tool?: unknown }).tool === 'string'
+}
+
+/**
+ * Repairs a batch written without its `{"calls":[` opener:
+ * `{"tool":"a",...},{"tool":"b",...}]}`. Every call is complete and the
+ * order is clear, so they all run. Without this only the first object was
+ * read and the rest silently dropped: an orchestrator "spawned" four workers
+ * that never existed. Returns `{"calls":[...]}` or undefined.
+ */
+export function recoverUnwrappedBatch(text: string): string | undefined {
+  const t = text.trim()
+  if (!t.startsWith('{')) return undefined
+  const split = topLevelValues(t)
+  if (!split || split.values.length < 2) return undefined
+  // Only the closers of the missing wrapper may follow.
+  if (!/^[\s\]}]*$/.test(split.rest)) return undefined
+  const calls: unknown[] = []
+  for (const value of split.values) {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      if (!isCall(parsed)) return undefined
+      calls.push(parsed)
+    } catch {
+      return undefined
+    }
+  }
+  return JSON.stringify({ calls })
+}
+
+/**
+ * True when the reply is not valid JSON as a whole, its first object can be
+ * read, and more tool calls follow it. Running only that first object would
+ * drop the rest without a word, so such a reply counts as a broken call.
+ */
+export function hasCallsAfterFirstObject(text: string): boolean {
+  const t = text.trim()
+  if (isJson(t)) return false
+  const start = t.indexOf('{')
+  if (start < 0) return false
+  const end = closingBraces(t).get(start)
+  if (end === undefined) return false
+  return JSON_TOOL_KEY.test(t.slice(end + 1))
 }

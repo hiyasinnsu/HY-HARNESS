@@ -558,6 +558,46 @@ test('a {"tools":[...]} batch written as text runs like calls instead of ending 
   }
 })
 
+test('an unwrapped batch runs every call; a partial reply runs nothing and says so', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const { ToolRuntime } = await import('./tools.js')
+  const { SessionLog } = await import('./session-log.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-unwrapped-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'alpha-marker')
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'beta-marker')
+    const run = async (replies: string[]) => {
+      const seen: string[] = []
+      const provider = {
+        name: 'unwrapped',
+        complete: async (messages: Array<{ role: string; content: string }>) => {
+          seen.push(messages.map((m) => m.content).join(' | '))
+          return { content: replies.shift()!, usage: { inputTokens: 1, outputTokens: 1 } }
+        },
+      }
+      const log = new SessionLog(path.join(dir, `log-${Math.random()}.jsonl`))
+      log.setRun('run-u')
+      const r = await new Agent({ provider, tools: new ToolRuntime({} as never, dir), sessionLog: log, workspaceRoot: dir, nativeTools: true }).run('read both')
+      return { r, seen, log }
+    }
+    // Both calls of the unwrapped batch run.
+    const ok = await run(['{"tool":"read_file","args":{"path":"a.txt"}},{"tool":"read_file","args":{"path":"b.txt"}}]}', 'Done.'])
+    assert.equal(ok.r.final, 'Done.')
+    assert.match(ok.seen[1]!, /alpha-marker/)
+    assert.match(ok.seen[1]!, /beta-marker/)
+    assert.equal(ok.log.events().filter((e) => e.type === 'reply/recovered').length, 1)
+    // A garbled batch: the first object alone is not run; the model is told none ran.
+    const partial = await run(['{"tool":"read_file","args":{"path":"a.txt"}},{"tool":"read_file","args":{"path":"b.txt"}', 'Done.'])
+    assert.doesNotMatch(partial.seen[1]!, /alpha-marker/, 'the first call was not run on its own')
+    assert.match(partial.seen[1]!, /none of them ran/)
+    assert.equal(partial.log.events().filter((e) => e.type === 'turn/retry').length, 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a call batch cut short by leaked template tags runs instead of ending the turn', async () => {
   const fs = await import('node:fs')
   const os = await import('node:os')

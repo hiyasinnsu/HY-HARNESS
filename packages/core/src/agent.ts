@@ -7,7 +7,7 @@ import { Ledger, discoverPinned } from './ledger.js'
 import type { SkillInfo } from './skills.js'
 import type { MemoryStore } from './memory.js'
 import { validate, type Schema, type ToolSpec } from './tool-registry.js'
-import { looksLikeBrokenToolCall, recoverTemplateCall } from './reply-guard.js'
+import { hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverTemplateCall, recoverUnwrappedBatch } from './reply-guard.js'
 import { steerMessage, type SteerInbox } from './steering.js'
 import { classifyDenial, type DenialInfo } from './denial.js'
 import { estimateTokens } from './tokens.js'
@@ -613,7 +613,17 @@ export class Agent {
           this.options.sessionLog.append('reply/recovered', { step, reason: 'template-tail', removed: content.length - recovered.length })
           content = recovered
         }
-        action = parseAction(content)
+        // A batch written without its `{"calls":[` opener: every call runs.
+        const batch = recoverUnwrappedBatch(content)
+        if (batch !== undefined) {
+          this.options.sessionLog.append('reply/recovered', { step, reason: 'unwrapped-batch' })
+          content = batch
+        }
+        // Only a whole reply runs. When just its first object parses and more
+        // calls follow, running that object alone dropped the rest silently
+        // (an orchestrator then reported four workers that never started).
+        const partial = hasCallsAfterFirstObject(content)
+        action = partial ? undefined : parseAction(content)
         // `{"tools":[...]}` is the same batch under another name. As valid JSON
         // it is not a broken call, so without this it was taken as the final
         // answer and the turn ended mid-task (security-holdout thorough #4).
@@ -637,8 +647,9 @@ export class Agent {
             brokenRetried = true
             messages.push({
               role: 'user',
-              content:
-                'Your reply looked like a broken tool call. Use a real function call for tools, or reply with a short plain-text summary when finished.',
+              content: partial
+                ? 'Your reply listed several tool calls, but they were not valid JSON, so none of them ran. Send them again as real function calls.'
+                : 'Your reply looked like a broken tool call. Use a real function call for tools, or reply with a short plain-text summary when finished.',
             })
             this.options.sessionLog.append('turn/retry', { step, reason: 'broken-tool-call', ...replay(messages, true) })
             this.options.onEvent?.({ type: 'retry', step, reason: 'broken-tool-call', content: truncate(content, 2_000) })

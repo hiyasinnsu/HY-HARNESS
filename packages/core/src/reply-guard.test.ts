@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { looksLikeBrokenToolCall, recoverTemplateCall } from './reply-guard.js'
+import { hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverTemplateCall, recoverUnwrappedBatch } from './reply-guard.js'
 
 test('a truncated tool call is a broken tool call', () => {
   assert.equal(looksLikeBrokenToolCall('{"tool":"read_file","args":{"path":"a.txt"'), true)
@@ -199,4 +199,26 @@ test('the repair refuses anything but a call followed by template tags', () => {
   // JSON that names no tool.
   assert.equal(recoverTemplateCall('{"final":"ok"</｜DSML｜ parameter>'), undefined)
   assert.equal(recoverTemplateCall('{"calls":[{"args":{}}]</｜DSML｜ parameter>'), undefined)
+})
+
+test('a batch written without its {"calls":[ opener is restored with every call', () => {
+  // The shape of the orchestrator reply whose four worker spawns were dropped.
+  const reply = '{"tool":"update_plan","args":{"plan":[{"step":"a","status":"in_progress"}]}},{"tool":"orchestrator_spawn","args":{"title":"x","task":"t {1}","scope":["file:a.md"]}},{"tool":"orchestrator_spawn","args":{"title":"y","task":"t","scope":["b"]}}]}'
+  const restored = recoverUnwrappedBatch(reply)
+  assert.ok(restored)
+  assert.deepEqual((JSON.parse(restored!) as { calls: Array<{ tool: string }> }).calls.map((c) => c.tool), ['update_plan', 'orchestrator_spawn', 'orchestrator_spawn'])
+  // Not a batch: valid JSON, one call, prose, or anything else after the calls.
+  assert.equal(recoverUnwrappedBatch('{"calls":[{"tool":"a","args":{}},{"tool":"b","args":{}}]}'), undefined)
+  assert.equal(recoverUnwrappedBatch('{"tool":"a","args":{}}'), undefined)
+  assert.equal(recoverUnwrappedBatch('{"tool":"a","args":{}},{"tool":"b","args":{}}]} and then some prose'), undefined)
+  assert.equal(recoverUnwrappedBatch('{"tool":"a","args":{}},{"note":"not a call"}]}'), undefined)
+})
+
+test('a reply whose first object parses but more calls follow is never run in part', () => {
+  const garbled = '{"tool":"read_file","args":{"path":"a"}},{"tool":"shell","args":{"command":"x"}'
+  assert.equal(hasCallsAfterFirstObject(garbled), true)
+  assert.equal(looksLikeBrokenToolCall(garbled), true)
+  assert.equal(hasCallsAfterFirstObject('{"calls":[{"tool":"a","args":{}},{"tool":"b","args":{}}]}'), false, 'valid JSON')
+  assert.equal(hasCallsAfterFirstObject('{"tool":"a","args":{}}]'), false, 'one call and a stray bracket: nothing is dropped')
+  assert.equal(hasCallsAfterFirstObject('{"tool":"a","args":{}} done.'), false)
 })
