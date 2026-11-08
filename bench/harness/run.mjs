@@ -108,6 +108,8 @@ function benchHyConfigDir(variant, extra = {}) {
 // setting, so comparing it with `hy` measures exactly that change.
 const HY_VARIANTS = {
   hy: {},
+  // The default before 2026-11-09, to compare against the new default lean4.
+  'hy-lean': { promptVariant: 'lean' },
   'hy-fast': {},
   'hy-thorough': {},
   'hy-full': { reasoningHistory: 'full' },

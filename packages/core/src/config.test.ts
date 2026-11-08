@@ -530,6 +530,27 @@ test('reasoningHistory defaults to full; the user config can turn it off', () =>
   }
 })
 
+test('promptVariant defaults to lean4; the user config can pick lean', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-variant-config-'))
+  const saved = process.env.HY_CONFIG_DIR
+  try {
+    const user = path.join(dir, 'user')
+    const ws = path.join(dir, 'ws')
+    fs.mkdirSync(user)
+    fs.mkdirSync(ws)
+    process.env.HY_CONFIG_DIR = user
+    assert.equal(loadConfig({ cwd: ws }).promptVariant, 'lean4')
+    fs.writeFileSync(path.join(user, 'config.json'), JSON.stringify({ promptVariant: 'lean' }))
+    assert.equal(loadConfig({ cwd: ws }).promptVariant, 'lean')
+    fs.writeFileSync(path.join(user, 'config.json'), JSON.stringify({ promptVariant: 'nonsense' }))
+    assert.equal(loadConfig({ cwd: ws }).promptVariant, 'lean4')
+  } finally {
+    if (saved === undefined) delete process.env.HY_CONFIG_DIR
+    else process.env.HY_CONFIG_DIR = saved
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('CP-37: profiles override the user layer and unknown profiles fail', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-profile-'))
   const saved = process.env.HY_CONFIG_DIR

@@ -148,7 +148,8 @@ export function buildSystemPrompt(workspaceRoot: string, ptc = false, objective 
 This session:
 Workspace root: ${workspaceRoot}${extras.date ? `\nToday is ${extras.date}.` : ''}
 ${catalog ? `\n${catalog}\n` : ''}${extras.roleInstruction ? `\n${extras.roleInstruction.trim()}\n` : ''}${extras.goal ? `\n${goalPrompt(extras.goal)}\n` : ''}`
-  // `lean` is the default since 2026-11-07: in the benchmark the longer
+  // `lean` was the default from 2026-11-07 to 2026-11-09 (now `lean4`, set in
+  // the config; this builder still falls back to `lean`). In the benchmark the longer
   // `legacy` opening (Japanese reasoning, style rules, a pointer to the
   // session part) made no measurable difference. The reasoning line keeps
   // only the tone so the rest of the prompt can be measured from here.
@@ -178,7 +179,7 @@ Do not try to read or write outside the workspace.`
         ? `When the work is done, reply without a tool call, with only JSON of type ${jsonSchemaToTs(extras.finalSchema)}.`
         : 'When the work is done, reply without a tool call: a short summary of what changed and what you verified.'
     if (extras.promptVariant === 'lean4') {
-      // `lean4` (2026-11-07, under evaluation): lean3 with the detailed tool
+      // `lean4` (2026-11-07; the config default since 2026-11-09): lean3 with the detailed tool
       // descriptions (tool-docs.ts); the lines they now cover are dropped here:
       // the shell line, read-before-edit, where to search, how to patch.
       const ending = objective || extras.finalSchema ? `\n${finish}` : ''

@@ -197,7 +197,12 @@ export interface HarnessConfig {
    * replies and calls.
    */
   reasoningHistory: ReasoningHistory
-  /** System-prompt variant: `lean` (default), or `legacy` (the opening used until 2026-11-07). */
+  /**
+   * System-prompt variant. `lean4` is the default since 2026-11-09 (the lean2-4
+   * rules and the detailed tool descriptions; no worse than `lean` on the
+   * financial and security benchmarks, bench/results/2026-11-09-lean4-vs-lean-*).
+   * `lean` was the default before; `legacy` is the opening used until 2026-11-07.
+   */
   promptVariant: 'lean' | 'legacy' | 'lean2' | 'lean3' | 'lean4'
   ptc: boolean
   projectTrusted: boolean
@@ -880,7 +885,7 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
     // and output tokens without raising prompt or uncached tokens.
     reasoningHistory: user?.reasoningHistory === 'none' ? 'none' : 'full',
     // lean is the default since 2026-11-07 (no measurable difference, shorter).
-    promptVariant: user?.promptVariant === 'legacy' || user?.promptVariant === 'lean2' || user?.promptVariant === 'lean3' || user?.promptVariant === 'lean4' ? user.promptVariant : 'lean',
+    promptVariant: user?.promptVariant === 'lean' || user?.promptVariant === 'legacy' || user?.promptVariant === 'lean2' || user?.promptVariant === 'lean3' ? user.promptVariant : 'lean4',
     ptc: overrides.ptc ?? process.env.HY_PTC === '1',
     projectTrusted: trusted,
     protectedPaths: project?.protectedPaths ?? [],

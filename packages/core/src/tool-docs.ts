@@ -1,4 +1,4 @@
-// Detailed tool descriptions (2026-11-07, `promptVariant: lean4`).
+// Detailed tool descriptions (2026-11-07, `promptVariant: lean4`, the default since 2026-11-09).
 //
 // The short descriptions in the registry stay the default. lean4 sends these
 // instead, with a description for every parameter, and drops from the system
