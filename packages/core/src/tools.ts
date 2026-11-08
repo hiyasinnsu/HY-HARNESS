@@ -123,6 +123,11 @@ export function cleanPowerShellOutput(text: string): string {
 
 export interface ToolRuntimeOptions {
   /**
+   * `update_plan` may hold several steps in progress: the session runs work in
+   * parallel (an orchestrator with several workers). Otherwise only one.
+   */
+  parallelPlan?: boolean
+  /**
    * CP-38/CP-10: the `tool-search` feature flag. Off: every deferred tool is
    * loaded from the start (offered directly, no tool_search round trip).
    */
@@ -1073,7 +1078,7 @@ export class ToolRuntime {
         }
       }      case 'update_plan': {
         const plan = a.plan as PlanStep[]
-        if (plan.filter((s) => s.status === 'in_progress').length > 1) throw new Error('at most one step may be in_progress')
+        if (!this.options.parallelPlan && plan.filter((s) => s.status === 'in_progress').length > 1) throw new Error('at most one step may be in_progress')
         this.plan = plan.map((s) => ({ step: s.step, status: s.status }))
         return { ok: true, remaining: plan.filter((s) => s.status !== 'completed').length }
       }

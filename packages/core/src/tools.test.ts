@@ -517,3 +517,20 @@ test('CP-15: background subagents can be spawned, listed, waited for and closed'
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('update_plan holds several steps in progress only when the session runs work in parallel', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-plan-parallel-'))
+  try {
+    const plan = [
+      { step: 'worker A', status: 'in_progress' },
+      { step: 'worker B', status: 'in_progress' },
+      { step: 'review', status: 'pending' },
+    ]
+    const single = new ToolRuntime({} as never, dir)
+    await assert.rejects(single.execute('update_plan', { plan }, true), /at most one step may be in_progress/)
+    const orchestrator = new ToolRuntime({} as never, dir, undefined, false, { parallelPlan: true })
+    assert.deepEqual(await orchestrator.execute('update_plan', { plan }, true), { ok: true, remaining: 3 })
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

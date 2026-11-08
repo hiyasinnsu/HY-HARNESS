@@ -262,7 +262,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     // would cost prompt tokens on every PTC request.
     wire: true,
     readOnly: true,
-    description: 'Track multi-step work: the full list each time; one in_progress.',
+    description: 'Track multi-step work: the full list each time. One step in_progress, unless steps really run at the same time (an orchestrator with several workers).',
     input: obj(
       {
         plan: arr(obj({ step: str(), status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] } }, ['step', 'status'])),

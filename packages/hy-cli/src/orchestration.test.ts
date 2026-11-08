@@ -281,3 +281,32 @@ test('the orchestrator prompt requires honest limitation reporting', () => {
   assert.match(prompt, /Do not explain internal modes, tool restrictions, or permission mechanics/)
   assert.doesNotMatch(prompt, /Never mention tool restrictions/)
 })
+
+test('the orchestrator prompt settles how a turn ends, what it can do, and when it asks', () => {
+  const prompt = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'prompts', 'orchestrator.md'), 'utf8')
+  // How a turn ends: three cases, and never on an announcement of its own work.
+  assert.match(prompt, /## How a turn ends/)
+  assert.match(prompt, /Never end a turn by announcing work you will do yourself/)
+  assert.match(prompt, /When you choose a default, dispatch it in the same turn/)
+  // What it can do itself, so it does not plan commands it cannot run.
+  assert.match(prompt, /You cannot run commands, builds or tests, and you cannot edit files/)
+  assert.doesNotMatch(prompt, /run a small read-only investigation first/)
+  // Asking follows the interaction setting; the general rules are read for a delegator.
+  assert.match(prompt, /How often you ask follows the interaction setting/)
+  assert.match(prompt, /## Reading the general instructions/)
+  assert.match(prompt, /several steps may be `in_progress`/)
+  assert.doesNotMatch(prompt, /what is running now and what will follow/)
+})
+
+test('a session without apply_patch or shell gets the reading half of the roots note', async () => {
+  const { workspaceRootCatalog } = await import('./session-app.js')
+  const roots = [
+    { id: 'main', path: 'F:/a', writable: true },
+    { id: 'docs', path: 'F:/b', writable: false },
+  ]
+  const full = workspaceRootCatalog(roots as never)
+  assert.match(full, /apply_patch \/ shell/)
+  const reading = workspaceRootCatalog(roots as never, { readOnly: true })
+  assert.match(reading, /read_file \/ search_glob \/ search_grep/)
+  assert.doesNotMatch(reading, /apply_patch|shell|writable/)
+})

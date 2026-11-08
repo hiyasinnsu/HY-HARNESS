@@ -746,8 +746,18 @@ export function eventPrinter(json: boolean, runId: string) {
  * ones are writable. This is model guidance, so a session puts it in the
  * system prompt rather than prefixing the user's own message with it.
  */
-export function workspaceRootCatalog(roots: readonly WorkspaceRootConfig[]): string {
+export function workspaceRootCatalog(roots: readonly WorkspaceRootConfig[], options: { readOnly?: boolean } = {}): string {
   if (roots.length <= 1) return ''
+  // A session without apply_patch / shell (an orchestrator, a read-only
+  // subagent) gets only the reading half: naming tools it lacks invites it to
+  // plan work it cannot do.
+  if (options.readOnly === true) {
+    return [
+      '[workspace roots]',
+      ...roots.map((root) => `- ${root.id}: ${root.path}`),
+      'Use "rootId:relative/path" with read_file / search_glob / search_grep.',
+    ].join('\n')
+  }
   return [
     '[workspace roots]',
     ...roots.map((root) => `- ${root.id}: ${root.path} (${root.writable === true ? 'writable' : 'read-only'})`),
@@ -1300,8 +1310,11 @@ export class Conversation {
     const readOnlyTools =
       options.readOnly === true ? new Set([...withReadOnlyPlugins(READ_ONLY_TOOLS), ...readOnlyPluginNames]) : undefined
     const extrasAllowed = new Set(options.tooling?.allowed ?? [])
+    // An orchestrator cannot start jobs (no shell) and is told not to wait or
+    // poll, so the job tools are not offered to it.
+    const ORCHESTRATOR_DROPS = new Set(['job_status', 'job_output', 'job_wait'])
     const planTools = new Set([
-      ...withReadOnlyPlugins(PLAN_MODE_TOOLS),
+      ...[...withReadOnlyPlugins(PLAN_MODE_TOOLS)].filter((tool) => options.planOnly !== true || !ORCHESTRATOR_DROPS.has(tool)),
       ...extrasAllowed,
       ...goalTools.keys(),
       ...readOnlyPluginNames,
@@ -1316,6 +1329,8 @@ export class Conversation {
         : bundleTools
       : readOnlyTools
     const tools = new ToolRuntime(client, config.workspaceRoot, approve, false, {
+      // An orchestrator's workers run at the same time; its plan shows that.
+      ...(options.planOnly === true ? { parallelPlan: true } : {}),
       toolSearch: config.features['tool-search'] === true,
       contextWindowTokens: config.role.contextWindowTokens,
       ledger,
@@ -1393,7 +1408,7 @@ export class Conversation {
     // The root catalog is model guidance (which roots exist, how to address
     // them), so it belongs in the system prompt. Prefixing it to the user
     // message leaked it into the chat transcript of every reload.
-    const rootCatalog = workspaceRootCatalog(config.workspaceRoots)
+    const rootCatalog = workspaceRootCatalog(config.workspaceRoots, { readOnly: options.planOnly === true || options.readOnly === true })
     // WP-42: a bundle may add a short prompt section (it cannot remove the
     // role's own instruction).
     const roleInstruction = [options.roleInstruction?.trim() ?? '', ...config.bundles.prompts, rootCatalog]
