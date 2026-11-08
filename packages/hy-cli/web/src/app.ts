@@ -40,7 +40,7 @@ import { renderNoticeHtml } from './notice.js'
 import { queueBadgeLabel, sendIntent, steerToggleLabel } from './turn-queue-intent.js'
 import { renderTurnQueueHtml } from './turn-queue-view.js'
 import { orchestrationIntent } from './orchestration-intent.js'
-import { SCROLL_ANCHOR_AT_BOTTOM, anchorAfterRender, captureAnchor, type ScrollAnchor } from './scroll-anchor.js'
+import { SCROLL_ANCHOR_AT_BOTTOM, anchorAfterRender, captureAnchor, shouldStickToBottom, type ScrollAnchor } from './scroll-anchor.js'
 import { entryMotionKey, settledFlags, wrapEntryHtml } from './entry-motion.js'
 import { nextTheme, resolveTheme, themeToggleView } from './theme.js'
 import { buildLabel } from './build-label.js'
@@ -859,7 +859,7 @@ function renderEntry(entry: ChatEntry): string {
       const summary = entry.summary
         ? `<span class="thinking-summary-inline${entry.summaryProvisional ? ' provisional' : ''}">：${escapeHtml(entry.summary)}</span>`
         : ''
-      return `<details class="thinking-block" data-entry-id="${escapeHtml(entry.id)}"><summary><span class="thinking-title">${tr('thinking')}</span>${summary}</summary><pre>${escapeHtml(entry.text)}</pre></details>`
+      return `<details class="thinking-block" data-entry-id="${escapeHtml(entry.id)}"${openThinking.has(entry.id) ? ' open' : ''}><summary><span class="thinking-title">${tr('thinking')}</span>${summary}</summary><pre>${escapeHtml(entry.text)}</pre></details>`
     }
     case 'notice':
       // Worker traffic arrives as one synthetic turn, so a notice can hold a
@@ -1021,9 +1021,70 @@ let transcriptRenderFrame: number | undefined
 /** Entries already on screen once; they must not replay their entrance animation. */
 const shownEntries = new Set<string>()
 
-function renderEntries(): string {
+/** One HTML string per entry (each a single `.entry` element), in order. */
+function renderEntryList(): string[] {
   const settled = settledFlags(shownEntries, state.entries.map(entryMotionKey))
-  return state.entries.map((entry, i) => wrapEntryHtml(renderEntry(entry), settled[i] === true)).join('')
+  return state.entries.map((entry, i) => wrapEntryHtml(renderEntry(entry), settled[i] === true))
+}
+
+/** What the transcript element shows now, to patch the next live update against. */
+interface RenderedTranscript {
+  key: string
+  waitingBar: string
+  /** Undefined when the empty state is shown. */
+  entries: string[] | undefined
+  running: string
+}
+let lastTranscript: RenderedTranscript | undefined
+
+/** Thinking chips the reader has opened (entry ids). */
+const openThinking = new Set<string>()
+
+function htmlToElement(html: string): Element | undefined {
+  const template = document.createElement('template')
+  template.innerHTML = html
+  return template.content.firstElementChild ?? undefined
+}
+
+/**
+ * Brings `.transcript-inner` from `before` to `next`, touching only the parts
+ * whose HTML changed. Its children are, in order: the optional waiting bar,
+ * one `.entry` per entry, and the optional running row.
+ */
+function patchTranscript(inner: HTMLElement, before: RenderedTranscript, next: { waitingBar: string; entries: string[]; running: string }): void {
+  const prev = before.entries ?? []
+  const nodes = [...inner.children].filter((child) => child.classList.contains('entry'))
+  if (nodes.length !== prev.length) {
+    // The DOM drifted from what was rendered (should not happen): rebuild.
+    inner.innerHTML = `${next.waitingBar}${next.entries.join('')}${next.running}`
+    return
+  }
+  // Waiting bar: first child when present.
+  if (before.waitingBar !== next.waitingBar) {
+    inner.querySelector(':scope > .waiting-bar')?.remove()
+    const bar = next.waitingBar ? htmlToElement(next.waitingBar) : undefined
+    if (bar) inner.prepend(bar)
+  }
+  // Entries: replace changed ones in place, append new ones, drop extras.
+  const runningRow = inner.querySelector(':scope > .running-row')
+  next.entries.forEach((html, i) => {
+    if (i < nodes.length) {
+      if (prev[i] !== html) {
+        const node = htmlToElement(html)
+        if (node) nodes[i]!.replaceWith(node)
+      }
+      return
+    }
+    const node = htmlToElement(html)
+    if (node) inner.insertBefore(node, runningRow)
+  })
+  for (const extra of nodes.slice(next.entries.length)) extra.remove()
+  // Running row: last child when present.
+  if (before.running !== next.running) {
+    inner.querySelector(':scope > .running-row')?.remove()
+    const row = next.running ? htmlToElement(next.running) : undefined
+    if (row) inner.append(row)
+  }
 }
 
 /** Coalesces live events into one transcript render per animation frame. */
@@ -1042,7 +1103,7 @@ function renderTranscriptNow(): void {
   const editing = state.editingEntryId ? (document.getElementById(`edit-input-${state.editingEntryId}`) as HTMLTextAreaElement | null) : null
   const editDraft = editing ? { text: editing.value, focused: document.activeElement === editing } : undefined
   window.queueMicrotask(() => applyFindHighlight())
-  const body = state.entries.length === 0 && !state.busy ? renderEmptyState() : renderEntries()
+  const emptyState = state.entries.length === 0 && !state.busy
   const running = state.busy
     ? `<div class="running-row"><span class="tool-spinner"></span><span>${state.connection === 'online' ? tr('working') : `${tr('reconnecting')}…`}</span></div>`
     : ''
@@ -1057,8 +1118,29 @@ function renderTranscriptNow(): void {
   ).length
   const waitingBar =
     waiting > 0 ? `<button type="button" class="waiting-bar" data-action="jump-waiting">${icon('alert', 15)}<span>${escapeHtml(translate(state.locale, 'phoneApprovalsWaiting', { count: waiting }))}</span>${icon('chevron-down', 14)}</button>` : ''
-  el.innerHTML = `<div class="transcript-inner">${waitingBar}${body}${running}</div>`
-  restoreTranscriptAnchor(el)
+  const key = transcriptAnchorKey()
+  const inner = el.firstElementChild
+  const entryHtml = emptyState ? undefined : renderEntryList()
+  if (entryHtml && lastTranscript?.key === key && lastTranscript.entries && inner?.classList.contains('transcript-inner')) {
+    // Same chat, live update: patch only what changed. Rebuilding everything
+    // on every streamed event replaced the element under the cursor (hover
+    // flicker, clicks lost between press and release) and threw the reader
+    // back to the bottom.
+    const follow = shouldStickToBottom(el.scrollTop, el.scrollHeight, el.clientHeight)
+    patchTranscript(inner as HTMLElement, lastTranscript, { waitingBar, entries: entryHtml, running })
+    lastTranscript = { key, waitingBar, entries: entryHtml, running }
+    if (follow) el.scrollTo({ top: el.scrollHeight, behavior: 'instant' })
+    transcriptAnchors.set(key, captureAnchor(el.scrollTop, el.scrollHeight, el.clientHeight))
+    watchTranscriptScroll(el)
+  } else {
+    // Another chat (or the first render): a full render, then the remembered
+    // position of that chat. The one on screen is recorded first if it is
+    // the same chat, so a scroll that has not reached its frame yet counts.
+    if (lastTranscript?.key === key && inner) captureTranscriptAnchor()
+    el.innerHTML = `<div class="transcript-inner">${waitingBar}${entryHtml ? entryHtml.join('') : renderEmptyState()}${running}</div>`
+    lastTranscript = { key, waitingBar, entries: entryHtml, running }
+    restoreTranscriptAnchor(el)
+  }
   if (editDraft !== undefined && state.editingEntryId) {
     const input = document.getElementById(`edit-input-${state.editingEntryId}`) as HTMLTextAreaElement | null
     if (input) {
@@ -6946,6 +7028,21 @@ async function init(): Promise<void> {
     })
   })
   document.addEventListener('click', onDocumentClick)
+  // A thinking chip remembers that it is open, so a live re-render of its
+  // entry (the summary streams in) does not snap it shut. `toggle` does not
+  // bubble, hence the capture listener.
+  document.addEventListener(
+    'toggle',
+    (event) => {
+      const details = event.target
+      if (!(details instanceof HTMLDetailsElement) || !details.classList.contains('thinking-block')) return
+      const id = details.dataset.entryId
+      if (!id) return
+      if (details.open) openThinking.add(id)
+      else openThinking.delete(id)
+    },
+    true,
+  )
   document.addEventListener('submit', onDocumentSubmit)
   document.addEventListener('keydown', onDocumentKeydown)
   window.addEventListener('resize', () => {
