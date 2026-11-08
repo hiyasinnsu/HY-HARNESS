@@ -117,10 +117,14 @@ test('the release feed is checked on demand and a bad signature is refused', { s
   const { publicKey, privateKey } = generateKeyPairSync('ed25519')
   process.env.HY_UPDATE_PUBLIC_KEY = publicKey.export({ type: 'spki', format: 'pem' }).toString()
   const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+  // Always one major version ahead of this checkout, so the feed offers it
+  // whatever version the harness is at (a fixed number went stale on a bump).
+  const current = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json'), 'utf8').replace(/^﻿/, '')).version
+  const newer = `${Number(current.split('.')[0]) + 1}.0.0`
   const entry = {
-    version: '0.5.0',
+    version: newer,
     // Port 1 refuses instantly, so the download path fails fast in the test.
-    url: 'https://127.0.0.1:1/HY-HARNESS-0.5.0-portable.exe',
+    url: `https://127.0.0.1:1/HY-HARNESS-${newer}-portable.exe`,
     sha256: createHash('sha256').update('installer').digest('hex'),
     notes: 'the update path',
   }
@@ -148,7 +152,7 @@ test('the release feed is checked on demand and a bad signature is refused', { s
     assert.equal(checked.status, 200)
     const body = await checked.json()
     assert.equal(body.configured, true)
-    assert.equal(body.release.version, '0.5.0')
+    assert.equal(body.release.version, newer)
     assert.equal(body.release.notes, 'the update path')
     const rootPkg = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json'), 'utf8').replace(/^﻿/, ''))
     assert.equal(body.currentVersion, rootPkg.version)
@@ -164,7 +168,7 @@ test('the release feed is checked on demand and a bad signature is refused', { s
     assert.match((await tamperedFetch.json()).error, /signature verification failed/)
     const offline = await call('/api/update/fetch', { method: 'POST', body: JSON.stringify({ feed: feedFile }) })
     assert.equal(offline.status, 502)
-    assert.match((await offline.json()).error, /could not download 0\.5\.0/)
+    assert.ok((await offline.json()).error.includes(`could not download ${newer}`))
     assert.equal(fs.existsSync(path.join(dir, 'localappdata', 'hy-harness', 'state')), true)
   } finally {
     await handle.close()
