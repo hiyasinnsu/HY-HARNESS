@@ -106,3 +106,54 @@ export function looksLikeBrokenToolCall(text: string): boolean {
   }
   return false
 }
+/** A closing chat-template tag, e.g. `</｜DSML｜ parameter>` or `</tool_call>`. */
+const TEMPLATE_TAIL = /^(?:\s*<\/(?:｜|\|)?[^<>\n]{0,80}>)+\s*$/
+
+/**
+ * Repairs one known glitch of DeepSeek models: a text tool call written as a
+ * complete JSON batch that lacks only its closing brackets, followed by the
+ * closing tags of the model's native tool template, e.g.
+ * `{"calls":[{...},{...}]</｜DSML｜ parameter></｜DSML｜ invoke>`. The intent is
+ * unambiguous, so the call is restored instead of being retried (the model
+ * tends to repeat the same glitch, and two in a row ended the turn).
+ *
+ * Conservative: only when everything after the JSON is template closing tags,
+ * the JSON names a tool, the scan ends outside a string with every bracket
+ * well nested, and the result parses. Returns the repaired JSON text.
+ */
+export function recoverTemplateCall(text: string): string | undefined {
+  const t = text.trim()
+  if (!t.startsWith('{')) return undefined
+  const cut = t.search(/<\/(?:｜|\||tool_call>|function>)/)
+  if (cut < 0) return undefined
+  if (!TEMPLATE_TAIL.test(t.slice(cut))) return undefined
+  const head = t.slice(0, cut).trimEnd()
+  if (!JSON_TOOL_KEY.test(head)) return undefined
+  const open: string[] = []
+  let inString = false
+  let escape = false
+  for (const c of head) {
+    if (inString) {
+      if (escape) escape = false
+      else if (c === '\\') escape = true
+      else if (c === '"') inString = false
+      continue
+    }
+    if (c === '"') inString = true
+    else if (c === '{' || c === '[') open.push(c)
+    else if (c === '}' || c === ']') {
+      if (open.pop() !== (c === '}' ? '{' : '[')) return undefined
+    }
+  }
+  if (inString) return undefined
+  const repaired = head + open.reverse().map((c) => (c === '{' ? '}' : ']')).join('')
+  try {
+    const parsed = JSON.parse(repaired) as { calls?: unknown; tools?: unknown; tool?: unknown }
+    const named = (c: unknown) => !!c && typeof (c as { tool?: unknown }).tool === 'string'
+    if (typeof parsed?.tool === 'string') return repaired
+    for (const list of [parsed?.calls, parsed?.tools]) if (Array.isArray(list) && list.length > 0 && list.every(named)) return repaired
+  } catch {
+    return undefined
+  }
+  return undefined
+}

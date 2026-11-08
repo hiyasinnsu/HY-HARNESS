@@ -532,6 +532,39 @@ test('a {"tools":[...]} batch written as text runs like calls instead of ending 
   }
 })
 
+test('a call batch cut short by leaked template tags runs instead of ending the turn', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const { ToolRuntime } = await import('./tools.js')
+  const { SessionLog } = await import('./session-log.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-dsml-tail-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'dsml-marker\n')
+    const seen: string[] = []
+    const replies = ['{"calls":[{"tool":"read_file","args":{"path":"a.txt"}}]</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>', 'Done.']
+    const provider = {
+      name: 'dsml',
+      complete: async (messages: Array<{ role: string; content: string }>) => {
+        seen.push(messages.map((m) => m.content).join('\n'))
+        return { content: replies.shift()!, usage: { inputTokens: 1, outputTokens: 1 } }
+      },
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-d')
+    const r = await new Agent({ provider, tools: new ToolRuntime({} as never, dir), sessionLog: log, workspaceRoot: dir, nativeTools: true }).run('read a')
+    assert.equal(r.final, 'Done.')
+    assert.match(seen[1]!, /dsml-marker/, 'the repaired call ran')
+    assert.equal(log.events().filter((e) => e.type === 'turn/retry').length, 0, 'no retry was spent')
+    assert.equal(log.events().filter((e) => e.type === 'reply/recovered').length, 1)
+    // The history holds the repaired call, as sent in the next request.
+    const rebuilt = rebuildHistory(log.events(), 'run-d')
+    assert.ok(rebuilt.some((m) => m.role === 'assistant' && m.content === '{"calls":[{"tool":"read_file","args":{"path":"a.txt"}}]}'))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a broken pseudo tool call in native mode is retried and the next plain reply is final', async () => {
   const fs = await import('node:fs')
   const os = await import('node:os')

@@ -7,7 +7,7 @@ import { Ledger, discoverPinned } from './ledger.js'
 import type { SkillInfo } from './skills.js'
 import type { MemoryStore } from './memory.js'
 import { validate, type Schema, type ToolSpec } from './tool-registry.js'
-import { looksLikeBrokenToolCall } from './reply-guard.js'
+import { looksLikeBrokenToolCall, recoverTemplateCall } from './reply-guard.js'
 import { steerMessage, type SteerInbox } from './steering.js'
 import { classifyDenial, type DenialInfo } from './denial.js'
 import { estimateTokens } from './tokens.js'
@@ -597,6 +597,13 @@ export class Agent {
         // History keeps one string per message: the calls in the text protocol's form.
         content = JSON.stringify(calls.length === 1 ? calls[0] : { calls })
       } else {
+        // A call batch cut short by leaked template tags is restored, not
+        // retried; history keeps the repaired text, as the model will see it.
+        const recovered = recoverTemplateCall(content)
+        if (recovered !== undefined) {
+          this.options.sessionLog.append('reply/recovered', { step, reason: 'template-tail', removed: content.length - recovered.length })
+          content = recovered
+        }
         action = parseAction(content)
         // `{"tools":[...]}` is the same batch under another name. As valid JSON
         // it is not a broken call, so without this it was taken as the final

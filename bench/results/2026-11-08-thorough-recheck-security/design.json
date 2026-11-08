@@ -1,0 +1,26 @@
+{
+  "purpose": "Re-check of hy-thorough after two harness fixes (runaway-repetition cut, {\"tools\":[...]} batch). Thorough only, 10 runs, compared with the earlier thorough runs on the same task. Earlier failure rates were 1/10 (financial) and 1/5 (security), so 10 runs can show the failures are gone in this sample but cannot prove a rate change; the logs are checked for whether either fix fired.",
+  "commit": "50136c1",
+  "model": "opencode/deepseek-v4.1-flash",
+  "workerEffort": "max",
+  "harness": "hy-thorough",
+  "runs": 10,
+  "parallel": 2,
+  "exclusionPolicy": "Retain every attempt; do not stop early; provider failures reported separately.",
+  "hashes": {
+    "packages/core/dist/agent.js": "8f360c22dee1200bfcc6b24ff97dd7ce9b994deed77002a14b4af92736e3c555",
+    "packages/core/dist/prompt.js": "025051004f69f60be9770e425cee0c26ef40a5192b1d1ad10eb5e78cc760aca7",
+    "packages/core/dist/llm.js": "e3c9688ee8946148862b7faaf6a7557dbc7a08ba20b64d127933bf2841f62b17",
+    "packages/core/dist/tools.js": "3e6a63b6c84956080682aaf781d7bd219cd959bc180445ac0dd7ab832b20ac8b",
+    "packages/core/dist/tool-registry.js": "36ec4bde5805804e1d10918d6b7494dc75464ec5203d63691c1e320fcdefd897",
+    "packages/core/dist/tool-docs.js": "b51406ee17d0330b4c8b2c3a61db5a9adc31395d17a163667719a6a5023c8177",
+    "packages/core/dist/session-log.js": "a57ff11933c6c598cab8938b92648484f3061b0d9862c952893a39ddf67945a5",
+    "packages/hy-cli/dist/main.js": "b01f3ee863f0c61b1f6842d84ffbb712eb4d2a74751476a6a46a65b3630bf723",
+    "packages/hy-cli/dist/session-app.js": "357bc4526296004d16dd206e9c56ef1847353959eb5cf79596110ecb82969921",
+    "target/release/hy-exec-server.exe": "9973e8d5fbaab0e6db45d7cc4c1d860b2cb2ebfa563ee2fc82fee1cd398417e2",
+    "bench/harness/run.mjs": "8a867b665f955466daa481dbf37737f6751745d0ea6a465344c5358e53cbd6ab",
+    "bench/harness/schedule.mjs": "8d83ca1fdbc1b1a2126e07e098bab53a324a62f29e04ac583163eef76dde469b",
+    "bench/harness/logs.mjs": "73848298b860058f10e1ad639d579a0edb3fe48e26d08095d835cc287c13bcbc",
+    "bench/harness/suites/security-holdout.mjs": "d635df4a07ee4d2e2cc878bac7f1afa0c235e9ed33f3256143ce34a38aa77aaf"
+  }
+}

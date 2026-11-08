@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { looksLikeBrokenToolCall } from './reply-guard.js'
+import { looksLikeBrokenToolCall, recoverTemplateCall } from './reply-guard.js'
 
 test('a truncated tool call is a broken tool call', () => {
   assert.equal(looksLikeBrokenToolCall('{"tool":"read_file","args":{"path":"a.txt"'), true)
@@ -173,4 +173,30 @@ test('a long prose answer is not a broken tool call', () => {
 test('a fenced broken call is an example, not a call', () => {
   const text = ['The model tried this:', '```json', '{"calls":[{"tool":"read_file","args":{},', '```'].join('\n')
   assert.equal(looksLikeBrokenToolCall(text), false)
+})
+// A real reply (security-holdout re-check, hy-thorough #1): a complete batch
+// missing its final brace, then the closing tags of the DSML tool template.
+const DSML_REPLY = "{\"calls\":[{\"tool\":\"shell\",\"args\":{\"command\":\"python -c \\\"import json; d=json.load(open('_commit1.json',encoding='utf-8')); print(d['commit']['message']); print('---FILES---'); [print(f['filename'], f['status'], f['additions'], f['deletions']) for f in d['files']]\\\"\"}},{\"tool\":\"shell\",\"args\":{\"command\":\"python -c \\\"import json; d=json.load(open('_issue913.json',encoding='utf-8')); print(d.get('title')); print(d.get('body')); print(d.get('html_url'))\\\"\"}}]</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>"
+
+test('a call batch cut short by leaked template tags is repaired', () => {
+  const repaired = recoverTemplateCall(DSML_REPLY)
+  assert.ok(repaired, 'recovered')
+  const parsed = JSON.parse(repaired!) as { calls: Array<{ tool: string; args: { command: string } }> }
+  assert.equal(parsed.calls.length, 2)
+  assert.ok(parsed.calls.every((c) => c.tool === 'shell'))
+  assert.match(parsed.calls[1]!.args.command, /_issue913.json/)
+  assert.equal(recoverTemplateCall('{"tool":"shell","args":{"command":"ls"}</｜DSML｜ parameter>'), '{"tool":"shell","args":{"command":"ls"}}')
+})
+
+test('the repair refuses anything but a call followed by template tags', () => {
+  // Prose, no tags, or text after the tags: not repaired.
+  assert.equal(recoverTemplateCall('Done. The fix is in bottle.py.'), undefined)
+  assert.equal(recoverTemplateCall('{"calls":[{"tool":"shell","args":{"command":"ls"}}]'), undefined)
+  assert.equal(recoverTemplateCall('{"calls":[{"tool":"shell","args":{}}]</｜DSML｜ parameter> and then more text'), undefined)
+  // Inside an unterminated string, or with mismatched brackets.
+  assert.equal(recoverTemplateCall('{"tool":"shell","args":{"command":"ls</｜DSML｜ parameter>'), undefined)
+  assert.equal(recoverTemplateCall('{"calls":[{"tool":"shell"]}</｜DSML｜ parameter>'), undefined)
+  // JSON that names no tool.
+  assert.equal(recoverTemplateCall('{"final":"ok"</｜DSML｜ parameter>'), undefined)
+  assert.equal(recoverTemplateCall('{"calls":[{"args":{}}]</｜DSML｜ parameter>'), undefined)
 })
