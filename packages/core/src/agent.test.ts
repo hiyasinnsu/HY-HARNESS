@@ -558,6 +558,50 @@ test('a {"tools":[...]} batch written as text runs like calls instead of ending 
   }
 })
 
+test('a final that announces its next step is nudged once: the model acts, a repeat is accepted, and resume matches', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const { ToolRuntime } = await import('./tools.js')
+  const { SessionLog } = await import('./session-log.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-announce-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'gamma-marker')
+    const run = async (replies: string[]) => {
+      const seen: Array<Array<{ role: string; content: string }>> = []
+      const provider = {
+        name: 'announcing',
+        complete: async (messages: Array<{ role: string; content: string }>) => {
+          seen.push(messages.map((m) => ({ role: m.role, content: m.content })))
+          return { content: replies.shift()!, usage: { inputTokens: 1, outputTokens: 1 } }
+        },
+      }
+      const log = new SessionLog(path.join(dir, `log-${Math.random()}.jsonl`))
+      log.setRun('run-n')
+      const r = await new Agent({ provider, tools: new ToolRuntime({} as never, dir), sessionLog: log, workspaceRoot: dir, nativeTools: true }).run('look at a.txt')
+      return { r, seen, log }
+    }
+    // Announces, gets nudged, then actually reads the file.
+    const acted = await run(['ファイルを確認します。', '{"tool":"read_file","args":{"path":"a.txt"}}', '確認しました。中身は gamma-marker です。'])
+    assert.equal(acted.r.final, '確認しました。中身は gamma-marker です。')
+    assert.match(acted.seen[1]!.at(-1)!.content, /announcing something you are about to do/)
+    assert.match(acted.seen[2]!.map((m) => m.content).join(' '), /gamma-marker/)
+    assert.deepEqual(acted.log.events().filter((e) => e.type === 'turn/nudge').map((e) => (e.payload as { reason: string }).reason), ['announced-without-action'])
+    // The history a resumed chat sends equals what the model saw.
+    const rebuilt = rebuildHistory(acted.log.events(), 'run-n')
+    assert.deepEqual(rebuilt.slice(0, acted.seen[2]!.length - 1).map((m) => m.content), acted.seen[2]!.slice(1).map((m) => m.content))
+    // Repeating the announcement after the nudge ends the turn: no loop.
+    const repeated = await run(['確認します。', '確認します。'])
+    assert.equal(repeated.r.final, '確認します。')
+    assert.equal(repeated.seen.length, 2)
+    // A final that hands back is not nudged at all.
+    const handsBack = await run(['どちらを先に進めますか？'])
+    assert.equal(handsBack.seen.length, 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('an unwrapped batch runs every call; a partial reply runs nothing and says so', async () => {
   const fs = await import('node:fs')
   const os = await import('node:os')
@@ -593,6 +637,10 @@ test('an unwrapped batch runs every call; a partial reply runs nothing and says 
     assert.doesNotMatch(partial.seen[1]!, /alpha-marker/, 'the first call was not run on its own')
     assert.match(partial.seen[1]!, /none of them ran/)
     assert.equal(partial.log.events().filter((e) => e.type === 'turn/retry').length, 1)
+    // A batch with an entry that is not a call: nothing runs either.
+    const bad = await run(['{"calls":[{"tool":"read_file","args":{"path":"a.txt"}},{"name":"read_file","arguments":{"path":"b.txt"}}]}', 'Done.'])
+    assert.doesNotMatch(bad.seen[1]!, /alpha-marker/)
+    assert.match(bad.seen[1]!, /none of them ran/)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

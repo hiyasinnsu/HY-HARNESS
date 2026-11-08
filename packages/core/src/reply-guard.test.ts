@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverTemplateCall, recoverUnwrappedBatch } from './reply-guard.js'
+import { announcesNextStep, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverTemplateCall, recoverUnwrappedBatch } from './reply-guard.js'
 
 test('a truncated tool call is a broken tool call', () => {
   assert.equal(looksLikeBrokenToolCall('{"tool":"read_file","args":{"path":"a.txt"'), true)
@@ -221,4 +221,36 @@ test('a reply whose first object parses but more calls follow is never run in pa
   assert.equal(hasCallsAfterFirstObject('{"calls":[{"tool":"a","args":{}},{"tool":"b","args":{}}]}'), false, 'valid JSON')
   assert.equal(hasCallsAfterFirstObject('{"tool":"a","args":{}}]'), false, 'one call and a stray bracket: nothing is dropped')
   assert.equal(hasCallsAfterFirstObject('{"tool":"a","args":{}} done.'), false)
+})
+
+test('a final answer that announces its own next step is caught; handing back is not', () => {
+  // Real endings of turns that stopped without doing the announced work.
+  for (const ending of [
+    'ここを確認します。',
+    'release フォルダ内のファイル一覧とハッシュを取得します。',
+    '正しい形式で送り直します。',
+    'これから、壊れた呼び出し風の応答を検出して1回だけ再試行する防御を追加します。',
+    '確認を実行しています。',
+    '`app.ts` の名前変更関連を確認する。',
+    '指定が無ければ 1 で進める。',
+    '同じワーカーに積む。',
+    "I'll add the regression test now.",
+    'Let me check the logs.',
+  ]) assert.equal(announcesNextStep(`作業の要約。\n\n${ending}`), true, ending)
+  // Real endings that hand the turn back correctly.
+  for (const ending of [
+    '終わり次第、差分を確認して報告します。',
+    '両方の報告がそろったら差分を確認して最終報告します。',
+    '必要なら、今回の変更内容を project.md に追記するところまで行います。',
+    '直してよければ対応します。',
+    '直すかは指示があれば対応する。',
+    'core のビルドが通ったら再起動して適用する。',
+    '`main.ts` の `serverInfo` は、混入修正ワーカーが終わってから回す。',
+    '追加作業は不要と判断する。',
+    'どちらを先に進めますか？',
+    'これで `formatTable(...)` は期待どおりの文字列を返します。',
+    '完了（app.ts 1ファイル、型検査 pass）。',
+    'If you want, I can also add a test.',
+    'All tests pass and the change is committed.',
+  ]) assert.equal(announcesNextStep(`作業の要約。\n\n${ending}`), false, ending)
 })

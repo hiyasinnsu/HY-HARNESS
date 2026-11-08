@@ -7,7 +7,7 @@ import { Ledger, discoverPinned } from './ledger.js'
 import type { SkillInfo } from './skills.js'
 import type { MemoryStore } from './memory.js'
 import { validate, type Schema, type ToolSpec } from './tool-registry.js'
-import { hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverTemplateCall, recoverUnwrappedBatch } from './reply-guard.js'
+import { announcesNextStep, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverTemplateCall, recoverUnwrappedBatch } from './reply-guard.js'
 import { steerMessage, type SteerInbox } from './steering.js'
 import { classifyDenial, type DenialInfo } from './denial.js'
 import { estimateTokens } from './tokens.js'
@@ -307,6 +307,11 @@ function parseAction(text: string): Action | undefined {
   return undefined
 }
 
+/** Sent once when a final answer announced the agent's next step instead of taking it. */
+export const ANNOUNCED_WITHOUT_ACTION =
+  'Your reply ends by announcing something you are about to do, but it has no tool call, so nothing was done and the turn would end here. ' +
+  'If that work should happen now, do it with a tool call. If you are waiting for the user, a running job or a worker, or are only offering, reply with a final answer that says so plainly.'
+
 function truncate(text: string, max = 20_000): string {
   if (text.length <= max) return text
   return `${text.slice(0, max)}\n… [truncated ${text.length - max} chars] …`
@@ -422,6 +427,8 @@ export class Agent {
     // Set once a broken tool call has been retried (native mode).
     let brokenRetried = false
     let degenerateRetried = false
+    // Set once a reply that announced its next step without acting was nudged.
+    let announceNudged = false
     // Goal mode: one nudge when a plan/promise arrives before any tool call.
     let goalNudged = false
     let performedToolCalls = 0
@@ -628,12 +635,16 @@ export class Agent {
         // it is not a broken call, so without this it was taken as the final
         // answer and the turn ended mid-task (security-holdout thorough #4).
         if (action && !Array.isArray(action.calls) && Array.isArray(action.tools) && action.final === undefined) action.calls = action.tools
+        // A batch with an entry that is not a call ({"name":...}, a string):
+        // running the rest would drop that entry without a word.
+        const badEntry = !!action && Array.isArray(action.calls) && action.calls.some((c) => !c || typeof (c as Call).tool !== 'string')
+        if (badEntry) action = undefined
         if (action && Array.isArray(action.calls)) {
           calls = action.calls.filter((c): c is Call => !!c && typeof (c as Call).tool === 'string')
         } else if (action && typeof action.tool === 'string') {
           calls = [{ tool: action.tool, args: action.args }]
         } else if (native && content && (!action || action.final === undefined)) {
-          if (looksLikeBrokenToolCall(content)) {
+          if (partial || badEntry || looksLikeBrokenToolCall(content)) {
             // A tool call the model failed to emit as a function call arrives
             // as plain content; showing it as the final answer would present a
             // broken call as the result. Retry once, then stop with a fixed text.
@@ -647,8 +658,8 @@ export class Agent {
             brokenRetried = true
             messages.push({
               role: 'user',
-              content: partial
-                ? 'Your reply listed several tool calls, but they were not valid JSON, so none of them ran. Send them again as real function calls.'
+              content: partial || badEntry
+                ? 'Your reply listed several tool calls, but they were not all valid calls, so none of them ran. Send them again as real function calls.'
                 : 'Your reply looked like a broken tool call. Use a real function call for tools, or reply with a short plain-text summary when finished.',
             })
             this.options.sessionLog.append('turn/retry', { step, reason: 'broken-tool-call', ...replay(messages, true) })
@@ -741,6 +752,19 @@ export class Agent {
         this.options.sessionLog.append('turn/end', { status: 'completed' })
         this.options.onEvent?.({ type: 'final', content: final })
         return { outcome: 'final', final, steps: step, usage, history: messages.slice(1) }
+      }
+
+      // A final answer that ends by announcing the agent's own next step
+      // ("ここを確認します。", "I'll add the test now.") did nothing: the turn
+      // would stop and leave the user waiting. Nudge once, in every mode; the
+      // model either acts or says plainly that it is waiting.
+      if (!calls && action && typeof action.final === 'string' && !objectiveMode && !announceNudged && announcesNextStep(action.final)) {
+        announceNudged = true
+        messages.push(reply(content))
+        messages.push({ role: 'user', content: ANNOUNCED_WITHOUT_ACTION })
+        this.options.sessionLog.append('turn/nudge', { step, reason: 'announced-without-action', ...replay(messages, false) })
+        this.options.onEvent?.({ type: 'retry', step, reason: 'announced-without-action', content: truncate(action.final, 2_000) })
+        continue
       }
 
       if (!calls && action && typeof action.final === 'string') {

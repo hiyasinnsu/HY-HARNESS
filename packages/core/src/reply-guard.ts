@@ -246,3 +246,68 @@ export function hasCallsAfterFirstObject(text: string): boolean {
   if (end === undefined) return false
   return JSON_TOOL_KEY.test(t.slice(end + 1))
 }
+
+// --- Announce-then-stop -----------------------------------------------------
+// A reply without a tool call ends the turn. When its last sentence announces
+// what the agent will do next ("ここを確認します。", "I'll add the test now."),
+// nothing was done and the user is left waiting. Seen in the session logs both
+// in plain chats and orchestrators; only goal mode used to catch it.
+
+/** The last sentence of a reply (markdown list markers and emphasis removed). */
+export function lastSentence(text: string): string {
+  const lines = text.trim().split(/\n+/).map((line) => line.trim()).filter(Boolean)
+  const lastLine = (lines.at(-1) ?? '').replace(/^([-*+]|\d+[.)])\s+/, '').replace(/\*\*/g, '')
+  const sentences = lastLine.split(/(?<=[。！？!?])\s*|(?<=\.)\s+/).map((s) => s.trim()).filter(Boolean)
+  return sentences.at(-1) ?? ''
+}
+
+/** Actions the agent does with tools (a noun + する / します). */
+const ACTION_NOUNS = '確認|調査|実行|追加|修正|作成|実装|検証|測定|対応|着手|開始|再起動|再実行|再試行|送信|適用|取得|実施|更新|削除|変更|分割|整理|起動|生成|記録|反映|移行|固定'
+/** Doing verbs in their stem (polite) and plain forms. */
+const VERB_STEMS = '進め|始め|取りかかり|取り掛かり|読み|調べ|書き|直し|やり直し|送り直し|用意し|積み|試し|行い|回し|走らせ|作り|入れ'
+const VERB_PLAIN = '進める|始める|取りかかる|読む|調べる|書く|直す|やり直す|送り直す|用意する|積む|試す|行う|回す|走らせる|作る|入れる'
+
+/** The agent itself is about to act: future or progressive forms of a doing verb. */
+const ANNOUNCE_JA = new RegExp(
+  [
+    // 確認します / 追加していきます / 進めます / 送り直します
+    `(?:(?:${ACTION_NOUNS})し|${VERB_STEMS})(?:ます|ていきます|てみます)`,
+    // 確認を進めています / 確認を実行しています (work claimed as in progress)
+    '(?:進めて|実行して|作業して|調査して|確認して|対応して|修正して|実装して)います',
+    // plain style: 確認する / 次を積む / 送り直す
+    `(?:(?:${ACTION_NOUNS})する|${VERB_PLAIN})`,
+  ]
+    .map((p) => `(?:${p})[。．.！!]?$`)
+    .join('|'),
+  'u',
+)
+const ANNOUNCE_EN = /^(?:(?:ok(?:ay)?|now|next|then|first|so)[,:]?\s+)*(?:i'll|i will|i'm going to|i am going to|let me|i'll now|i will now)\b/i
+
+/**
+ * Endings that legitimately hand the turn back: questions, offers, conditions
+ * on the user or on other work, waiting, conclusions and deferrals. Not
+ * 〜なければ ("unless you object, I'll start"): that one stalls a turn.
+ */
+const HANDS_BACK = new RegExp(
+  [
+    '[？?]\\s*$',
+    'ますか|しましょうか|でしょうか|よろしいですか|いかがですか|どうしますか|教えてください|ご確認ください|ご指示',
+    '必要なら|必要であれば|ご希望なら|ご希望があれば|よろしければ|もしよければ',
+    '(?<!(?:な|無)け)れば|たら|なら[、,ば]|[るたいだ]なら|場合は|場合には|際は|てから|でから|完了後|後に|以降',
+    '次第|届いたら|そろったら|揃ったら|終わったら|完了したら|報告を待|返事を待|承認を待|待ってから|を待って|待ちます|待つ[。]?$',
+    'と判断する|と判断します|ことにする|ことにします|とします|別途|後で|あとで|今後',
+    "\\b(?:if you|if needed|would you|do you|shall i|once|when (?:the|it|they)|after (?:the|it|they)|waiting for|wait for|later)\\b",
+  ].join('|'),
+  'iu',
+)
+
+/**
+ * True when a reply that has no tool call ends by announcing the agent's own
+ * next action, so the turn would stop before doing it. Questions to the user,
+ * offers and waiting on a worker or the user are not announcements.
+ */
+export function announcesNextStep(text: string): boolean {
+  const last = lastSentence(text)
+  if (!last || HANDS_BACK.test(last)) return false
+  return ANNOUNCE_JA.test(last) || ANNOUNCE_EN.test(last)
+}
