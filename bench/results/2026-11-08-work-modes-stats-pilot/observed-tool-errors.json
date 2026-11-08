@@ -1,0 +1,50 @@
+{
+  "purpose": "Tool errors and environmental confounds observed during the six exploratory trials; no attempts excluded.",
+  "cases": [
+    {
+      "harness": "hy-fast",
+      "n": 1,
+      "errors": [
+        "two unsupported patch formats"
+      ]
+    },
+    {
+      "harness": "hy-fast",
+      "n": 2,
+      "errors": [
+        "unsupported patch format",
+        "unnumbered hunk header"
+      ]
+    },
+    {
+      "harness": "hy-thorough",
+      "n": 1,
+      "errors": [
+        "unsupported patch format"
+      ]
+    },
+    {
+      "harness": "hy-thorough",
+      "n": 2,
+      "errors": [
+        "unsupported patch format"
+      ]
+    },
+    {
+      "harness": "dsh",
+      "n": 1,
+      "errors": [
+        "three EISDIR hard-link errors on F:"
+      ]
+    },
+    {
+      "harness": "dsh",
+      "n": 2,
+      "errors": [
+        "four EISDIR hard-link errors on F:",
+        "approval unavailable for attempted sandbox escalation",
+        "plain node test encountered spawn EPERM and was rerun with isolation disabled"
+      ]
+    }
+  ]
+}

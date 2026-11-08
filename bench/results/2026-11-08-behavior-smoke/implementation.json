@@ -1,0 +1,16 @@
+{
+  "recordedAt": "2026-11-07T18:36:51.758Z",
+  "purpose": "One HY behavior smoke test after the log-based fixes, not part of the previous 10-versus-10 comparison",
+  "hashes": {
+    "packages/core/dist/tools.js": "c76ed27c5d0e6375a9b8439625976726339b9e34d4c6cb6eda2b4148222f5ee2",
+    "packages/core/dist/model-catalog.js": "bc786b430cc26ce818859b47e810ec5412d2e5e58fce9eb80a922427b0c5747a",
+    "packages/core/dist/llm.js": "3f4edd683798366728df069ed996736f0e44dd7499e2ee513d4144d729b3d0b5",
+    "packages/core/dist/prompt.js": "044ed4a6f0a14c349f56b1b5bf14b9b93f97a245b0348fb20b2dbd83f7e8fa95",
+    "packages/core/dist/tool-docs.js": "bbe3aa5976aab23b0958a5dbb20ab6beece0e6919afa1f4c72a82552fa312426",
+    "packages/core/dist/exec-rpc.js": "ae6e78986647c9a2ad7b301a476bb75986d66ee33ec59902fb4971823bc00845",
+    "packages/hy-cli/dist/main.js": "3b0cad92e8f36c0ded3de3224c56852f1df662ecaa25c1c14563a37737e57a50",
+    "packages/hy-cli/dist/session-app.js": "402930a9c16bb6bb40feae7351637bc8cef78c23b8d23f8bd0767fa6000e0683",
+    "target/release/hy-exec-server.exe": "9973e8d5fbaab0e6db45d7cc4c1d860b2cb2ebfa563ee2fc82fee1cd398417e2",
+    "bench/harness/run.mjs": "4466d0ffc67b01e2edb04156f7dc47419d54b5743488beac8556e2882bacc0e5"
+  }
+}

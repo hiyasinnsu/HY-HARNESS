@@ -1,0 +1,26 @@
+{
+  "purpose": "Predefined 10-run comparison of each work mode and DSH on Windows financial document processing; task seen previously, not an independent generalization test.",
+  "model": "opencode/deepseek-v4.1-flash",
+  "workerEffort": "max",
+  "runsPerHarness": 10,
+  "parallel": 2,
+  "scheduling": "Complete each round before next and rotate initial order.",
+  "exclusionPolicy": "Retain every attempt; report provider failures and missing logs separately, do not remove failures or outliers, do not stop early.",
+  "source": "Terminal-Bench 2 financial-document-processor at 2fd12b88aafdd04a52c298e3940bcb189f9766d6, Windows adaptation, not an official score.",
+  "hashes": {
+    "packages/core/dist/agent.js": "79bbda0ed1fce4d6894d90aeeb6c225c86ec6ce971285a5a12afde0aee67b319",
+    "packages/core/dist/prompt.js": "f4da77928322d47e97a14d51692c656a91e656ad638b8e0dd50ff14cc3c57226",
+    "packages/core/dist/llm.js": "8275413bbccf154225474e2208e8b8fc7fafacad3e3644238fc8ed8502778a49",
+    "packages/core/dist/tools.js": "55287fa4ec396161caaa8047f3624732c1d40424640b11d408caea3e61d6013e",
+    "packages/core/dist/tool-registry.js": "116002ac1c4c304404ef91c571b35f45520b18313ab2c8a323fb319d829293bd",
+    "packages/core/dist/tool-docs.js": "2aa1d6e64b105a99ebb99d554d0645695f920d2b46320916d54cab56c63e3134",
+    "packages/hy-cli/dist/main.js": "b01f3ee863f0c61b1f6842d84ffbb712eb4d2a74751476a6a46a65b3630bf723",
+    "packages/hy-cli/dist/session-app.js": "4e3d1689de8a62ba2dae6652ac537a3370ab00f2486ef1ddd9442a036b88d70c",
+    "target/release/hy-exec-server.exe": "9973e8d5fbaab0e6db45d7cc4c1d860b2cb2ebfa563ee2fc82fee1cd398417e2",
+    "bench/harness/run.mjs": "77cb7660abbbecf4350094846291c5d8c5c8db69438f45c47df55ccfd07b0808",
+    "bench/harness/schedule.mjs": "8d83ca1fdbc1b1a2126e07e098bab53a324a62f29e04ac583163eef76dde469b",
+    "bench/harness/logs.mjs": "73848298b860058f10e1ad639d579a0edb3fe48e26d08095d835cc287c13bcbc",
+    "bench/harness/dsh.patch.yml": "ea76bcff9d4554653b3069800b2fbe7918d22b7fd2da39ea5a64342ea5fcfc7a",
+    "bench/harness/suites/tb2-financial.mjs": "256e1064a246f2420550587c842f15444554f2a6c1365f1eee87252aa2673eee"
+  }
+}

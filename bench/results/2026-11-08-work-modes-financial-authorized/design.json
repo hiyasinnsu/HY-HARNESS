@@ -1,0 +1,25 @@
+{
+  "purpose": "Cross-domain document classification and extraction after mode/tool adjustments derived from other tasks. This task has been used in earlier project work; it is not a blind benchmark for the entire harness.",
+  "model": "opencode/deepseek-v4.1-flash",
+  "effort": "max",
+  "runsPerHarness": 2,
+  "parallel": 2,
+  "exclusionPolicy": "Keep every attempt and failure. Do not infer statistical superiority from two runs.",
+  "source": "Terminal-Bench 2 financial-document-processor at pinned 2fd12b88aafdd04a52c298e3940bcb189f9766d6; Windows adaptation, not an official score.",
+  "hashes": {
+    "packages/core/dist/agent.js": "f6a998ec8673e3b7b190060a29f71ea1f6b0acc13bd4407100437d4d82bc95d7",
+    "packages/core/dist/prompt.js": "f4da77928322d47e97a14d51692c656a91e656ad638b8e0dd50ff14cc3c57226",
+    "packages/core/dist/llm.js": "3f4edd683798366728df069ed996736f0e44dd7499e2ee513d4144d729b3d0b5",
+    "packages/core/dist/tools.js": "55287fa4ec396161caaa8047f3624732c1d40424640b11d408caea3e61d6013e",
+    "packages/core/dist/tool-registry.js": "116002ac1c4c304404ef91c571b35f45520b18313ab2c8a323fb319d829293bd",
+    "packages/core/dist/tool-docs.js": "2aa1d6e64b105a99ebb99d554d0645695f920d2b46320916d54cab56c63e3134",
+    "packages/hy-cli/dist/main.js": "b01f3ee863f0c61b1f6842d84ffbb712eb4d2a74751476a6a46a65b3630bf723",
+    "packages/hy-cli/dist/session-app.js": "52f26aa5bba2a4d40fcd9f68323b0fd1eca144900ba09933c5f4f28409ee2fbb",
+    "target/release/hy-exec-server.exe": "9973e8d5fbaab0e6db45d7cc4c1d860b2cb2ebfa563ee2fc82fee1cd398417e2",
+    "bench/harness/run.mjs": "f28eb15c873a37d60af4386fa663f9f5c142c5b50a7d4cac1a94aeea4434aec7",
+    "bench/harness/dsh.patch.yml": "ea76bcff9d4554653b3069800b2fbe7918d22b7fd2da39ea5a64342ea5fcfc7a",
+    "bench/harness/suites/tb2-financial.mjs": "256e1064a246f2420550587c842f15444554f2a6c1365f1eee87252aa2673eee"
+  },
+  "retryOf": "2026-11-08-work-modes-financial-ntfs",
+  "retryReason": "All initial runs failed at startup due to restricted profile and workspace permission setup; all original outcomes retained."
+}

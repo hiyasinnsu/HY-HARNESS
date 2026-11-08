@@ -1,0 +1,112 @@
+{
+  "purpose": "Check raw API usage mapping only; synthetic public input; excluded from benchmark",
+  "recordedAt": "2026-11-07T16:29:08.214Z",
+  "model": "deepseek-v4.1-flash",
+  "inputSha256": "11a726cbbeaf34fc6a67802939ef9801a3cc0c6a5e1a21f91d1bd2716c4d23f2",
+  "records": [
+    {
+      "mode": "stream",
+      "rawUsageChunks": [
+        {
+          "prompt_tokens": 1214,
+          "completion_tokens": 2,
+          "total_tokens": 1216,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cost": 0,
+          "opencode": {
+            "billing_source": "go",
+            "list_cost": 0.0001833,
+            "allowance": 0.00010998,
+            "tokens": {
+              "input": 1214,
+              "output": 2,
+              "reasoning": 0,
+              "cache_read": 0,
+              "cache_write_5m": 0,
+              "cache_write_1h": 0
+            }
+          }
+        }
+      ],
+      "normalizedUsage": {
+        "inputTokens": 1214,
+        "outputTokens": 2
+      }
+    },
+    {
+      "mode": "stream",
+      "rawUsageChunks": [
+        {
+          "prompt_tokens": 1214,
+          "completion_tokens": 2,
+          "total_tokens": 1216,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cost": 0,
+          "opencode": {
+            "billing_source": "go",
+            "list_cost": 0.0001833,
+            "allowance": 0.00010998,
+            "tokens": {
+              "input": 1214,
+              "output": 2,
+              "reasoning": 0,
+              "cache_read": 0,
+              "cache_write_5m": 0,
+              "cache_write_1h": 0
+            }
+          }
+        }
+      ],
+      "normalizedUsage": {
+        "inputTokens": 1214,
+        "outputTokens": 2
+      }
+    },
+    {
+      "mode": "non-stream",
+      "rawUsageChunks": [
+        {
+          "prompt_tokens": 1214,
+          "completion_tokens": 2,
+          "total_tokens": 1216,
+          "prompt_tokens_details": {
+            "cached_tokens": 1024
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "cost": 0,
+          "opencode": {
+            "billing_source": "go",
+            "list_cost": 0.00003277,
+            "allowance": 0.00001966,
+            "tokens": {
+              "input": 190,
+              "output": 2,
+              "reasoning": 0,
+              "cache_read": 1024,
+              "cache_write_5m": 0,
+              "cache_write_1h": 0
+            }
+          }
+        }
+      ],
+      "normalizedUsage": {
+        "inputTokens": 1214,
+        "outputTokens": 2,
+        "cacheHitTokens": 1024,
+        "cacheMissTokens": 190
+      }
+    }
+  ]
+}

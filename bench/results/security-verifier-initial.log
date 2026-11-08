@@ -1,0 +1,218 @@
+✖ security verifier rejects the vulnerable fixture and accepts the pinned original (4581.8847ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4656.5192
+
+✖ failing tests:
+
+test at bench\harness\suites\security-holdout.test.mjs:10:1
+✖ security verifier rejects the vulnerable fixture and accepts the pinned original (4581.8847ms)
+  AssertionError [ERR_ASSERTION]: {"original_repo_tests":false,"report_file_exists_example":true,"vul_file":true,"cwe_id":true,"hkey_basic_cases":true,"hkey_error_cases":true,"hkey_real_world_examples":true,"reward":false}
+  ============================= test session starts =============================
+  platform win32 -- Python 3.11.1, pytest-8.4.1, pluggy-1.7.0
+  rootdir: C:\Users\川野創太\AppData\Local\Temp\hy-security-bench-U99RNK\original
+  configfile: pyproject.toml
+  testpaths: test
+  collected 357 items
+  
+  test\test_app.py .                                                       [  0%]
+  test\test_auth.py .                                                      [  0%]
+  test\test_config.py ...........                                          [  3%]
+  test\test_contextlocals.py ..                                            [  4%]
+  test\test_environ.py ................................................... [ 18%]
+  ........................                                                 [ 25%]
+  test\test_exc.py .....                                                   [ 26%]
+  test\test_fileupload.py .........                                        [ 29%]
+  test\test_formsdict.py ..                                                [ 29%]
+  test\test_html_helper.py .                                               [ 29%]
+  test\test_importhook.py .....                                            [ 31%]
+  test\test_mdict.py ....                                                  [ 32%]
+  test\test_mount.py ............                                          [ 35%]
+  test\test_multipart.py .......................                           [ 42%]
+  test\test_oorouting.py .                                                 [ 42%]
+  test\test_outputfilter.py ........................                       [ 49%]
+  test\test_plugins.py ....................                                [ 54%]
+  test\test_resources.py ........                                          [ 57%]
+  test\test_route.py ........                                              [ 59%]
+  test\test_router.py ..................................                   [ 68%]
+  test\test_securecookies.py ....                                          [ 70%]
+  test\test_sendfile.py ................                                   [ 74%]
+  test\test_stpl.py ............F....F.F........F.....F.............       [ 87%]
+  test\test_wsgi.py ......................................F....            [100%]
+  
+  ================================== FAILURES ===================================
+  ________________________ TestSimpleTemplate.test_file _________________________
+  
+  self = <test.test_stpl.TestSimpleTemplate testMethod=test_file>
+  
+      def test_file(self):
+          with chdir(__file__):
+              t = SimpleTemplate(name='./views/stpl_simple.tpl', lookup=['.'])
+  >           self.assertRenders(t, 'start var end\n', var='var')
+  
+  test\test_stpl.py:26: 
+  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+  test\test_stpl.py:14: in assertRenders
+      self.assertEqual(touni(to), tpl.render(*args, **vars))
+  E   AssertionError: 'start var end\n' != 'start var end\r\n'
+  E   - start var end
+  E   + start var end
+  E   ?              +
+  _______________________ TestSimpleTemplate.test_include _______________________
+  
+  self = <test.test_stpl.TestSimpleTemplate testMethod=test_include>
+  
+      def test_include(self):
+          """ Templates: Include statements"""
+          with chdir(__file__):
+              t = SimpleTemplate(name='stpl_include', lookup=['./views/'])
+  >           self.assertRenders(t, 'before\nstart var end\nafter\n', var='var')
+  
+  test\test_stpl.py:158: 
+  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+  test\test_stpl.py:14: in assertRenders
+      self.assertEqual(touni(to), tpl.render(*args, **vars))
+  E   AssertionError: 'before\nstart var end\nafter\n' != 'before\r\nstart var end\r\nafter\r\n'
+  E   - before
+  E   + before
+  E   ?       +
+  E   - start var end
+  E   + start var end
+  E   ?              +
+  E   - after
+  E   + after
+  E   ?      +
+  ________________________ TestSimpleTemplate.test_name _________________________
+  
+  self = <test.test_stpl.TestSimpleTemplate testMethod=test_name>
+  
+      def test_name(self):
+          with chdir(__file__):
+              t = SimpleTemplate(name='stpl_simple', lookup=['./views/'])
+  >           self.assertRenders(t, 'start var end\n', var='var')
+  
+  test\test_stpl.py:31: 
+  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+  test\test_stpl.py:14: in assertRenders
+      self.assertEqual(touni(to), tpl.render(*args, **vars))
+  E   AssertionError: 'start var end\n' != 'start var end\r\n'
+  E   - start var end
+  E   + start var end
+  E   ?              +
+  _______________________ TestSimpleTemplate.test_rebase ________________________
+  
+  self = <test.test_stpl.TestSimpleTemplate testMethod=test_rebase>
+  
+      def test_rebase(self):
+          """ Templates: %rebase and method passing """
+          with chdir(__file__):
+              t = SimpleTemplate(name='stpl_t2main', lookup=['./views/'])
+              result='+base+\n+main+\n!1234!\n+include+\n-main-\n+include+\n-base-\n'
+  >           self.assertRenders(t, result, content='1234')
+  
+  test\test_stpl.py:165: 
+  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+  test\test_stpl.py:14: in assertRenders
+      self.assertEqual(touni(to), tpl.render(*args, **vars))
+  E   AssertionError: '+base+\n+main+\n!1234!\n+include+\n-main-\n+include+\n-base-\n' != '+base+\r\n+main+\r\n!1234!\r\n+include+\r\n-main-\r\n+include+\r\n-base-\r\n'
+  E   - +base+
+  E   + +base+
+  E   ?       +
+  E   - +main+
+  E   + +main+
+  E   ?       +
+  E   - !1234!
+  E   + !1234!
+  E   ?       +
+  E   - +include+
+  E   + +include+
+  E   ?          +
+  E   - -main-
+  E   + -main-
+  E   ?       +
+  E   - +include+
+  E   + +include+
+  E   ?          +
+  E   - -base-
+  E   + -base-
+  E   ?       +
+  ____________________ TestSimpleTemplate.test_unicode_code _____________________
+  
+  self = <test.test_stpl.TestSimpleTemplate testMethod=test_unicode_code>
+  
+      def test_unicode_code(self):
+          """ Templates: utf8 code in file"""
+          with chdir(__file__):
+              t = SimpleTemplate(name='./views/stpl_unicode.tpl', lookup=['.'])
+  >           self.assertRenders(t, 'start ñç äöü end\n', var=touni('äöü'))
+  
+  test\test_stpl.py:41: 
+  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+  test\test_stpl.py:14: in assertRenders
+      self.assertEqual(touni(to), tpl.render(*args, **vars))
+  E   AssertionError: 'start ñç äöü end\n' != 'start ñç äöü end\r\n'
+  E   - start ñç äöü end
+  E   + start ñç äöü end
+  E   ?                 +
+  __________________________ TestDecorators.test_view ___________________________
+  
+  self = <test.test_wsgi.TestDecorators testMethod=test_view>
+  
+      def test_view(self):
+          """ WSGI: Test view-decorator (should override autojson) """
+          with chdir(__file__):
+              @bottle.route('/tpl')
+              @bottle.view('stpl_t2main')
+              def test():
+                  return dict(content='1234')
+              result = '+base+\n+main+\n!1234!\n+include+\n-main-\n+include+\n-base-\n'
+              self.assertHeader('Content-Type', 'text/html; charset=UTF-8', '/tpl')
+  >           self.assertBody(result, '/tpl')
+  
+  test\test_wsgi.py:468: 
+  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+  test\tools.py:134: in assertBody
+      self.assertEqual(tob(body), self.urlopen(route, **kargs)['body'])
+  E   AssertionError: b'+base+\n+main+\n!1234!\n+include+\n-main-\n+include+\n-base-\n' != b'+base+\r\n+main+\r\n!1234!\r\n+include+\r\n-main-\r\n+include+\r\n-base-\r\n'
+  =========================== short test summary info ===========================
+  FAILED test/test_stpl.py::TestSimpleTemplate::test_file - AssertionError: 'st...
+  FAILED test/test_stpl.py::TestSimpleTemplate::test_include - AssertionError: ...
+  FAILED test/test_stpl.py::TestSimpleTemplate::test_name - AssertionError: 'st...
+  FAILED test/test_stpl.py::TestSimpleTemplate::test_rebase - AssertionError: '...
+  FAILED test/test_stpl.py::TestSimpleTemplate::test_unicode_code - AssertionEr...
+  FAILED test/test_wsgi.py::TestDecorators::test_view - AssertionError: b'+base...
+  ======================== 6 failed, 351 passed in 1.08s ========================
+  
+  
+  
+  ============================= test session starts =============================
+  platform win32 -- Python 3.11.1, pytest-8.4.1, pluggy-1.7.0
+  rootdir: C:\Users\川野創太\AppData\Local\Temp\hy-security-bench-U99RNK
+  collected 6 items
+  
+  ..\original.grader\test_outputs.py ......                                [100%]
+  
+  - generated xml file: C:\Users\川野創太\AppData\Local\Temp\hy-security-bench-U99RNK\original.grader\official.xml -
+  ============================== 6 passed in 0.07s ==============================
+  
+  
+  
+  
+  false !== true
+  
+      at TestContext.<anonymous> (file:///F:/HY-HARNESS/bench/harness/suites/security-holdout.test.mjs:32:12)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+

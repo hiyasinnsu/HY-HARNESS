@@ -1,0 +1,20 @@
+{
+  "recordedAt": "2026-11-07T15:53:02.372Z",
+  "sourceCommit": "4454293",
+  "includesUncommittedFixes": true,
+  "criterion": "all seven checks pass; no metric significantly worse for HY under the existing two-sided 95% Welch intervals",
+  "runsPerHarness": 10,
+  "model": "opencode/deepseek-v4.1-flash",
+  "effort": "max",
+  "hashes": {
+    "packages/core/dist/tools.js": "57159325f65e2e9561125be09d1612398cc3d096daea9a212db951a1f9a8aeb1",
+    "packages/core/dist/config.js": "35349ae9edfb3478eff04c6041dd3b5a1d43266a2e128aef3a306513a75376f9",
+    "packages/core/dist/model-catalog.js": "bc786b430cc26ce818859b47e810ec5412d2e5e58fce9eb80a922427b0c5747a",
+    "packages/core/dist/llm.js": "3f4edd683798366728df069ed996736f0e44dd7499e2ee513d4144d729b3d0b5",
+    "packages/core/dist/prompt.js": "044ed4a6f0a14c349f56b1b5bf14b9b93f97a245b0348fb20b2dbd83f7e8fa95",
+    "packages/core/dist/exec-rpc.js": "ae6e78986647c9a2ad7b301a476bb75986d66ee33ec59902fb4971823bc00845",
+    "packages/hy-cli/dist/main.js": "3b0cad92e8f36c0ded3de3224c56852f1df662ecaa25c1c14563a37737e57a50",
+    "packages/hy-cli/dist/session-app.js": "72e0e6fd034266b94659ad59bab4fa372d3151ef246a2118329625883893e5f4",
+    "target/release/hy-exec-server.exe": "a3d7b864f9346c7c75698e91923e733b49a0c921d74e2f890417d745b3881efa"
+  }
+}

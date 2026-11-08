@@ -1,0 +1,16 @@
+{
+  "checkedAt": "2026-11-07T18:38:59.108Z",
+  "allSevenChecksPassed": true,
+  "exit": 0,
+  "seconds": 109.112,
+  "requests": 14,
+  "toolCalls": 20,
+  "unicodeErrors": 0,
+  "toolErrors": 0,
+  "failedShellCommands": 0,
+  "terminalDecoratedOutputs": 0,
+  "originalJpgReads": 11,
+  "frozenArtifactHashesMatch": true,
+  "outputsContainingRawControlBytes": 1,
+  "controlByteNote": "One exploratory dump of compressed PDF bytes includes literal non-terminal control bytes; terminal decoration is counted with the standard VT parser."
+}

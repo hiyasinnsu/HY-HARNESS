@@ -1,0 +1,24 @@
+{
+  "started": "2026-11-07T20:04:37.022Z",
+  "purpose": "Cross-domain exploratory comparison: asynchronous cleanup and cancellation; DSH and both modes, three runs each, interleaved with parallelism two.",
+  "source": "Terminal-Bench 2 cancel-async-tasks, Windows adaptation; direct parent task cancellation replaces the original POSIX SIGINT, so this is not an official TB2 score.",
+  "model": "opencode/deepseek-v4.1-flash",
+  "effort": "max",
+  "runsPerHarness": 3,
+  "exclusionPolicy": "Record all attempts; retain failures and provider failures; no optional stopping or outlier removal.",
+  "interpretation": "Small exploratory sample, compare check outcomes, behavior, final reports, cost and time; do not infer statistical equivalence.",
+  "hashes": {
+    "packages/core/dist/agent.js": "f6a998ec8673e3b7b190060a29f71ea1f6b0acc13bd4407100437d4d82bc95d7",
+    "packages/core/dist/prompt.js": "ea15e96dfa7be70dee798db327e50368448468193ae0279cd80f6ba9845e2075",
+    "packages/core/dist/llm.js": "3f4edd683798366728df069ed996736f0e44dd7499e2ee513d4144d729b3d0b5",
+    "packages/core/dist/tools.js": "978966ad4e364c7c27249b8089c2001f69bf932232e1788138a2258291d0e912",
+    "packages/core/dist/tool-registry.js": "116002ac1c4c304404ef91c571b35f45520b18313ab2c8a323fb319d829293bd",
+    "packages/core/dist/tool-docs.js": "2aa1d6e64b105a99ebb99d554d0645695f920d2b46320916d54cab56c63e3134",
+    "packages/hy-cli/dist/main.js": "b01f3ee863f0c61b1f6842d84ffbb712eb4d2a74751476a6a46a65b3630bf723",
+    "packages/hy-cli/dist/session-app.js": "52f26aa5bba2a4d40fcd9f68323b0fd1eca144900ba09933c5f4f28409ee2fbb",
+    "target/release/hy-exec-server.exe": "9973e8d5fbaab0e6db45d7cc4c1d860b2cb2ebfa563ee2fc82fee1cd398417e2",
+    "bench/harness/run.mjs": "f6cd8d7324d6e49626b2f2afc19ed77f4f625247545998310c9e60b7358a42c3",
+    "bench/harness/dsh.patch.yml": "ea76bcff9d4554653b3069800b2fbe7918d22b7fd2da39ea5a64342ea5fcfc7a",
+    "bench/harness/suites/async-cancel.mjs": "57108174384b2ce1d217aaa1b68c679853ea041d7a00209ed179b85d8f103078"
+  }
+}

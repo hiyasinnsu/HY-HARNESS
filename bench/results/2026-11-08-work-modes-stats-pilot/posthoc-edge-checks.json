@@ -1,0 +1,95 @@
+{
+  "purpose": "Post-hoc exploratory edge cases, separate from the predefined grading; non-finite rejection is a documented design note but conflicts with existing sum behavior and is not treated as an unambiguous requirement.",
+  "records": [
+    {
+      "harness": "hy-fast",
+      "n": 1,
+      "checks": {
+        "positive_large_median": false,
+        "negative_large_median": false,
+        "opposite_large_median": true,
+        "tied_modes": true,
+        "median_input_unchanged": true,
+        "median_rejects_nan": true,
+        "mode_rejects_infinity": true,
+        "cli_negative_numbers": true
+      },
+      "error": null
+    },
+    {
+      "harness": "hy-thorough",
+      "n": 1,
+      "checks": {
+        "positive_large_median": false,
+        "negative_large_median": false,
+        "opposite_large_median": true,
+        "tied_modes": true,
+        "median_input_unchanged": true,
+        "median_rejects_nan": true,
+        "mode_rejects_infinity": true,
+        "cli_negative_numbers": true
+      },
+      "error": null
+    },
+    {
+      "harness": "dsh",
+      "n": 1,
+      "checks": {
+        "positive_large_median": false,
+        "negative_large_median": false,
+        "opposite_large_median": true,
+        "tied_modes": true,
+        "median_input_unchanged": true,
+        "median_rejects_nan": false,
+        "mode_rejects_infinity": false,
+        "cli_negative_numbers": true
+      },
+      "error": null
+    },
+    {
+      "harness": "hy-fast",
+      "n": 2,
+      "checks": {
+        "positive_large_median": false,
+        "negative_large_median": false,
+        "opposite_large_median": true,
+        "tied_modes": true,
+        "median_input_unchanged": true,
+        "median_rejects_nan": false,
+        "mode_rejects_infinity": false,
+        "cli_negative_numbers": true
+      },
+      "error": null
+    },
+    {
+      "harness": "dsh",
+      "n": 2,
+      "checks": {
+        "positive_large_median": false,
+        "negative_large_median": false,
+        "opposite_large_median": true,
+        "tied_modes": true,
+        "median_input_unchanged": true,
+        "median_rejects_nan": false,
+        "mode_rejects_infinity": false,
+        "cli_negative_numbers": true
+      },
+      "error": null
+    },
+    {
+      "harness": "hy-thorough",
+      "n": 2,
+      "checks": {
+        "positive_large_median": false,
+        "negative_large_median": false,
+        "opposite_large_median": true,
+        "tied_modes": true,
+        "median_input_unchanged": true,
+        "median_rejects_nan": true,
+        "mode_rejects_infinity": true,
+        "cli_negative_numbers": true
+      },
+      "error": null
+    }
+  ]
+}

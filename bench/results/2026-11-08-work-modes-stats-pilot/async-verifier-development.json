@@ -1,0 +1,22 @@
+{
+  "purpose": "Record development of independent Windows cancellation verifier, not a benchmark result.",
+  "attempts": [
+    {
+      "version": 1,
+      "method": "Semaphore plus gather reference",
+      "result": "failed queued-cancellation check: waiting work may start while cancellation is being propagated",
+      "actual": {
+        "file_loads": true,
+        "concurrent": true,
+        "bounded": true,
+        "cancel_active": true,
+        "cancel_queued": false
+      }
+    },
+    {
+      "version": 2,
+      "method": "fixed worker pool reference",
+      "result": "all five checks passed; missing implementation and sequential implementation were rejected"
+    }
+  ]
+}

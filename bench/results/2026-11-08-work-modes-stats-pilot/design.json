@@ -1,0 +1,23 @@
+{
+  "started": "2026-11-07T19:46:09.600Z",
+  "purpose": "Exploratory coding benchmark: baseline DSH and two HY work modes, 2 runs each, interleaved, parallel 2; not a final significance claim.",
+  "model": "opencode/deepseek-v4.1-flash",
+  "effort": "max",
+  "suite": "stats",
+  "samplePolicy": "Record every attempt and failure; do not stop early or remove outliers.",
+  "criteria": "Compare checks, raw output, tool failures and time/cost. Review actual tool calls, final replies and modes before changing anything.",
+  "hashes": {
+    "packages/core/dist/agent.js": "f6a998ec8673e3b7b190060a29f71ea1f6b0acc13bd4407100437d4d82bc95d7",
+    "packages/core/dist/prompt.js": "ea15e96dfa7be70dee798db327e50368448468193ae0279cd80f6ba9845e2075",
+    "packages/core/dist/llm.js": "3f4edd683798366728df069ed996736f0e44dd7499e2ee513d4144d729b3d0b5",
+    "packages/core/dist/tools.js": "c76ed27c5d0e6375a9b8439625976726339b9e34d4c6cb6eda2b4148222f5ee2",
+    "packages/core/dist/tool-registry.js": "97eeb8d37ed8b553a4b3dfea45b5038f7906ebf205091d9b3b5e6c3f98e63bea",
+    "packages/core/dist/tool-docs.js": "bbe3aa5976aab23b0958a5dbb20ab6beece0e6919afa1f4c72a82552fa312426",
+    "packages/hy-cli/dist/main.js": "b01f3ee863f0c61b1f6842d84ffbb712eb4d2a74751476a6a46a65b3630bf723",
+    "packages/hy-cli/dist/session-app.js": "52f26aa5bba2a4d40fcd9f68323b0fd1eca144900ba09933c5f4f28409ee2fbb",
+    "target/release/hy-exec-server.exe": "9973e8d5fbaab0e6db45d7cc4c1d860b2cb2ebfa563ee2fc82fee1cd398417e2",
+    "bench/harness/run.mjs": "d2ff01458390d584ed6206bf17f4d42fd82fd1c56df9063f6d0e6326e9bfbdd1",
+    "bench/harness/dsh.patch.yml": "ea76bcff9d4554653b3069800b2fbe7918d22b7fd2da39ea5a64342ea5fcfc7a",
+    "bench/harness/suites/stats-tasks.mjs": "8a6c7f0db8e262665daee581abdaa3429ca33b976c4b9ebd9891fbd0cb2d9b5d"
+  }
+}
