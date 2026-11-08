@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { roleApiKey, type RoleConfig } from './config.js'
 import { isSteerMessage, steerText } from './steering.js'
 import { effortWithToolsFor, temperatureAllowedFor, tokenFieldFor } from './model-catalog.js'
+import { estimateTokens } from './tokens.js'
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -74,6 +75,35 @@ export interface Completion {
   reasoning?: string
   /** Native function calls, when the request offered `tools`. */
   toolCalls?: ToolCall[]
+  /**
+   * Set when the harness cut the stream because the model fell into a loop
+   * repeating a short fragment; `content` / `reasoning` end where the loop
+   * began. Usage is then partial (the provider's final usage never arrived).
+   */
+  degenerate?: 'repetition'
+}
+
+/** How long a run of one short repeated fragment may grow before the stream is cut. */
+export const REPETITION_LIMIT_CHARS = 4_000
+const REPETITION_MAX_PERIOD = 16
+
+/**
+ * Where a runaway repetition at the end of `text` begins: the tail is one
+ * fragment of at most 16 chars repeated over at least 4,000 chars (e.g.
+ * `]}}]}}]}}…`). Undefined when the tail is ordinary text.
+ */
+export function repetitionStart(text: string): number | undefined {
+  if (text.length < REPETITION_LIMIT_CHARS) return undefined
+  for (let period = 1; period <= REPETITION_MAX_PERIOD; period++) {
+    let i = text.length - 1 - period
+    while (i >= 0 && text[i] === text[i + period]) i--
+    const start = i + 1
+    if (text.length - start >= REPETITION_LIMIT_CHARS) {
+      // Keep the first occurrence: it may complete what came before it.
+      return Math.min(text.length, start + period)
+    }
+  }
+  return undefined
 }
 
 /** A tool offered through native function calling (JSON Schema parameters, root type object). */
@@ -376,7 +406,27 @@ export class OpenAiProvider implements LlmProvider {
       // (a dropped connection, a proxy timeout): its partial answer must not
       // pass for a complete one.
       let finished = false
+      // A model stuck repeating one fragment (`]}}]}}…`) would stream until the
+      // 600 s timer and fail the whole run; it is cut here instead, and the
+      // agent retries the step.
+      let degenerate = false
+      let checkedContent = 0
+      let checkedReasoning = 0
+      const cutRepetition = (): boolean => {
+        if (content.length - checkedContent >= 1_000) {
+          checkedContent = content.length
+          const start = repetitionStart(content)
+          if (start !== undefined) return ((content = content.slice(0, start)), true)
+        }
+        if (reasoning.length - checkedReasoning >= 1_000) {
+          checkedReasoning = reasoning.length
+          const start = repetitionStart(reasoning)
+          if (start !== undefined) return ((reasoning = reasoning.slice(0, start)), true)
+        }
+        return false
+      }
       for (;;) {
+        if (degenerate) break
         const { done, value } = await reader.read()
         if (done) break
         buffer += decoder.decode(value, { stream: true })
@@ -409,11 +459,12 @@ export class OpenAiProvider implements LlmProvider {
           if (chunk.error?.message) throw new LlmError(`${this.role.provider}: ${chunk.error.message}`)
           if (chunk.usage) {
             const input = chunk.usage.prompt_tokens ?? 0
-            const cached = chunk.usage.prompt_cache_hit_tokens ?? chunk.usage.prompt_tokens_details?.cached_tokens ?? 0
+            const hasCache = chunk.usage.prompt_cache_hit_tokens !== undefined || chunk.usage.prompt_cache_miss_tokens !== undefined || chunk.usage.prompt_tokens_details?.cached_tokens !== undefined
+            const cached = chunk.usage.prompt_cache_hit_tokens ?? chunk.usage.prompt_tokens_details?.cached_tokens ?? (chunk.usage.prompt_cache_miss_tokens !== undefined ? Math.max(0, input - chunk.usage.prompt_cache_miss_tokens) : 0)
             usage = {
               inputTokens: input,
               outputTokens: chunk.usage.completion_tokens ?? 0,
-              ...(cached > 0 ? { cacheHitTokens: cached, cacheMissTokens: chunk.usage.prompt_cache_miss_tokens ?? Math.max(0, input - cached) } : {}),
+              ...(hasCache ? { cacheHitTokens: cached, cacheMissTokens: chunk.usage.prompt_cache_miss_tokens ?? Math.max(0, input - cached) } : {}),
             }
           }
           if (chunk.choices?.[0]?.finish_reason) finished = true
@@ -435,6 +486,21 @@ export class OpenAiProvider implements LlmProvider {
             if (call.function?.arguments) current.args += call.function.arguments
             calls.set(index, current)
           }
+          if (cutRepetition()) {
+            degenerate = true
+            break
+          }
+        }
+      }
+      if (degenerate) {
+        await reader.cancel().catch(() => {})
+        // The provider's usage never arrived: output is estimated, input and
+        // cache are unknown (left out, so cache totals show as unavailable).
+        return {
+          content,
+          ...(reasoning.length > 0 ? { reasoning } : {}),
+          usage: { inputTokens: usage.inputTokens, outputTokens: Math.max(usage.outputTokens, estimateTokens(content + reasoning)) },
+          degenerate: 'repetition',
         }
       }
       if (!finished) throw new LlmError(`${this.role.provider}: the stream ended before the response was complete`)
@@ -525,7 +591,7 @@ export class OpenAiProvider implements LlmProvider {
       body.usage?.prompt_cache_hit_tokens !== undefined ||
       body.usage?.prompt_cache_miss_tokens !== undefined ||
       body.usage?.prompt_tokens_details?.cached_tokens !== undefined
-    const cacheHitTokens = body.usage?.prompt_cache_hit_tokens ?? body.usage?.prompt_tokens_details?.cached_tokens ?? 0
+    const cacheHitTokens = body.usage?.prompt_cache_hit_tokens ?? body.usage?.prompt_tokens_details?.cached_tokens ?? (body.usage?.prompt_cache_miss_tokens !== undefined ? Math.max(0, inputTokens - body.usage.prompt_cache_miss_tokens) : 0)
     const cacheMissTokens = body.usage?.prompt_cache_miss_tokens ?? Math.max(0, inputTokens - cacheHitTokens)
     const reasoning = message?.reasoning_content?.trim()
       ? message.reasoning_content

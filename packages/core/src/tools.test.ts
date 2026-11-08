@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { crc32, deflateSync } from 'node:zlib'
 import { MemoryStore } from './memory.js'
 import {
   ToolRuntime,
@@ -79,6 +80,18 @@ test('PowerShell CLIXML stderr is reduced to readable error lines', () => {
     '<S S="Error">line 1_x000A_</S></Objs>'
   assert.equal(cleanPowerShellOutput(clixml), 'Get-ChildItem : not found\nline 1')
   assert.equal(cleanPowerShellOutput('plain stderr'), 'plain stderr')
+  assert.equal(cleanPowerShellOutput('\x1b[32;1mName\x1b[0m\r\nreport.pdf'), 'Name\r\nreport.pdf')
+  assert.equal(cleanPowerShellOutput('#< CLIXML\n<Objs><S S="Error">_x001B_[31;1mParserError_x001B_[0m_x000A_ß</S></Objs>'), 'ParserError\nß')
+  assert.equal(cleanPowerShellOutput('#< CLIXML\n<Objs><S S="Error">literal _x005F_x001B_</S></Objs>'), 'literal _x001B_')
+})
+
+test('shell stdout and stderr lose terminal decoration without changing their contents', async () => {
+  const exec = { exec: async () => ({ status: 'completed', exitCode: 1, stdout: '\x1b[32mreport.pdf\x1b[0m\n', stderr: '\x1b[31mfailed\x1b[0m\n' }) }
+  const tools = new ToolRuntime(exec as never, process.cwd())
+  const result = await tools.execute('shell', { command: 'Get-ChildItem' })
+  assert.equal(result.stdout, 'report.pdf\n')
+  assert.equal(result.stderr, 'failed\n')
+  assert.equal(result.exitCode, 1)
 })
 
 /** A ToolRuntime whose exec client only records patches. */
@@ -92,6 +105,19 @@ function patchRecorder(root: string) {
   }
   return { tools: new ToolRuntime(exec as never, root), patches }
 }
+
+test('unsupported patch syntax explains how to recover without writing', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-patch-format-'))
+  assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir()) + path.sep))
+  try {
+    const { tools, patches } = patchRecorder(dir)
+    await assert.rejects(tools.execute('apply_patch', { patch: '*** Begin Patch\n*** Update File: x\n@@\n-a\n+b\n*** End Patch' }), /Unsupported patch format: use a unified diff.*file \+ content/)
+    await assert.rejects(tools.execute('apply_patch', { patch: '--- a/x\n+++ b/x\n@@\n-a\n+b' }), /hunks need line numbers.*file \+ content/)
+    assert.equal(patches.length, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('write_file creates a file and refuses to overwrite before a read', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-write-'))
@@ -152,7 +178,36 @@ test('read_image hands the bytes over out of band', async () => {
     // A model without image input says so instead of failing later.
     assert.throws(() => tools.readImage({ path: 'pixel.png' }, false), /no image input/)
     assert.throws(() => tools.readImage({ path: 'notes.txt' }, true), /not a PNG, JPEG, WebP or GIF/)
+    assert.throws(() => tools.readImage({ path: 'missing.png' }, true), /path does not exist.*search_glob\/search_grep/)
     assert.throws(() => tools.readImage({ path: '../escape.png' }, true), /relative to the workspace|escapes/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('read_image accepts high-resolution scans while preserving the dimension cap', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-image-scan-'))
+  try {
+    const { tools } = patchRecorder(dir)
+    for (const height of [6000, 8193]) {
+      const header = Buffer.alloc(13)
+      header.writeUInt32BE(1, 0)
+      header.writeUInt32BE(height, 4)
+      header[8] = 8
+      header[9] = 6
+      const chunks = [['IHDR', header], ['IDAT', deflateSync(Buffer.alloc(height * 5))], ['IEND', Buffer.alloc(0)]] as const
+      const png = Buffer.concat([PNG.subarray(0, 8), ...chunks.map(([type, data]) => {
+        const body = Buffer.concat([Buffer.from(type), data])
+        const length = Buffer.alloc(4)
+        length.writeUInt32BE(data.length)
+        const checksum = Buffer.alloc(4)
+        checksum.writeUInt32BE(crc32(body))
+        return Buffer.concat([length, body, checksum])
+      })])
+      fs.writeFileSync(path.join(dir, 'scan.png'), png)
+      if (height <= 8192) assert.equal(tools.readImage({ path: 'scan.png' }, true).height, height)
+      else assert.throws(() => tools.readImage({ path: 'scan.png' }, true), /limit is 8192/)
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

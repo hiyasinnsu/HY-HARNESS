@@ -346,6 +346,15 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
   },
   {
     method: "POST",
+    path: "/api/sessions/:id/work-mode",
+    summary: "Set the session work mode.",
+    errors: [400, 409],
+    request: {
+    mode: { type: "string", required: true },
+    },
+  },
+  {
+    method: "POST",
     path: "/api/sessions/:id/model",
     summary: "Switch the session model.",
     errors: [400],

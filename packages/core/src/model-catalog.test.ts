@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MODEL_CATALOG, catalogForRole, catalogVision, effortWithToolsFor, findModel, temperatureAllowedFor, tokenFieldFor } from './model-catalog.js'
+import { roleSupportsImages } from './config.js'
 
 test('the catalog is well formed and searchable', () => {
   assert.ok(MODEL_CATALOG.length >= 5)
@@ -39,4 +40,7 @@ test('compat flags come from the catalog and fall back to the heuristic', () => 
   assert.equal(catalogVision('anthropic', 'claude-sonnet-4-5'), true)
   assert.equal(catalogVision('ollama', 'qwen2.5:3b'), false)
   assert.equal(catalogVision('ollama', 'unknown-model'), undefined)
+  const opencode = { provider: 'opencode' as const, model: 'deepseek-v4.1-flash', contextWindowTokens: 1_000_000, maxOutputTokens: 131_072 }
+  assert.equal(roleSupportsImages(opencode), true, 'OpenCode DeepSeek accepts image tools')
+  assert.equal(roleSupportsImages({ ...opencode, vision: false }), false, 'an explicit user override still wins')
 })

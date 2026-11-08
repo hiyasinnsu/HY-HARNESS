@@ -40,6 +40,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   { id: 'notes', slash: 'notes', desc: 'Show the rationale ledger notes', label: 'Rationale notes', icon: 'plan', section: 'notes' },
   { id: 'plan', slash: 'plan', desc: "Show the agent's current plan", label: 'Plan panel', icon: 'plan' },
   { id: 'plan-mode', slash: 'plan-mode', args: '[off]', desc: 'Toggle read-only planning mode', label: 'Toggle plan mode', icon: 'plan' },
+  { id: 'work-mode', slash: 'work-mode', args: '[fast|thorough]', desc: 'Choose the work mode', icon: 'plan' },
   { id: 'goal', slash: 'goal', args: '[objective|edit|pause|resume|clear]', desc: 'Set or control the long-running goal', label: 'Set or edit goal', icon: 'target' },
   { id: 'compact', slash: 'compact', desc: 'Compact the conversation now', label: 'Compact conversation', icon: 'cpu' },
   { id: 'model', slash: 'model', args: '<name>', desc: 'Switch the worker model', icon: 'cpu' },

@@ -54,6 +54,15 @@ export const MODEL_CATALOG: readonly ModelInfo[] = [
     capabilities: { tools: true, vision: true, reasoning: true, cache: true },
   },
   {
+    id: 'opencode:deepseek-v4.1-flash',
+    provider: 'opencode',
+    model: 'deepseek-v4.1-flash',
+    label: 'DeepSeek V4.1 Flash (OpenCode Go)',
+    contextWindowTokens: 1_000_000,
+    maxOutputTokens: 131_072,
+    capabilities: { tools: true, vision: true, reasoning: true, cache: true },
+  },
+  {
     id: 'openai-compatible:gpt-4.1-mini',
     provider: 'openai-compatible',
     model: 'gpt-4.1-mini',

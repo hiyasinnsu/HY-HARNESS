@@ -71,6 +71,7 @@ export interface AgentOptions {
   reasoningHistory?: 'none' | 'full'
   /** System-prompt variant (benchmark experiments; HarnessConfig.promptVariant). */
   promptVariant?: 'lean' | 'legacy' | 'lean2' | 'lean3' | 'lean4'
+  workMode?: () => 'fast' | 'thorough'
   /** CP-38: resolved feature flags (streaming can be turned off). */
   features?: Readonly<Record<string, boolean>>
   /** CP-19: lifecycle hooks (userPromptSubmit, modelRequest, …). Default: none. */
@@ -410,6 +411,7 @@ export class Agent {
     let nudged = false
     // Set once a broken tool call has been retried (native mode).
     let brokenRetried = false
+    let degenerateRetried = false
     // Goal mode: one nudge when a plan/promise arrives before any tool call.
     let goalNudged = false
     let performedToolCalls = 0
@@ -429,6 +431,7 @@ export class Agent {
       ...(source ? { source } : {}),
     })
     const usage: Usage = { inputTokens: 0, outputTokens: 0 }
+    let cacheUsageComplete = true
     let lastInputTokens = 0
     // RepeatToolReminderGuard (design §2, DSH repeat-tool-reminder).
     let lastCall = ''
@@ -470,6 +473,7 @@ export class Agent {
       // conversation holds. Compaction or pruning that drops that block makes
       // it differ, so the current block is always in the request (Goal 3).
       const context = sessionContextBlock({
+        ...(this.options.workMode ? { workMode: this.options.workMode() } : {}),
         // The model's own sense of "now" is its training cutoff (DSH time context).
         date: new Date().toLocaleDateString('sv-SE'),
         ...(this.options.goal ? { goal: this.options.goal } : {}),
@@ -533,8 +537,14 @@ export class Agent {
       ;(this.options.tools as Partial<Pick<ToolRuntime, 'setUsage'>>).setUsage?.(completion.usage)
       usage.inputTokens += completion.usage.inputTokens
       usage.outputTokens += completion.usage.outputTokens
-      usage.cacheHitTokens = (usage.cacheHitTokens ?? 0) + (completion.usage.cacheHitTokens ?? 0)
-      usage.cacheMissTokens = (usage.cacheMissTokens ?? 0) + (completion.usage.cacheMissTokens ?? 0)
+      if (completion.usage.cacheHitTokens === undefined || completion.usage.cacheMissTokens === undefined) cacheUsageComplete = false
+      if (cacheUsageComplete) {
+        usage.cacheHitTokens = (usage.cacheHitTokens ?? 0) + completion.usage.cacheHitTokens!
+        usage.cacheMissTokens = (usage.cacheMissTokens ?? 0) + completion.usage.cacheMissTokens!
+      } else {
+        delete usage.cacheHitTokens
+        delete usage.cacheMissTokens
+      }
       // reasoningHistory full: this step's reasoning stays on its assistant
       // message, so later steps see why it acted (DSH / DeepSeek reasoning_content).
       const kept = this.options.reasoningHistory === 'full' && completion.reasoning?.trim() ? completion.reasoning : undefined
@@ -553,6 +563,29 @@ export class Agent {
         systemSha256: createHash('sha256').update(messages[0].content).digest('hex').slice(0, 16),
       })
       this.options.onEvent?.({ type: 'step-end', step, usage: completion.usage })
+
+      // The stream was cut because the model looped on one fragment: the text
+      // is not an answer and may hold half a tool call. Retry once with the
+      // loop removed from the history; a second loop ends the turn plainly.
+      if (completion.degenerate === 'repetition') {
+        const cut = completion.content.trim()
+        if (degenerateRetried) {
+          const final = 'The model kept repeating the same text, so the reply was cut off. No further changes were made.'
+          this.options.sessionLog.append('turn/end', { status: 'completed' })
+          this.options.onEvent?.({ type: 'final', content: final })
+          return { outcome: 'final', final, steps: step, usage, history: messages.slice(1) }
+        }
+        degenerateRetried = true
+        if (cut) messages.push(reply(cut))
+        messages.push({
+          role: 'user',
+          content:
+            'Your last reply fell into a loop repeating the same characters and was cut off. Continue the task: make one complete tool call, or give a short plain-text summary if you are done.',
+        })
+        this.options.sessionLog.append('turn/retry', { step, reason: 'repetition', ...replay(messages, Boolean(cut)) })
+        this.options.onEvent?.({ type: 'retry', step, reason: 'repetition', content: truncate(cut, 2_000) })
+        continue
+      }
 
       let content = completion.content.trim()
       let action: Action | undefined

@@ -211,7 +211,7 @@ M0 ─ M1 ─┬─ M2 ── M3 ─┬─ M4 ── M5 ── M6
 **WP-30 `write_file`/`edit_file`/`read_image`/`working_directory`（9d）** — 対応: T1, T3, T6
 - 内容:
   - `write_file {file, content}`（新規 or 全置換、読み取り前編集の hash 検証を再利用）、`edit_file {file, old, new, count?}`（一意一致、失敗時は候補行を返す）。
-  - `read_image {path}`: PNG/JPEG/WebP/GIF、上限 8 MiB / 4096 px。画像非対応モデルでは明示エラー。
+  - `read_image {path}`: PNG/JPEG/WebP/GIF、上限 8 MiB / 8192 px（2026-11-08、高解像度スキャン対応）。画像非対応モデルでは明示エラー。
   - `working_directory {path?}`: セッション cwd を設定/取得。`shell` の既定 cwd、`read_file`/`apply_patch` の相対解決、`load_workspace_roots` の表示に反映。ログ `session/cwd`。ワークスペース外は拒否。
   - トークン量の再測定（K9 の ≤1,200 を維持、超過時は SDK 記述を圧縮）。
 - 対象: `tool-registry.ts`, `tools.ts`, `agent.ts`（プロンプト）, `session-app.ts`, `prompt.ts`, `tests/integration/tool-overhead.test.mjs`。

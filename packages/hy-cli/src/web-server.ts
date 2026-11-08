@@ -426,6 +426,7 @@ interface WebSession {
   pendingApprovals: Map<string, Pending<boolean | { approved: boolean; reason?: string }>>
   pendingQuestions: Map<string, Pending<string>>
   planMode: boolean
+  workMode?: 'fast' | 'thorough'
   /** WP-12: the session's live sandbox mode (persisted in the session log). */
   sandboxMode: SandboxMode
   goal?: string | undefined
@@ -978,6 +979,7 @@ function sessionState(session: WebSession) {
     busy: session.busy,
     turns: session.conv?.turns ?? session.turns,
     planMode: session.conv?.isPlanMode() ?? session.planMode,
+    workMode: session.conv?.currentWorkMode() ?? session.workMode ?? 'fast',
     sandboxMode: session.conv?.sandboxMode() ?? session.sandboxMode,
     goal: session.conv?.currentGoal() ?? session.goal ?? null,
     goalState: session.conv?.goalView() ?? null,
@@ -1508,6 +1510,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       pendingApprovals: new Map(),
       pendingQuestions: new Map(),
       planMode: kind === 'orchestrator' ? true : planModeOf(events, runId),
+      workMode: (events.filter((e) => e.runId === runId && e.type === 'session/work-mode').at(-1)?.payload as { mode?: unknown } | undefined)?.mode === 'thorough' ? 'thorough' : 'fast',
       sandboxMode: resolveSandboxMode(events, runId, config.sandbox),
       model: modelForKind(kind),
       goal: goalOf(events, runId),
@@ -1550,6 +1553,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         outputTokens: 0,
         cacheHitTokens: 0,
         cacheMissTokens: 0,
+        cacheUsageComplete: true,
         lastInputTokens: 0,
         lastOutputTokens: 0,
         lastCacheHitTokens: 0,
@@ -4397,6 +4401,23 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             broadcast(session, { type: 'notice', text: `sandbox mode: ${applied}` })
             broadcast(session, { type: 'state', state: sessionState(session) })
             json(res, 200, { mode: applied, state: sessionState(session) })
+            return
+          }
+
+          if (sub === 'work-mode' && method === 'POST') {
+            const body = await readBody()
+            if (body.mode !== 'fast' && body.mode !== 'thorough') {
+              json(res, 400, { error: 'mode must be fast or thorough' })
+              return
+            }
+            if (session.busy) {
+              json(res, 409, { error: 'work mode cannot change while a turn is running' })
+              return
+            }
+            const result = ensureConversation(session).setWorkMode(body.mode)
+            session.workMode = body.mode
+            broadcast(session, { type: 'state', state: sessionState(session) })
+            json(res, 200, { result, mode: body.mode })
             return
           }
 

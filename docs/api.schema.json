@@ -614,6 +614,26 @@
     },
     {
       "method": "POST",
+      "path": "/api/sessions/:id/work-mode",
+      "summary": "Set the session work mode.",
+      "errors": [
+        400,
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      }
+    },
+    {
+      "method": "POST",
       "path": "/api/sessions/:id/model",
       "summary": "Switch the session model.",
       "errors": [

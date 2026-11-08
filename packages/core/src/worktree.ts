@@ -211,9 +211,15 @@ export class WorktreeManager {
     const identity = git(target, ['config', 'user.email']).stdout.trim()
       ? []
       : ['-c', 'user.name=hy-harness', '-c', 'user.email=hy-harness@localhost']
-    const commit = git(target, [...identity, 'commit', '-q', '-m', `hy worktree apply: ${sanitizeWorktreeName(name)}`])
+    const committed = git(target, ['diff', '--cached', '--quiet']).ok ||
+      git(target, [...identity, 'commit', '-q', '-m', `hy worktree apply: ${sanitizeWorktreeName(name)}`]).ok
     // The next apply starts here, so applied work is never applied twice.
-    if (commit.ok) git(this.repo, ['update-ref', appliedRef(sanitizeWorktreeName(name)), `hy/${sanitizeWorktreeName(name)}`])
-    return { applied: files, conflicts: [], empty: false, committed: commit.ok }
+    if (committed) {
+      const head = git(target, ['rev-parse', 'HEAD'])
+      if (!head.ok) throw new Error(`changes applied, but could not read the worktree HEAD: ${head.stderr.trim()}`)
+      const recorded = git(this.repo, ['update-ref', appliedRef(sanitizeWorktreeName(name)), head.stdout.trim()])
+      if (!recorded.ok) throw new Error(`changes applied, but could not record the applied commit: ${recorded.stderr.trim()}`)
+    }
+    return { applied: files, conflicts: [], empty: false, committed }
   }
 }

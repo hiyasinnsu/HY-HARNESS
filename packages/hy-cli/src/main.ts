@@ -167,6 +167,7 @@ Options:
   --state-dir <dir>       State directory (default: %LOCALAPPDATA%\\hy-harness\\state\\<id>)
   --provider <kind>       ollama | deepseek | openai-compatible | opencode | gemini | mock
   --model <name>          Model name
+  --work-mode <mode>     fast or thorough (hy run/chat)
   --base-url <url>        Provider base URL
   --api-key-env <name>    Environment variable holding the API key
   --sandbox <mode>        workspace-write (default) | read-only | unconfined
@@ -348,6 +349,13 @@ function writeLastMessage(p: Parsed, text: string): void {
   if (file) fs.writeFileSync(path.resolve(file), `${text}\n`, 'utf8')
 }
 
+function applyWorkModeOption(conv: Conversation, p: Parsed): void {
+  if (p.flags['work-mode'] === undefined) return
+  const mode = str(p.flags, 'work-mode')
+  if (mode !== 'fast' && mode !== 'thorough') throw new Error('--work-mode must be fast or thorough')
+  conv.setWorkMode(mode)
+}
+
 async function run(p: Parsed): Promise<number> {
   const objective = p.positional[0]
   if (!objective) {
@@ -365,6 +373,7 @@ async function run(p: Parsed): Promise<number> {
     await startServices(config)
     loadOutputSchema(p)
     const conv = Conversation.create(config, client, newRunId(), json)
+    applyWorkModeOption(conv, p)
     console.error(`[hy] run: ${conv.runId} (hy resume ${conv.runId} continues it)`)
     const final = await conv.turn(objective, loadImages(p))
     await conv.end()
@@ -515,6 +524,7 @@ async function chatLoop(p: Parsed, config: HarnessConfig, client: ExecRpcClient,
     elicitationContent(request.requestedSchema, (await reader.next(`\n[MCP ${request.server} asks] ${request.message}\n> `)) ?? ''),
   )
   let conv = Conversation.create(config, client, runId, json, ask, answer)
+  applyWorkModeOption(conv, p)
   const prompts = loadPrompts(config.workspaceRoot)
   console.error(`[hy] run: ${conv.runId}${conv.turns > 0 ? ` (resumed after ${conv.turns} turn(s))` : ''}. /help for commands.`)
   const doTurn = async (text: string) => {
@@ -565,6 +575,9 @@ async function chatLoop(p: Parsed, config: HarnessConfig, client: ExecRpcClient,
             break
           case '/plan-mode':
             out = conv.setPlanMode(rest !== 'off')
+            break
+          case '/work-mode':
+            out = rest === 'fast' || rest === 'thorough' ? conv.setWorkMode(rest) : rest ? 'usage: /work-mode [fast|thorough]' : `work mode: ${conv.currentWorkMode()}`
             break
           case '/model':
             out = rest ? conv.setModel(rest) : `model: ${config.role.provider}/${config.role.model}`

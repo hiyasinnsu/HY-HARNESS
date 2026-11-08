@@ -21,6 +21,7 @@ test('CP-36: item texts', () => {
   assert.equal(statusText('model', data), 'ollama/qwen2.5:3b')
   assert.equal(statusText('tokens', data), 'in 12,000 / out 340')
   assert.equal(statusText('cache', data), 'cache 3,000 (25.00%)')
+  assert.equal(statusText('cache', { ...data, cacheUsageComplete: false }), 'cache —')
   assert.equal(statusText('last', data), 'last 6,553/120')
   assert.equal(statusText('context', data), 'ctx 20%')
   assert.equal(statusText('turns', data), '1 turn')

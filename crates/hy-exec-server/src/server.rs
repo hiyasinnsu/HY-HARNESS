@@ -996,6 +996,10 @@ fn build_env(state: &State, private_temp: Option<&Path>) -> Vec<(String, String)
             env.push((key, v));
         }
     }
+    // Piped Python otherwise uses the Windows ANSI code page and fails on document text.
+    if env_value(&env, "PYTHONIOENCODING").is_none() {
+        env.push(("PYTHONIOENCODING".into(), "utf-8".into()));
+    }
     // Confined commands get the session's granted private temp.
     let temp = match private_temp {
         Some(t) => t.to_path_buf(),

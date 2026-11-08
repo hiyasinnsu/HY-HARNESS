@@ -5,6 +5,7 @@ export interface UsageView {
   outputTokens: number
   cacheHitTokens: number
   cacheMissTokens: number
+  cacheUsageComplete: boolean
   lastInputTokens: number
   lastOutputTokens: number
   lastCacheHitTokens: number
@@ -21,6 +22,7 @@ export function usageOf(events: readonly SessionEvent[], runId: string): UsageVi
     outputTokens: 0,
     cacheHitTokens: 0,
     cacheMissTokens: 0,
+    cacheUsageComplete: true,
     lastInputTokens: 0,
     lastOutputTokens: 0,
     lastCacheHitTokens: 0,
@@ -32,7 +34,11 @@ export function usageOf(events: readonly SessionEvent[], runId: string): UsageVi
       usage?: { inputTokens?: number; outputTokens?: number; cacheHitTokens?: number; cacheMissTokens?: number }
     }
     const u = payload.usage
-    if (!u) continue
+    if (!u) {
+      usage.cacheUsageComplete = false
+      continue
+    }
+    if (u.cacheHitTokens === undefined || u.cacheMissTokens === undefined) usage.cacheUsageComplete = false
     const input = Number(u.inputTokens ?? 0)
     const output = Number(u.outputTokens ?? 0)
     const hit = Number(u.cacheHitTokens ?? 0)

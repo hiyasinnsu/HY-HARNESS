@@ -25,7 +25,7 @@ for (const native of [true, false]) {
     for (const other of [otherWorkspace, worker]) {
       const shared = sharedPrefix(chat, other)
       assert.ok(shared.length >= chat.indexOf(marker), 'nothing before the session part differs')
-      assert.ok(shared.length > 2_000, `a long shared prefix (${shared.length} chars)`)
+      assert.ok(shared.startsWith('You are HY-HARNESS'), 'the shared prefix includes the initial instructions')
     }
     assert.match(chat, /\nThis session:\nWorkspace root: C:\\work\\alpha\n*$/)
     assert.match(worker.slice(worker.indexOf(marker)), /You are a worker\./)
@@ -33,14 +33,28 @@ for (const native of [true, false]) {
   })
 }
 
-test('the path hint names search tools the model has: run_code only with PTC', () => {
-  for (const native of [true, false]) {
-    const plain = buildSystemPrompt('C:\\work\\alpha', false, false, { native })
-    assert.doesNotMatch(plain, /run_code/, 'without PTC there is no run_code to point at')
-    assert.match(plain, /search_glob \/ search_grep/)
-    const ptc = buildSystemPrompt('C:\\work\\alpha', true, false, { native })
-    assert.match(ptc, /tools\.search\.glob \/ tools\.search\.grep inside run_code/)
+test('tool usage lives with native definitions and the SDK follows loaded tools', async () => {
+  const { nativeToolDefs } = await import('./prompt.js')
+  for (const ptc of [false, true]) {
+    const system = buildSystemPrompt('C:\\work\\alpha', ptc, false, { native: true, lsp: true })
+    assert.doesNotMatch(system, /Shell environment|search_glob|apply_patch|declare namespace tools/)
+    const defs = nativeToolDefs(ptc, false, { lsp: true, activeTools: new Set(['lsp']) })
+    assert.match(defs.find(t => t.name === 'shell')!.description, /cwd.*workspace root/i)
+    assert.match(defs.find(t => t.name === 'shell')!.description, /chained commands may report only the last/i)
+    assert.match(defs.find(t => t.name === 'apply_patch')!.description, /numbered @@ hunks/)
+    assert.ok(defs.some(t => t.name === 'search_glob'))
+    if (ptc) {
+      const sdk = (defs.find(t => t.name === 'run_code')!.parameters as { properties: { code: { description: string } } }).properties.code.description
+      assert.match(sdk, /declare namespace tools/)
+      assert.match(sdk, /namespace lsp/)
+      const unloaded = (nativeToolDefs(true, false, { lsp: true }).find(t => t.name === 'run_code')!.parameters as { properties: { code: { description: string } } }).properties.code.description
+      assert.doesNotMatch(unloaded, /namespace lsp/)
+    } else assert.ok(!defs.some(t => t.name === 'run_code'))
   }
+  const text = buildSystemPrompt('C:\\work\\alpha', true, false, { native: false })
+  assert.match(text, /Tools \(call as/)
+  assert.match(text, /tools\.search\.glob = search_glob/)
+  assert.doesNotMatch(text.slice(text.lastIndexOf('\nRules:\n')), /search_glob|apply_patch|PowerShell/)
 })
 
 test('promptVariant: lean is the default; legacy keeps the old opening; the rest is shared', () => {
@@ -49,22 +63,21 @@ test('promptVariant: lean is the default; legacy keeps the old opening; the rest
     assert.equal(buildSystemPrompt('C:\\work\\alpha', false, false, { native, promptVariant: 'lean' }), lean)
     const base = buildSystemPrompt('C:\\work\\alpha', false, false, { native, promptVariant: 'legacy' })
     assert.match(base, /^You are HY-HARNESS, a careful autonomous coding agent\. The workspace and this session's role are given at the end/)
-    assert.match(lean, /^You are HY-HARNESS, a careful autonomous coding agent\.\nPrivate reasoning style: use a concise tone\.\nShell environment:/)
+    assert.match(lean, /^You are HY-HARNESS, a careful autonomous coding agent\.\nPrivate reasoning style: use a concise tone\./)
     assert.doesNotMatch(lean, /Japanese|given at the end|Start with one sentence/)
-    const rest = (s: string) => s.slice(s.indexOf('Shell environment:'))
+    const rest = (s: string) => s.slice(s.indexOf(native ? 'Rules:' : 'Tools (call as'))
     assert.equal(rest(lean), rest(base), 'only the first two lines differ')
   }
 })
 
 test('promptVariant lean2: the user-drafted rules (native function calling)', () => {
   const p = buildSystemPrompt('C:\\work\\alpha', false, false, { native: true, promptVariant: 'lean2' })
-  assert.match(p, /^You are HY-HARNESS, an autonomous coding agent\.\nPrivate reasoning style: use a concise tone\. Do not state uncertain points as certain; present them as possibilities\.\nShell environment:/)
+  assert.match(p, /^You are HY-HARNESS, an autonomous coding agent\.\nPrivate reasoning style: use a concise tone\. Do not state uncertain points as certain; present them as possibilities\./)
   for (const line of [
     "Read the user's intent and its background before acting.",
     'Do not settle for a partial solution.',
     'Ask the user only when a decision is genuinely theirs',
     'In the final answer, lead with the conclusion; if you did work, summarize clearly what changed and what you verified.',
-    'If a path is missing, locate it with search_glob / search_grep.\n',
   ]) assert.ok(p.includes(line), line)
   for (const gone of ['never write JSON such as', 'Such JSON', 'Never claim success', 'instead of guessing similar paths', 'careful']) {
     assert.ok(!p.includes(gone), `removed: ${gone}`)
@@ -74,15 +87,13 @@ test('promptVariant lean2: the user-drafted rules (native function calling)', ()
   assert.match(buildSystemPrompt('C:\\work\\alpha', false, true, { native: true, promptVariant: 'lean2' }), /Finish only by calling claim_complete/)
 })
 
-test('promptVariant lean3: tool use and rules groups; the shell is the fallback', () => {
+test('promptVariant lean3: tool use and rules groups', () => {
   const p = buildSystemPrompt('C:\\work\\alpha', false, false, { native: true, promptVariant: 'lean3' })
-  assert.match(p, /^You are HY-HARNESS, an autonomous coding agent\.\nPrivate reasoning style: use a concise tone\. Do not state uncertain points as certain; present them as possibilities\.\nShell environment: /)
+  assert.match(p, /^You are HY-HARNESS, an autonomous coding agent\.\nPrivate reasoning style: use a concise tone\. Do not state uncertain points as certain; present them as possibilities\./)
   for (const line of [
-    'Tool use:\nMake independent calls together, at the same time.\nRead a file before editing it.\n',
-    'If a path is missing, locate it with search_glob / search_grep, not the shell.',
-    'split it into several edit_file / apply_patch calls',
+    'Tool use:\nMake independent calls together, at the same time.\nDo not try to read or write outside the workspace.\n',
     'Rules:\nRead the user\'s intent and its background before acting.\nDo not settle for a partial solution.\n',
-    'Do not implement a lot at once; proceed in small, verifiable steps. Inspect shell output before continuing.\n',
+    'Do not implement a lot at once; proceed in small, verifiable steps.\n',
   ]) assert.ok(p.includes(line), line)
   assert.ok(!p.includes('Use the provided tools through function calls'))
   assert.match(p, /\nThis session:\nWorkspace root: C:\\work\\alpha\n*$/)
@@ -96,7 +107,7 @@ test('promptVariant lean4: detailed tool docs, and the prompt drops what they co
   const p = buildSystemPrompt('C:\\work\\alpha', false, false, { native: true, promptVariant: 'lean4' })
   assert.match(p, /^You are HY-HARNESS, an autonomous coding agent\.\nPrivate reasoning style: [^\n]+\nTool use:\nMake independent calls together, at the same time\.\nDo not try to read or write outside the workspace\.\nRules:\n/)
   assert.doesNotMatch(p, /Shell environment|Read a file before editing|search_glob|apply_patch|edit_file/, 'now in the tool descriptions')
-  assert.match(p, /Inspect shell output before continuing\.\n\nThis session:/)
+  assert.match(p, /proceed in small, verifiable steps\.\n\nThis session:/)
 
   // The plugin-provided editors, as the session registers them.
   const extraTools = [

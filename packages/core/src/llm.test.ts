@@ -10,7 +10,7 @@ import http from 'node:http'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fileURLToPath } from 'node:url'
-import { GeminiProvider, LazyProvider, LlmError, MockCompactorProvider, OllamaProvider, OpenAiProvider, isOpenCodeHost } from './llm.js'
+import { GeminiProvider, LazyProvider, LlmError, MockCompactorProvider, OllamaProvider, OpenAiProvider, isOpenCodeHost, repetitionStart } from './llm.js'
 import type { RoleConfig } from './config.js'
 
 const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'test', 'fixtures')
@@ -552,6 +552,67 @@ test('CP-18: the OpenAI-compatible adapter streams deltas and assembles the repl
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
 })
+test('streaming usage distinguishes a reported zero cache hit from missing cache data', async () => {
+  const stream = (usage: Record<string, unknown>) => `data: ${JSON.stringify({ choices: [], usage })}\n\ndata: [DONE]\n\n`
+  const s = await serve([
+    { status: 200, headers: { 'Content-Type': 'text/event-stream' }, body: stream({ prompt_tokens: 10, completion_tokens: 2, prompt_cache_hit_tokens: 0 }) },
+    { status: 200, headers: { 'Content-Type': 'text/event-stream' }, body: stream({ prompt_tokens: 10, completion_tokens: 2, prompt_cache_miss_tokens: 4 }) },
+    { status: 200, headers: { 'Content-Type': 'text/event-stream' }, body: stream({ prompt_tokens: 10, completion_tokens: 2 }) },
+  ])
+  try {
+    const provider = new OpenAiProvider({ ...role('openai-compatible', s.base), apiKey: 'test-key' }, fast)
+    const options = { maxTokens: 32, temperature: 0, onDelta: () => {} }
+    assert.deepEqual((await provider.complete(messages, options)).usage, { inputTokens: 10, outputTokens: 2, cacheHitTokens: 0, cacheMissTokens: 10 })
+    assert.deepEqual((await provider.complete(messages, options)).usage, { inputTokens: 10, outputTokens: 2, cacheHitTokens: 6, cacheMissTokens: 4 })
+    assert.deepEqual((await provider.complete(messages, options)).usage, { inputTokens: 10, outputTokens: 2 })
+  } finally {
+    await s.close()
+  }
+})
+
+test('repetitionStart finds a runaway loop of one short fragment and nothing else', () => {
+  const head = '{"tool":"shell","args":{"command":"dir"}}'
+  const loop = head + ']}}'.repeat(2_000)
+  // The run starts where the text first becomes periodic (here inside the
+  // head's closing `}}`); one period of it is kept.
+  const cut = repetitionStart(loop)!
+  assert.ok(cut >= head.length && cut <= head.length + 3, `cut at ${cut}`)
+  assert.equal(repetitionStart(head + ']}}'.repeat(1_000)), undefined, 'below the limit')
+  const prose = Array.from({ length: 400 }, (_, i) => `line ${i}: the quick brown fox ${i * 7}\n`).join('')
+  assert.equal(repetitionStart(prose), undefined, 'ordinary long text')
+  assert.equal(repetitionStart('|---|'.repeat(200) + 'x'), undefined, 'a long table rule that ends normally')
+})
+
+test('a stream looping on one fragment is cut at once and marked degenerate', async () => {
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"tool":"shell","args":{"command":"dir"}}' } }] })}\n\n`)
+      // Never finishes on its own: the client has to stop it.
+      const timer = setInterval(() => res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: ']}}' } }] })}\n\n`), 0)
+      res.on('close', () => clearInterval(timer))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const { port } = server.address() as AddressInfo
+  const provider = new OpenAiProvider(
+    { provider: 'openai-compatible', model: 'm', baseUrl: `http://127.0.0.1:${port}`, apiKey: 'k', contextWindowTokens: 10_000, maxOutputTokens: 100 },
+    { retries: 0, baseDelayMs: 1, maxDelayMs: 5 },
+  )
+  try {
+    const started = Date.now()
+    const done = await provider.complete([{ role: 'user', content: 'hi' }], { maxTokens: 8, temperature: 0, onDelta: () => undefined })
+    assert.equal(done.degenerate, 'repetition')
+    assert.ok(done.content.startsWith('{"tool":"shell","args":{"command":"dir"}}'))
+    assert.ok(done.content.length <= 44, done.content)
+    assert.ok(Date.now() - started < 20_000)
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
 test('a stream cut off before [DONE] or a finish_reason is an error, not a short answer', async () => {
   let complete = false
   const server = http.createServer((req, res) => {

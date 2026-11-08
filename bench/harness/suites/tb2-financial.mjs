@@ -30,7 +30,7 @@ function taskDir(cacheRoot) {
     const dir = path.join(cacheRoot, `tb2-${COMMIT.slice(0, 12)}`)
     const task = path.join(dir, TASK)
     if (fs.existsSync(path.join(task, 'tests', 'test_outputs.py'))) return task
-    fs.rmSync(dir, { recursive: true, force: true })
+    if (fs.existsSync(dir)) throw new Error(`incomplete benchmark cache already exists: ${dir}`)
     fs.mkdirSync(path.dirname(dir), { recursive: true })
     const git = (args, cwd) => {
       // exFAT records no owner: safe.directory, scoped to this command.
@@ -74,8 +74,7 @@ export function createSuite({ cacheRoot }) {
     },
     async check(ws) {
       const graderDir = `${ws}.grader`
-      fs.rmSync(graderDir, { recursive: true, force: true })
-      fs.mkdirSync(graderDir, { recursive: true })
+      fs.mkdirSync(graderDir, { recursive: false })
       const root = ws.replace(/\\/g, '/')
       const tests = fs.readFileSync(path.join(task, 'tests', 'test_outputs.py'), 'utf8').replaceAll('"/app/', `"${root}/`)
       const testFile = path.join(graderDir, 'test_outputs.py')

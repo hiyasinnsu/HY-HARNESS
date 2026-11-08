@@ -27,6 +27,7 @@ test('usageOf restores totals, cache and the last step after a restart', () => {
     outputTokens: 10,
     cacheHitTokens: 80,
     cacheMissTokens: 140,
+    cacheUsageComplete: true,
     lastInputTokens: 120,
     lastOutputTokens: 5,
     lastCacheHitTokens: 80,
@@ -35,7 +36,7 @@ test('usageOf restores totals, cache and the last step after a restart', () => {
   assert.equal((usage.cacheHitTokens / (usage.cacheHitTokens + usage.cacheMissTokens) * 100).toFixed(2), '36.36')
 })
 
-test('usageOf treats a missing cache split as a full miss', () => {
+test('usageOf marks missing cache data as incomplete', () => {
   const usage = usageOf(
     [ev(1, 'step/end', { usage: { inputTokens: 42, outputTokens: 7 } })],
     'run-test',
@@ -43,4 +44,5 @@ test('usageOf treats a missing cache split as a full miss', () => {
   assert.equal(usage.inputTokens, 42)
   assert.equal(usage.cacheHitTokens, 0)
   assert.equal(usage.cacheMissTokens, 42)
+  assert.equal(usage.cacheUsageComplete, false)
 })

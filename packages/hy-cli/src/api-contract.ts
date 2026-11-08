@@ -75,6 +75,7 @@ export const API_ROUTES: readonly RouteContract[] = [
   { method: 'POST', path: '/api/sessions/:id/plan-mode', summary: 'Turn plan mode on or off.', request: { on: { type: 'boolean' } }, errors: [409] },
   { method: 'POST', path: '/api/sessions/:id/sandbox', summary: 'Switch this session sandbox mode (grants when confined).', request: { mode: { type: 'string', required: true } }, errors: [400, 403, 409] },
   { method: 'POST', path: '/api/sessions/:id/effort', summary: 'Set reasoning effort.', request: { effort: { type: 'string' } }, errors: [400] },
+  { method: 'POST', path: '/api/sessions/:id/work-mode', summary: 'Set the session work mode.', request: { mode: { type: 'string', required: true } }, errors: [400, 409] },
   { method: 'POST', path: '/api/sessions/:id/model', summary: 'Switch the session model.', request: { model: { type: 'string', required: true }, provider: { type: 'string' }, baseUrl: { type: 'string' } }, errors: [400] },
   { method: 'POST', path: '/api/sessions/:id/title', summary: 'Rename a chat.', request: { title: { type: 'string', required: true } }, errors: [400] },
   { method: 'POST', path: '/api/sessions/:id/title/generate', summary: 'Generate a chat name with the model (heuristic fallback).', request: { from: { type: 'string' } }, response: 'GeneratedTitle', errors: [409] },

@@ -277,6 +277,10 @@ HttpOnly `SameSite=Strict` cookie, and the Electron renderer is sandboxed with
 [docs/designs/desktop-gui.md](docs/designs/desktop-gui.md) for the architecture,
 API and security notes.
 
+### Work modes
+
+Choose **Fast** (default) or **Thorough** beside the composer. Fast focuses on essential checks and prompt delivery; Thorough examines relevant details and failure paths more carefully. In chat, use `/work-mode fast` or `/work-mode thorough`; when starting `hy run` or `hy chat`, use `--work-mode fast|thorough`. Changes take effect on the next turn and are restored when the session resumes. Work mode does not change permissions or the model.
+
 ### Model presets and API keys
 
 Open **Settings → Models** once. Register providers/models in the **Model

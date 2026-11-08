@@ -73,10 +73,15 @@ export function nativeToolDefs(ptc: boolean, objective: boolean, extras: PromptE
   const rich = extras.promptVariant === 'lean4'
   return offeredTools(ptc, allSpecs(extras), objective, promptFeatures(extras), extras.allowTools, extras.activeTools).map((t) => {
     const doc = rich ? RICH_TOOL_DOCS[t.name] : undefined
+    const sdk = t.name === 'run_code' && ptc
+      ? `\nInside run_code, use only this SDK (no require, import, fs, process or network):\n${renderSdk(allSpecs(extras), objective, promptFeatures(extras), extras.allowTools, extras.activeTools)}`
+      : ''
+    const params = doc ? withParamDocs(nativeParameters(t), doc.params) : nativeParameters(t)
+    const code = params.properties?.code
     return {
       name: t.name,
       description: doc?.description ?? t.description,
-      parameters: doc ? withParamDocs(nativeParameters(t), doc.params) : nativeParameters(t),
+      parameters: sdk && code ? { ...params, properties: { ...params.properties, code: { ...code, description: `${code.description ?? ''}${sdk}` } } } : params,
     }
   })
 }
@@ -97,10 +102,15 @@ export const SESSION_CONTEXT_CLOSE = '</hy_session_context>'
  * rewriting the system prompt: the request prefix stays byte-identical, so the
  * provider's prefix cache keeps the whole history (DSH "in-history" updates).
  */
-export function sessionContextBlock(parts: { date?: string; goal?: { objective: string }; sections?: readonly string[] }): string {
+export type WorkMode = 'fast' | 'thorough'
+
+export function sessionContextBlock(parts: { date?: string; goal?: { objective: string }; workMode?: WorkMode; sections?: readonly string[] }): string {
   const body = [
     'Current session context (it replaces any earlier hy_session_context block):',
     ...(parts.date ? [`Today is ${parts.date}.`] : []),
+    ...(parts.workMode ? [parts.workMode === 'fast'
+      ? 'Work mode: Fast. Keep the whole objective in view and make the smallest complete change. Check the essential requirements and their relevant failure paths in proportion to the risks, then deliver promptly. Never skip checks needed for safety or correctness, or claim more than was verified.'
+      : 'Work mode: Thorough. Work carefully through the whole objective and its details. Inspect connected behavior and edge cases, verify changes and relevant failure paths, and resolve defects before delivering. Prioritize checks that reveal distinct risks; repeat equivalent checks when variability or new evidence warrants it. Keep investigation proportional to the requirements and risks; deliver once the necessary checks are complete. Be honest about what was not verified; perfection cannot be guaranteed.'] : []),
     ...(parts.goal ? [goalPrompt(parts.goal)] : []),
     ...(parts.sections ?? []).filter(Boolean),
   ]
@@ -157,27 +167,11 @@ Private reasoning style: use a concise tone. Do not state uncertain points as ce
 Private reasoning style: use a concise tone.`
       : `You are HY-HARNESS, a careful autonomous coding agent. The workspace and this session's role are given at the end of these instructions.
 Private reasoning style: write your thinking in Japanese. Use a blunt, concise tone such as 「〜だ。〜する。〜が分かった。」. No polite forms, filler, or restating the request. Start with one sentence saying what you will do next.`
-  const header = `${opening}
-${
-  process.platform === 'win32'
-    ? 'Shell environment: Windows PowerShell. Use PowerShell syntax (Get-ChildItem, Select-String, Get-Content, Get-ChildItem -Recurse). Do not use Unix grep/head/find. The shell cwd is the workspace root; use a relative cwd or an absolute path inside the workspace, and quote paths with spaces.'
-    : 'Shell environment: POSIX shell. Use relative paths or absolute paths inside the workspace; quote paths with spaces.'
-}`
-
-  // Point at the search tools the model actually has: inside run_code with
-  // PTC, the wire tools otherwise (run_code is not offered without PTC).
-  const searchHint = ptc ? 'tools.search.glob / tools.search.grep inside run_code' : 'search_glob / search_grep'
-  const common = `Read a file before editing it. apply_patch rejects stale or unread files.
-Prefer small, verifiable steps. Inspect shell output before continuing.
+  const header = opening
+  const common = `Prefer small, verifiable steps.
 Never claim success without checking the result.
-Do not try to read or write outside the workspace.
-If a path is missing, locate it with ${searchHint} instead of guessing similar paths.
-For a large edit, split it into several apply_patch calls; do not emit an entire large file in one response.
-To create or replace a whole file, give apply_patch file + content; to edit part of a file, a unified diff in patch.`
+Do not try to read or write outside the workspace.`
   if (extras.native) {
-    const sdk = ptc
-      ? `\nInside run_code, use only this SDK (no require, import, fs, process or network):\n${renderSdk(allSpecs(extras), objective, features, extras.allowTools)}\n`
-      : ''
     const finish = objective
       ? 'Finish only by calling claim_complete with what changed and how you verified it; a reply without a tool call does not finish this run.'
       : extras.finalSchema
@@ -189,7 +183,7 @@ To create or replace a whole file, give apply_patch file + content; to edit part
       // the shell line, read-before-edit, where to search, how to patch.
       const ending = objective || extras.finalSchema ? `\n${finish}` : ''
       return `You are HY-HARNESS, an autonomous coding agent.
-Private reasoning style: use a concise tone. Do not state uncertain points as certain; present them as possibilities.${sdk}
+Private reasoning style: use a concise tone. Do not state uncertain points as certain; present them as possibilities.
 Tool use:
 Make independent calls together, at the same time.
 Do not try to read or write outside the workspace.
@@ -198,7 +192,7 @@ Read the user's intent and its background before acting.
 Do not settle for a partial solution.
 To continue working, your reply must contain a tool call. A reply without a tool call is your final answer: make it self-contained, and do not end it with a plan or an offer. Ask the user only when a decision is genuinely theirs; say what you need decided and why (use ask_user when available).
 In the final answer, lead with the conclusion; if you did work, summarize clearly what changed and what you verified.
-Do not implement a lot at once; proceed in small, verifiable steps. Inspect shell output before continuing.${ending}
+Do not implement a lot at once; proceed in small, verifiable steps.${ending}
 ${sessionPart}`
     }
     if (extras.promptVariant === 'lean3') {
@@ -207,47 +201,34 @@ ${sessionPart}`
       // and the shell / patch details the tool descriptions already carry
       // are dropped.
       const ending = objective || extras.finalSchema ? `\n${finish}` : ''
-      const shell =
-        process.platform === 'win32'
-          ? 'Shell environment: Windows PowerShell is available when no tool fits the purpose. Do not use Unix grep/head/find.'
-          : 'Shell environment: a POSIX shell is available when no tool fits the purpose.'
       return `You are HY-HARNESS, an autonomous coding agent.
 Private reasoning style: use a concise tone. Do not state uncertain points as certain; present them as possibilities.
-${shell}${sdk}
 Tool use:
 Make independent calls together, at the same time.
-Read a file before editing it.
-If a path is missing, locate it with ${searchHint}, not the shell.
-For a large edit, split it into several edit_file / apply_patch calls; do not emit an entire large file in one response.
-To create or replace a whole file, give apply_patch file + content.
 Do not try to read or write outside the workspace.
 Rules:
 Read the user's intent and its background before acting.
 Do not settle for a partial solution.
 To continue working, your reply must contain a tool call. A reply without a tool call is your final answer: make it self-contained, and do not end it with a plan or an offer. Ask the user only when a decision is genuinely theirs; say what you need decided and why (use ask_user when available).
 In the final answer, lead with the conclusion; if you did work, summarize clearly what changed and what you verified.
-Do not implement a lot at once; proceed in small, verifiable steps. Inspect shell output before continuing.${ending}
+Do not implement a lot at once; proceed in small, verifiable steps.${ending}
 ${sessionPart}`
     }
     if (lean2) {
       // Objective runs and structured output keep their own ending rule.
       const ending = objective || extras.finalSchema ? `\n${finish}` : ''
-      return `${header}${sdk}
+      return `${header}
 Rules:
 Use the provided tools through function calls; call several at once when they are independent.
 Read the user's intent and its background before acting.
 Do not settle for a partial solution.
 To continue working, your reply must contain a tool call. A reply without a tool call is your final answer: make it self-contained, and do not end it with a plan or an offer. Ask the user only when a decision is genuinely theirs; say what you need decided and why (use ask_user when available).
 In the final answer, lead with the conclusion; if you did work, summarize clearly what changed and what you verified.${ending}
-Read a file before editing it. apply_patch rejects stale or unread files.
-Prefer small, verifiable steps. Inspect shell output before continuing.
+Prefer small, verifiable steps.
 Do not try to read or write outside the workspace.
-If a path is missing, locate it with ${searchHint}.
-For a large edit, split it into several apply_patch calls; do not emit an entire large file in one response.
-To create or replace a whole file, give apply_patch file + content; to edit part of a file, a unified diff in patch.
 ${sessionPart}`
     }
-    return `${header}${sdk}
+    return `${header}
 Rules:
 Use the provided tools through function calls; call several at once when they are independent.
 Call tools only through function calls; never write JSON such as {"tool":...} or {"calls":[...]} in the body. Write plain prose in the body, and only for the final answer.
@@ -257,6 +238,8 @@ ${finish}
 ${common}
 ${sessionPart}`
   }
+  // Text-only providers have no separate tool-definition channel, so their
+  // tool descriptions remain in the dedicated tool section of this prompt.
   return `${header}
 ${renderToolPrompt(ptc, allSpecs(extras), objective, features, extras.allowTools, extras.activeTools)}
 
@@ -270,14 +253,6 @@ Rules:
         ? `{"final": <JSON value of type ${jsonSchemaToTs(extras.finalSchema)}>}`
         : '{"final":"<short summary of what changed and what you verified>"}'
   }
-4. Read a file before editing it. apply_patch rejects stale or unread files.
-5. Prefer small, verifiable steps. Inspect shell output before continuing.
-6. Never claim success without checking the result.
-7. Do not try to read or write outside the workspace.
-8. To create or replace a whole file, prefer:
-   {"tool":"apply_patch","args":{"file":"NOTES.md","content":"line 1\\nline 2\\n"}}
-   To edit part of a file, use a unified diff in "patch".
-9. If a path is missing, use ${searchHint}; do not guess similar paths.
-10. For a large edit, split it into several apply_patch calls; do not emit a whole large file in one response.
+4. ${common.replaceAll('\n', '\n   ')}
 ${sessionPart}`
 }

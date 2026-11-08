@@ -9,11 +9,13 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::os::windows::io::AsRawHandle;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::job_object::JobHandle;
 use hy_protocol::{
     ShellCloseResult, ShellOpenParams, ShellOpenResult, ShellReadResult, ShellWriteResult,
 };
@@ -48,6 +50,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct Shell {
     child: Child,
+    job_object: JobHandle,
     stdin: ChildStdin,
     buffer: Arc<Mutex<Vec<u8>>>,
     eof: Arc<AtomicBool>,
@@ -56,6 +59,15 @@ struct Shell {
     /// Buffer length when the command was written (everything before is old).
     from: usize,
     seq: u64,
+}
+
+impl Shell {
+    fn terminate(&mut self) {
+        self.job_object.terminate();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.eof.store(true, Ordering::SeqCst);
+    }
 }
 
 pub struct ShellSpec {
@@ -123,6 +135,20 @@ impl ShellManager {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        let job_object = match JobHandle::new() {
+            Ok(job) => job,
+            Err(error) => {
+                return ShellOpenResult {
+                    shell_id: None,
+                    persistent: false,
+                    shell: shell_name,
+                    cwd,
+                    gap: Some(format!(
+                        "could not create the persistent shell's job: {error}"
+                    )),
+                };
+            }
+        };
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -135,6 +161,20 @@ impl ShellManager {
                 };
             }
         };
+        // The shell waits for stdin, so it cannot start commands before assignment.
+        if let Err(error) = job_object.assign_handle(child.as_raw_handle()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return ShellOpenResult {
+                shell_id: None,
+                persistent: false,
+                shell: shell_name,
+                cwd,
+                gap: Some(format!(
+                    "could not contain the persistent shell's process tree: {error}"
+                )),
+            };
+        }
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => {
@@ -185,6 +225,7 @@ impl ShellManager {
         let id = format!("shell-{}", self.next.fetch_add(1, Ordering::Relaxed));
         let shell = Shell {
             child,
+            job_object,
             stdin,
             buffer,
             eof,
@@ -313,8 +354,7 @@ impl ShellManager {
                     String::from_utf8_lossy(&buffer[shell.from.min(buffer.len())..]).to_string();
                 drop(buffer);
                 shell.pending = None;
-                let _ = shell.child.kill();
-                shell.eof.store(true, Ordering::SeqCst);
+                shell.terminate();
                 return Ok(ShellReadResult {
                     data: body,
                     eof: true,
@@ -336,10 +376,7 @@ impl ShellManager {
         match removed {
             Some(shell) => {
                 if let Ok(mut shell) = shell.lock() {
-                    let _ = shell.stdin.write_all(b"__HY_EXIT__\n");
-                    let _ = shell.stdin.flush();
-                    let _ = shell.child.kill();
-                    let _ = shell.child.wait();
+                    shell.terminate();
                 }
                 ShellCloseResult { closed: true }
             }
@@ -436,6 +473,51 @@ mod tests {
         assert_eq!(tail_on_char_boundary(text, 6), "ああ");
         assert_eq!(tail_on_char_boundary(text, 100), text);
         assert_eq!(tail_on_char_boundary(text, 0), "");
+    }
+
+    #[test]
+    fn close_and_timeout_kill_the_shells_children() -> Result<(), Box<dyn std::error::Error>> {
+        let manager = ShellManager::new();
+        let mut dirs = Vec::new();
+        for timeout in [false, true] {
+            let dir = tempfile::tempdir()?;
+            let opened = manager.open(
+                &ShellOpenParams {
+                    run_id: None,
+                    cwd: None,
+                    sandbox_mode: Some("unconfined".into()),
+                    env: Default::default(),
+                },
+                ShellSpec {
+                    program: "powershell.exe".into(),
+                    cwd: dir.path().to_path_buf(),
+                    env: std::env::vars().collect(),
+                },
+            );
+            let id = opened
+                .shell_id
+                .ok_or_else(|| format!("no shell: {:?}", opened.gap))?;
+            manager.write(&id, "cmd /c \"echo started>started & ping -n 4 127.0.0.1 >nul & echo survived>survived\"")?;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !dir.path().join("started").exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(dir.path().join("started").exists(), "child never started");
+            if timeout {
+                assert!(manager.read(&id, Some(20), None)?.timed_out);
+            } else {
+                assert!(manager.close(&id).closed);
+            }
+            dirs.push(dir);
+        }
+        std::thread::sleep(Duration::from_millis(3_500));
+        for dir in dirs {
+            assert!(
+                !dir.path().join("survived").exists(),
+                "child wrote after termination"
+            );
+        }
+        Ok(())
     }
 
     #[cfg(windows)]

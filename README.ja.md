@@ -61,6 +61,8 @@ node packages\hy-cli\dist\main.js web --cwd C:\work\my-repo   # ブラウザで�
 | `hy config dump\|schema` | 解決済み設定（秘密は伏字）と JSON Schema |
 | `hy secret set\|list\|remove` | API キーを DPAPI で保存（値は stdin から読む。`roles.*.apiKeySecret` で参照） |
 
+作業モードは GUI の入力欄で「迅速」（既定）と「丁寧」を切り替えられます。迅速は必要な確認を行って早く提出し、丁寧は関連する詳細や失敗経路まで慎重に確認します。対話中は `/work-mode fast` または `/work-mode thorough`、開始時は `hy run` / `hy chat` に `--work-mode fast|thorough` を指定できます。変更は次のターンに反映され、セッション再開時にも復元されます。権限やモデルは変更されません。
+
 ## 自動更新
 
 リリースは HTTPS の JSON フィード（`version` / `url` / `sha256` / `signature` /

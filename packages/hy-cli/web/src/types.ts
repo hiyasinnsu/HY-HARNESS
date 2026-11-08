@@ -320,6 +320,7 @@ export interface SessionState {
   busy: boolean
   turns: number
   planMode: boolean
+  workMode?: 'fast' | 'thorough'
   /** WP-12: the session's live sandbox mode. */
   sandboxMode?: 'read-only' | 'workspace-write' | 'low-integrity' | 'unconfined'
   goal?: string | null
@@ -330,6 +331,7 @@ export interface SessionState {
     outputTokens: number
     cacheHitTokens?: number
     cacheMissTokens?: number
+    cacheUsageComplete?: boolean
     lastInputTokens?: number
     lastOutputTokens?: number
     lastCacheHitTokens?: number

@@ -297,7 +297,7 @@ export class ExecRpcClient {
     })
   }
 
-  exec(params: ExecCommandParams, signal?: AbortSignal, timeoutMs = 120_000): Promise<ExecResult> {
+  exec(params: ExecCommandParams, signal?: AbortSignal, timeoutMs = Math.max(120_000, (params.foregroundWaitMs ?? 5_000) + 30_000)): Promise<ExecResult> {
     return this.request<ExecResult>('exec/command', params, timeoutMs, signal)
   }
 

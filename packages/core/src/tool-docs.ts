@@ -57,9 +57,10 @@ export const RICH_TOOL_DOCS: Readonly<Record<string, ToolDoc>> = {
   },
   shell: {
     description: `Run one command in ${WINDOWS ? 'Windows PowerShell (PowerShell syntax; Unix grep/head/find do not exist)' : 'the shell'} and return \`status\`, \`exitCode\`, \`stdout\` and \`stderr\`. ` +
-      'Use it to build, test and run programs; use read_file, search_glob and search_grep to read and find files. ' +
+      'Use it to build, test and run programs; use read_file, search_glob and search_grep to read and find files. Read an existing file before changing it. ' +
       'Each call is a fresh process: `cd` and variables do not carry over, so pass `cwd` instead. Quote paths that contain spaces. ' +
-      'A non-zero exitCode is a failure: read the output and find the cause before moving on. ' +
+      (WINDOWS ? 'For multiline Python, write a .py file then run it; Bash heredocs (`<<`) do not work. When combining different object types in one command, format each table explicitly (`Format-Table -AutoSize`) or use `ConvertTo-Json` so columns are not lost. ' : '') +
+      'A non-zero exitCode is a failure: read the output and find the cause before moving on. Chained commands can report only the last command\'s status, so inspect intermediate output or run critical checks separately. ' +
       'The call waits up to foregroundWaitMs (default 5,000 ms); a command still running then keeps going as a background job and the result is `status: "backgrounded"` with a `jobId`, ' +
       'so give builds and test suites a longer foregroundWaitMs (for example 600000). ' +
       'Commands run in the session sandbox; in workspace-write mode they can write only inside the workspace. ' +
@@ -79,10 +80,11 @@ export const RICH_TOOL_DOCS: Readonly<Record<string, ToolDoc>> = {
     description:
       'Change files, in one of two forms. ' +
       '(1) `patch`: a unified diff with `--- a/path` and `+++ b/path` headers and `@@ -start,count +start,count @@` hunks (line numbers required) with a few unchanged context lines; ' +
+      '`*** Begin Patch` syntax is not supported; use a unified diff or file + content. ' +
       'one patch may change several files, and a new file uses `--- /dev/null`. ' +
       '(2) `file` + `content`: create the file, or replace it with the complete new content. ' +
       'Read an existing file first: one you have not read, or that changed since you read it, is refused. ' +
-      'For a small targeted change edit_file is simpler. Split a large edit into several calls; do not send a whole large file in one response. ' +
+      'For a small targeted change edit_file is simpler when available. Split a large edit into several calls; do not send a whole large file in one response. ' +
       'In an added root only form (2) works, with `root`.',
     params: {
       patch: 'Unified diff (form 1).',

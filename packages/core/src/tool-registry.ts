@@ -85,7 +85,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     sdk: 'applyPatch',
     wire: true,
     readOnly: false,
-    description: 'Diff, or file + content. Read existing files first. Added roots: whole-file content with root.',
+    description: 'Unified diff with ---/+++ file headers and numbered @@ hunks, or file + content. The *** Begin Patch format is not supported. Read existing files first. Split large edits into smaller calls. Added roots: whole-file content with root.',
     input: {
       anyOf: [
         obj({ patch: str() }, ['patch']),
@@ -105,7 +105,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     wire: true,
     readOnly: false,
     description:
-      'Run a command; after foregroundWaitMs it becomes a job. root: workspace root ID (default main). Windows: PowerShell, not grep/head/find.',
+      'Run a command in the platform shell. On Windows use PowerShell, not Bash; avoid Unix grep/head/find and Bash heredocs. Write multiline Python to a .py file. Format mixed tables separately with Format-Table -AutoSize or ConvertTo-Json. ' +
+      'The default cwd is the workspace root (or the persistent session cwd); pass cwd within the selected root and quote paths with spaces. Read an existing file before changing it. Inspect exitCode and output: chained commands may report only the last command\'s status. After foregroundWaitMs it becomes a job. root selects the workspace root (default main).',
     input: obj(
       { command: str(), root: str(), cwd: str(), foregroundWaitMs: int(), hardTimeoutMs: int(), persistent: bool, stdinPipe: bool, tty: bool },
       ['command'],

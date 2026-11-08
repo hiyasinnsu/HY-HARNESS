@@ -50,24 +50,31 @@ function sleepSync(ms: number): void {
 /**
  * Runs `write` while holding `<file>.lock`, so the GUI, the CLI and automation
  * appending to the same log take turns. A lock older than 10 s belongs to a
- * crashed writer and is taken over; after 5 s of waiting the write goes ahead
- * without it rather than losing the event.
+ * crashed writer and is taken over. Failure to acquire the lock is an error:
+ * writing without it can duplicate seq and hide events from the search index.
  */
+/**
+ * Lock timings. The wait is longer than the stale-lock takeover, so a lock
+ * left by a crashed writer is always taken over before a writer gives up.
+ * Exposed for tests only.
+ */
+export const sessionLogLockTiming = { staleMs: 10_000, waitMs: 15_000 }
+
 function withFileLock<T>(file: string, write: () => T): T {
   const lock = `${file}.lock`
-  const deadline = Date.now() + 5_000
+  const deadline = Date.now() + sessionLogLockTiming.waitMs
   let fd: number | undefined
   while (fd === undefined) {
     try {
       fd = fs.openSync(lock, 'wx')
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') break
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
       try {
-        if (Date.now() - fs.statSync(lock).mtimeMs > 10_000) fs.rmSync(lock, { force: true })
+        if (Date.now() - fs.statSync(lock).mtimeMs > sessionLogLockTiming.staleMs) fs.rmSync(lock, { force: true })
       } catch {
         // Released meanwhile.
       }
-      if (Date.now() > deadline) break
+      if (Date.now() > deadline) throw new Error(`timed out acquiring session log lock: ${lock}`)
       sleepSync(2)
     }
   }
@@ -95,24 +102,28 @@ function tailState(file: string): { seq: number; partial: boolean } {
   try {
     const size = fs.fstatSync(fd).size
     if (size === 0) return { seq: 0, partial: false }
-    const length = Math.min(size, 256 * 1024)
-    const buffer = Buffer.alloc(length)
-    fs.readSync(fd, buffer, 0, length, size - length)
-    const text = buffer.toString('utf8')
-    const partial = !text.endsWith('\n')
-    const lines = text.split('\n')
-    if (partial) lines.pop()
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i]!.trim()
-      if (!line) continue
-      try {
-        const seq = (JSON.parse(line) as { seq?: unknown }).seq
-        if (typeof seq === 'number') return { seq, partial }
-      } catch {
-        // The cut first line of the tail window, or a damaged line.
+    let length = Math.min(size, 256 * 1024)
+    for (;;) {
+      const buffer = Buffer.alloc(length)
+      fs.readSync(fd, buffer, 0, length, size - length)
+      const text = buffer.toString('utf8')
+      const partial = !text.endsWith('\n')
+      const lines = text.split('\n')
+      if (partial) lines.pop()
+      // The window may begin inside an event; only parse complete lines.
+      for (let i = lines.length - 1; i >= (length < size ? 1 : 0); i--) {
+        const line = lines[i]!.trim()
+        if (!line) continue
+        try {
+          const seq = (JSON.parse(line) as { seq?: unknown }).seq
+          if (typeof seq === 'number') return { seq, partial }
+        } catch {
+          // A damaged complete line can precede the next valid event.
+        }
       }
+      if (length === size) return { seq: 0, partial }
+      length = Math.min(size, length * 2)
     }
-    return { seq: 0, partial }
   } finally {
     fs.closeSync(fd)
   }

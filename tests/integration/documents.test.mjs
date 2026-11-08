@@ -41,8 +41,8 @@ async function runServer(dir, env = {}) {
   for (const [key, value] of Object.entries(env)) process.env[key] = value
   const handle = await startWebServer({ overrides: { cwd: dir, mock: true }, port: 0, open: false, log: () => {} })
   const auth = { Authorization: `Bearer ${handle.token}` }
-  const request = async (route) => {
-    const response = await fetch(new URL(route, handle.url), { headers: auth })
+  const request = async (route, init = {}) => {
+    const response = await fetch(new URL(route, handle.url), { ...init, headers: { ...auth, ...(init.body ? { 'Content-Type': 'application/json' } : {}) } })
     return { status: response.status, headers: response.headers, body: Buffer.from(await response.arrayBuffer()) }
   }
   const created = await fetch(new URL('/api/sessions', handle.url), {
@@ -92,6 +92,39 @@ test('images and PDFs preview as they are; Office says when it cannot convert', 
     assert.equal(outside.status, 400)
     const unsupported = await ctx.preview('README.md')
     assert.equal(unsupported.status, 415)
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('document tools distinguish metadata-only previews and explain invalid present arguments', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 180_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir)
+  try {
+    const call = async (name, args) => {
+      const route = `/api/sessions/${encodeURIComponent(ctx.session)}`
+      const started = await ctx.request(`${route}/turn`, { method: 'POST', body: JSON.stringify({ message: `CALL ${name} ${JSON.stringify(args)}` }) })
+      assert.equal(started.status, 202, started.body.toString())
+      const deadline = Date.now() + 60_000
+      while (Date.now() < deadline) {
+        const snapshot = JSON.parse((await ctx.request(route)).body.toString())
+        if (snapshot.state?.busy === false) return snapshot.entries.filter(e => e.kind === 'tool' && e.name === name).at(-1)
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      throw new Error('document tool timed out')
+    }
+    const preview = await call('document_preview', { path: 'docs/report.pdf' })
+    assert.notEqual(preview.isError, true, preview.output)
+    assert.deepEqual(JSON.parse(preview.output).contentAttached, false)
+    assert.equal(JSON.parse(preview.output).kind, 'pdf')
+    const invalid = await call('present', {})
+    assert.equal(invalid.isError, true)
+    assert.match(invalid.output, /files.*path: string/)
+    assert.match(invalid.output, /inside "args", not beside "tool"/)
+    const valid = await call('present', { files: [{ path: 'docs/report.pdf' }] })
+    assert.notEqual(valid.isError, true, valid.output)
+    assert.equal(JSON.parse(valid.output).count, 1)
   } finally {
     await ctx.close()
     fs.rmSync(dir, { recursive: true, force: true })

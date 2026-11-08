@@ -11,17 +11,20 @@ import path from 'node:path'
 import zlib from 'node:zlib'
 
 function summarize(steps, toolCalls, turns, modelWaitMs, extra = {}) {
-  const input = steps.reduce((a, s) => a + s.input, 0)
-  const hit = steps.reduce((a, s) => a + s.hit, 0)
+  const input = steps.every((s) => typeof s.input === 'number') ? steps.reduce((a, s) => a + s.input, 0) : null
+  const reported = steps.filter((s) => typeof s.hit === 'number').length
+  const hit = steps.length > 0 && reported === steps.length ? steps.reduce((a, s) => a + s.hit, 0) : null
   const output = steps.reduce((a, s) => a + s.output, 0)
   const activeMs = turns.reduce((a, t) => a + Math.max(0, t.end - t.start), 0)
   return {
     requests: steps.length,
     input,
     hit,
-    miss: input - hit,
+    miss: input !== null && hit !== null ? input - hit : null,
     output,
-    hitRate: input > 0 ? Math.round((hit / input) * 10_000) / 100 : 0,
+    hitRate: input !== null && input > 0 && hit !== null ? Math.round((hit / input) * 10_000) / 100 : null,
+    cacheReportedSteps: reported,
+    cacheTotalSteps: steps.length,
     toolCalls,
     turns: turns.length,
     turnMs: turns.map((t) => t.end - t.start),
@@ -75,7 +78,7 @@ export function readHySession(stateDir) {
     const main = !String(e.runId ?? '').includes('.sub')
     if (e.type === 'step/end') {
       const u = e.payload?.usage ?? {}
-      steps.push({ input: u.inputTokens ?? 0, hit: u.cacheHitTokens ?? 0, output: u.outputTokens ?? 0 })
+      steps.push({ input: u.inputTokens ?? 0, hit: typeof u.cacheHitTokens === 'number' ? u.cacheHitTokens : null, output: u.outputTokens ?? 0 })
       // latencyMs is logged since 2026-11-07; older logs: since the previous event.
       if (main) modelWaitMs += typeof e.payload?.latencyMs === 'number' ? e.payload.latencyMs : Math.max(0, e.ts - lastTs)
     } else if (e.type === 'tool/result') {
@@ -172,8 +175,11 @@ export function readDshSession(sessionId) {
           stepStart = undefined
         }
         const u = e.data.usage
-        const hit = u.cacheReadTokens ?? 0
-        steps.push({ input: (u.inputTokens ?? 0) + hit + (u.cacheWriteTokens ?? 0), hit, output: u.outputTokens ?? 0 })
+        const output = u.outputTokens ?? 0
+        const uncached = (u.inputTokens ?? 0) + (u.cacheWriteTokens ?? 0)
+        const hit = typeof u.cacheReadTokens === 'number' ? u.cacheReadTokens : typeof u.totalTokens === 'number' && u.totalTokens === uncached + output ? 0 : null
+        const input = hit !== null ? uncached + hit : typeof u.totalTokens === 'number' ? Math.max(0, u.totalTokens - output) : null
+        steps.push({ input, hit, output })
       } else if (e.type === 'tool/call') {
         toolCalls++
         names.set(e.data?.callId, String(e.data?.name ?? ''))

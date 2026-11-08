@@ -58,8 +58,13 @@ impl JobHandle {
                 "child has already been reaped",
             ));
         };
-        // SAFETY: the child handle is valid for the lifetime of `child`.
-        let ok = unsafe { AssignProcessToJobObject(self.handle, handle as HANDLE) };
+        self.assign_handle(handle as HANDLE)
+    }
+
+    /// Assigns a live process handle (also used by the persistent std::process child).
+    pub fn assign_handle(&self, handle: HANDLE) -> io::Result<()> {
+        // SAFETY: the caller owns the live process whose handle was supplied.
+        let ok = unsafe { AssignProcessToJobObject(self.handle, handle) };
         if ok == 0 {
             Err(io::Error::last_os_error())
         } else {

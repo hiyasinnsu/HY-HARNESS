@@ -106,6 +106,33 @@ async function turn(ctx, runId, message, body = {}) {
   return snapshot(ctx, runId)
 }
 
+test('work mode switches, validates input and survives a server restart', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 120_000, concurrency: false }, async () => {
+  const dir = fixture()
+  let ctx = await runServer(dir)
+  try {
+    const id = await newSession(ctx)
+    assert.equal((await snapshot(ctx, id)).state.workMode, 'fast')
+    const url = `/api/sessions/${encodeURIComponent(id)}/work-mode`
+    assert.equal((await ctx.request(url, { method: 'POST', body: JSON.stringify({ mode: 'invalid' }) })).status, 400)
+    assert.equal((await ctx.request(url, { method: 'POST', body: JSON.stringify({ mode: 'thorough' }) })).status, 200)
+    assert.equal((await snapshot(ctx, id)).state.workMode, 'thorough')
+    await turn(ctx, id, 'CALL delegate {"task":"SAY subagent ok","readOnly":true}')
+    const events = readEvents(sessionLogPath(ctx.handle.config.stateDir))
+    assert.ok(events.some(e => e.runId.startsWith(`${id}.sub`) && e.type === 'context/update' && e.payload.content.includes('Work mode: Thorough')))
+    const finished = await turn(ctx, id, 'SAY hello')
+    assert.equal(finished.state.usage.cacheUsageComplete, false)
+    await ctx.close()
+    ctx = await runServer(dir)
+    assert.equal((await snapshot(ctx, id)).state.workMode, 'thorough')
+    assert.equal((await snapshot(ctx, id)).state.usage.cacheUsageComplete, false)
+    assert.equal((await ctx.request(url, { method: 'POST', body: JSON.stringify({ mode: 'fast' }) })).status, 200)
+    assert.equal((await snapshot(ctx, id)).state.workMode, 'fast')
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('web GUI: auth, bootstrap, files and settings', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
   const dir = fixture()
   const ctx = await runServer(dir)

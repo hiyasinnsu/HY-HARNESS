@@ -24,7 +24,12 @@ test('plugins: valid tools load, invalid ones are reported, tools run and are of
     fs.writeFileSync(path.join(dir, 'a.txt'), 'one two  three\nfour')
     const tools = new ToolRuntime({} as never, dir, undefined, false, { plugins: loaded.tools })
     assert.deepEqual(await tools.execute('word_count', { path: 'a.txt' }), { words: 4 })
-    await assert.rejects(tools.execute('word_count', {}), /invalid arguments for word_count: args\.path is required/)
+    await assert.rejects(tools.execute('word_count', {}), (error: Error) => {
+      assert.match(error.message, /invalid arguments for word_count: args\.path is required/)
+      assert.match(error.message, /Expected arguments: \{ path: string \}/)
+      assert.match(error.message, /inside "args", not beside "tool"/)
+      return true
+    })
     assert.equal(tools.isReadOnly('word_count'), true)
 
     const extraTools = [...loaded.tools.values()].map((t) => t.spec)

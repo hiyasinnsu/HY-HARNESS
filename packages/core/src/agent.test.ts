@@ -84,6 +84,69 @@ test('identical consecutive tool calls get a reminder (RepeatToolReminderGuard)'
   }
 })
 
+test('switching work mode appends context while preserving the cached conversation prefix', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-work-mode-'))
+  try {
+    let mode: 'fast' | 'thorough' = 'fast'
+    const requests: Array<Array<{ role: string; content: string }>> = []
+    const provider = { name: 'scripted', complete: async (messages: Array<{ role: string; content: string }>) => {
+      requests.push(messages.map((m) => ({ role: m.role, content: m.content })))
+      return { content: '{"final":"done"}', usage: { inputTokens: 0, outputTokens: 0 } }
+    } }
+    const agent = new Agent({ provider, tools: new ToolRuntime({} as never, dir), sessionLog: new SessionLog(path.join(dir, 'log.jsonl')), workspaceRoot: dir, workMode: () => mode })
+    const first = await agent.run('first')
+    mode = 'thorough'
+    await agent.run('second', first.history)
+    assert.match(requests[0]!.at(-1)!.content, /Work mode: Fast/)
+    assert.equal(requests[1]![0]!.content, requests[0]![0]!.content)
+    assert.deepEqual(requests[1]![1], requests[0]![1])
+    assert.match(requests[1]!.at(-1)!.content, /Work mode: Thorough/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('switching work mode preserves native tools, including the PTC SDK', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-work-mode-native-'))
+  assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir()) + path.sep))
+  try {
+    let mode: 'fast' | 'thorough' = 'fast'
+    const requests: Array<{ messages: Array<{ role: string; content: string }>; tools: unknown }> = []
+    const provider = { name: 'scripted', complete: async (messages: Array<{ role: string; content: string }>, options: { tools?: unknown }) => {
+      requests.push({ messages: messages.map(m => ({ role: m.role, content: m.content })), tools: options.tools })
+      return { content: 'done', usage: { inputTokens: 1, outputTokens: 1 } }
+    } }
+    const agent = new Agent({ provider, tools: new ToolRuntime({} as never, dir), sessionLog: new SessionLog(path.join(dir, 'log.jsonl')), workspaceRoot: dir, nativeTools: true, ptc: true, workMode: () => mode })
+    const first = await agent.run('first')
+    mode = 'thorough'
+    await agent.run('second', first.history)
+    assert.deepEqual(requests[1]!.tools, requests[0]!.tools)
+    assert.deepEqual(requests[1]!.messages.slice(0, requests[0]!.messages.length), requests[0]!.messages)
+    assert.match(requests[1]!.messages.at(-1)!.content, /Work mode: Thorough/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('turn usage does not claim complete cache totals when one step omits them', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-cache-usage-'))
+  assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir()) + path.sep))
+  try {
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'x')
+    let step = 0
+    const provider = { name: 'scripted', complete: async () => ++step === 1
+      ? { content: JSON.stringify({ tool: 'read_file', args: { path: 'a.txt' } }), usage: { inputTokens: 10, outputTokens: 1, cacheHitTokens: 0, cacheMissTokens: 10 } }
+      : { content: '{"final":"done"}', usage: { inputTokens: 20, outputTokens: 2 } } }
+    const agent = new Agent({ provider, tools: new ToolRuntime({} as never, dir), sessionLog: new SessionLog(path.join(dir, 'log.jsonl')), workspaceRoot: dir })
+    const result = await agent.run('go')
+    assert.equal(result.usage.inputTokens, 30)
+    assert.equal(result.usage.cacheHitTokens, undefined)
+    assert.equal(result.usage.cacheMissTokens, undefined)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('prefix cache: one system prompt per session; context changes are appended; the rebuilt history matches what was sent', async () => {
   const { Ledger } = await import('./ledger.js')
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-prefix-'))
@@ -350,6 +413,47 @@ test('a model that rejects tools falls back to the text protocol; text mode acce
     const results = r.history.find((m) => m.content.startsWith('TOOL'))!.content
     assert.match(results, /TOOL RESULT \(read_file\)[\s\S]*TOOL ERROR \(read_file\)/)
     assert.equal(log.events().filter((e) => e.type === 'native-tools/off').length, 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a reply cut off for repeating itself is retried once; the history replays exactly', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const { ToolRuntime } = await import('./tools.js')
+  const { SessionLog } = await import('./session-log.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-repetition-'))
+  try {
+    const seen: Array<Array<{ role: string; content: string }>> = []
+    const replies = [
+      { content: '{"tool":"shell","args":{"command":"dir"}}]}}', degenerate: 'repetition' as const, usage: { inputTokens: 0, outputTokens: 9 } },
+      { content: 'All done.', usage: { inputTokens: 1, outputTokens: 1 } },
+    ]
+    const provider = {
+      name: 'looping',
+      complete: async (messages: Array<{ role: string; content: string }>) => {
+        seen.push(messages.map((m) => ({ role: m.role, content: m.content })))
+        return replies.shift()!
+      },
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-r')
+    const r = await new Agent({ provider, tools: new ToolRuntime({} as never, dir), sessionLog: log, workspaceRoot: dir, nativeTools: true }).run('list files')
+    assert.equal(r.outcome, 'final')
+    assert.equal(r.final, 'All done.')
+    const retries = log.events().filter((e) => e.type === 'turn/retry')
+    assert.deepEqual(retries.map((e) => (e.payload as { reason: string }).reason), ['repetition'])
+    const second = seen[1]!
+    assert.equal(second.at(-2)!.content, '{"tool":"shell","args":{"command":"dir"}}]}}')
+    assert.match(second.at(-1)!.content, /fell into a loop repeating the same characters/)
+    // A resumed chat sends the same history the second request saw.
+    const rebuilt = rebuildHistory(log.events(), 'run-r')
+    assert.deepEqual(
+      rebuilt.slice(0, second.length - 1).map((m) => m.content),
+      second.slice(1).map((m) => m.content),
+    )
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

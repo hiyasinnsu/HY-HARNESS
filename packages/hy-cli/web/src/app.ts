@@ -131,6 +131,7 @@ interface State {
   busy: boolean
   orchestrationBusy: boolean
   planMode: boolean
+  blankWorkMode: 'fast' | 'thorough'
   goal: string
   goalState: GoalStateView | null
   /**
@@ -290,6 +291,7 @@ const state: State = {
   busy: false,
   orchestrationBusy: false,
   planMode: false,
+  blankWorkMode: 'fast',
   goal: '',
   goalState: null,
   freshChat: false,
@@ -530,6 +532,7 @@ function statuslineHtml(current: SessionState | undefined): string {
     inputTokens: current?.usage.inputTokens ?? 0,
     outputTokens: current?.usage.outputTokens ?? 0,
     cacheHitTokens: current?.usage.cacheHitTokens ?? 0,
+    ...(current?.usage.cacheUsageComplete !== undefined ? { cacheUsageComplete: current.usage.cacheUsageComplete } : {}),
     ...(current?.usage.cacheMissTokens !== undefined ? { cacheMissTokens: current.usage.cacheMissTokens } : {}),
     ...(current?.usage.lastInputTokens !== undefined ? { lastInputTokens: current.usage.lastInputTokens, lastOutputTokens: current.usage.lastOutputTokens ?? 0 } : {}),
     ...(role ? { contextWindowTokens: role.contextWindowTokens } : {}),
@@ -571,11 +574,12 @@ async function savePrefs(patch: Partial<typeof state.prefs>): Promise<void> {
   }
 }
 
-function cacheInfo(usage: SessionState['usage'] | undefined): { hit: number; total: number; rate: string } {
+function cacheInfo(usage: SessionState['usage'] | undefined): string {
+  if (usage?.cacheUsageComplete === false) return '—'
   const hit = Math.max(0, Number(usage?.cacheHitTokens ?? 0))
   const miss = Math.max(0, Number(usage?.cacheMissTokens ?? Math.max(0, (usage?.inputTokens ?? 0) - hit)))
   const total = hit + miss
-  return { hit, total, rate: total > 0 ? ((hit / total) * 100).toFixed(2) : '0.00' }
+  return `${formatTokens(hit)} (${total > 0 ? ((hit / total) * 100).toFixed(2) : '0.00'}%)`
 }
 
 function statusLabel(): string {
@@ -1188,7 +1192,7 @@ function renderHeader(): void {
   if (renameButton) renameButton.hidden = !state.current || kind !== 'chat'
   const cache = cacheInfo(stateNow?.usage)
   sub.innerHTML = state.current
-    ? `${kindBadge}${kindBadge ? '<span class="dot-sep">·</span>' : ''}<span>${escapeHtml(state.current.runId)}</span><span class="dot-sep">·</span><span>${escapeHtml(stateNow?.model?.provider ?? config?.worker.provider ?? '')}/${escapeHtml(stateNow?.model?.model ?? config?.worker.model ?? '')}</span><span class="dot-sep">·</span><span>${stateNow?.turns ?? 0} ${tr('turns')}</span><span class="dot-sep">·</span><span>${formatTokens(stateNow?.usage.inputTokens ?? 0)} in / ${formatTokens(stateNow?.usage.outputTokens ?? 0)} out</span><span class="dot-sep">·</span><span>cache ${formatTokens(cache.hit)} (${cache.rate}%)</span>${state.goal ? `<span class="dot-sep">·</span><span class="goal-inline" title="${escapeHtml(state.goal)}">${icon('target', 14)} ${escapeHtml(oneLine(state.goal, 60))}</span>` : ''}`
+    ? `${kindBadge}${kindBadge ? '<span class="dot-sep">·</span>' : ''}<span>${escapeHtml(state.current.runId)}</span><span class="dot-sep">·</span><span>${escapeHtml(stateNow?.model?.provider ?? config?.worker.provider ?? '')}/${escapeHtml(stateNow?.model?.model ?? config?.worker.model ?? '')}</span><span class="dot-sep">·</span><span>${stateNow?.turns ?? 0} ${tr('turns')}</span><span class="dot-sep">·</span><span>${formatTokens(stateNow?.usage.inputTokens ?? 0)} in / ${formatTokens(stateNow?.usage.outputTokens ?? 0)} out</span><span class="dot-sep">·</span><span>cache ${cache}</span>${state.goal ? `<span class="dot-sep">·</span><span class="goal-inline" title="${escapeHtml(state.goal)}">${icon('target', 14)} ${escapeHtml(oneLine(state.goal, 60))}</span>` : ''}`
     : `<span>${escapeHtml(workspaceName())}</span>`
   pill.className = `status-pill ${statusClass()}`
   pill.innerHTML = `${state.busy ? '<span class="tool-spinner small"></span>' : '<span class="status-dot"></span>'}${statusLabel()}`
@@ -1286,10 +1290,11 @@ function renderComposer(force = false): void {
         <button type="button" class="chip ${isActiveOrchestrator ? 'active' : ''}" data-action="toggle-orchestration" title="${isActiveOrchestrator ? tr('stopOrchestration') : orchestrationLabel}">${icon('bot', 16)} ${orchestrationLabel}</button>
         <button type="button" class="chip" data-action="open-goal" title="${tr('setGoal')}">${icon('target', 16)} ${tr('goal')}</button>
         <button type="button" class="chip" data-action="open-model" title="Change model">${icon('cpu', 16)} ${escapeHtml(modelName)}</button>
+        <select id="work-mode-select" class="effort-select" title="${tr('workMode')}" aria-label="${tr('workMode')}" ${state.busy || state.sending ? 'disabled' : ''}><option value="fast" ${(current ? current.workMode ?? 'fast' : state.blankWorkMode) === 'fast' ? 'selected' : ''}>${tr('workModeFast')}</option><option value="thorough" ${(current ? current.workMode ?? 'fast' : state.blankWorkMode) === 'thorough' ? 'selected' : ''}>${tr('workModeThorough')}</option></select>
         <select id="effort-select" class="effort-select" title="${tr('effort')}">${effortValues.map((e) => `<option value="${e}" ${(current?.effort ?? '') === e ? 'selected' : ''}>${e ? tr(`effort_${e}`) : tr('effortDefault')}</option>`).join('')}</select>
         <button type="button" class="chip" data-action="sandbox-menu" title="${tr('sandboxTitle')}">${icon('shield', 16)} ${escapeHtml(sandboxModeLabel(current?.sandboxMode ?? config?.sandbox ?? 'unconfined'))}</button>
         <span class="composer-spacer"></span>
-        <span class="context-meter" title="Actual provider usage. This process: ${formatTokens(current?.usage.inputTokens ?? 0)} in / ${formatTokens(current?.usage.outputTokens ?? 0)} out, cache ${formatTokens(cache.hit)} (${cache.rate}%). Last turn: ${formatTokens(current?.usage.lastInputTokens ?? 0)} in / ${formatTokens(current?.usage.lastOutputTokens ?? 0)} out.">${statuslineHtml(current)}</span>
+        <span class="context-meter" title="Actual provider usage. This process: ${formatTokens(current?.usage.inputTokens ?? 0)} in / ${formatTokens(current?.usage.outputTokens ?? 0)} out, cache ${cache}. Last turn: ${formatTokens(current?.usage.lastInputTokens ?? 0)} in / ${formatTokens(current?.usage.lastOutputTokens ?? 0)} out.">${statuslineHtml(current)}</span>
         <button type="button" class="icon-btn" data-action="toggle-right" title="Files and diff">${icon('panel', 16)}</button>
         ${state.busy ? `<button type="button" class="chip steer-mode" data-action="toggle-steer-mode" title="${state.steerMode === 'queue' ? tr('steerQueueTitle') : tr('steerTitle')}">${icon('bolt', 14)} ${escapeHtml(steerToggleLabel(state.steerMode, state.locale))}</button>` : ''}
         <button type="button" class="tq-badge" id="tq-badge" data-action="toggle-turn-queue" title="${tr('turnQueueToggle')}" hidden></button>
@@ -1321,6 +1326,10 @@ function renderComposer(force = false): void {
     input.style.height = `${Math.min(220, input.scrollHeight)}px`
   }
   const effortSelect = document.getElementById('effort-select') as HTMLSelectElement | null
+  const workModeSelect = document.getElementById('work-mode-select') as HTMLSelectElement | null
+  workModeSelect?.addEventListener('change', () => {
+    void setWorkMode(workModeSelect.value)
+  })
   effortSelect?.addEventListener('change', () => {
     void setEffort(effortSelect.value)
   })
@@ -4247,6 +4256,7 @@ async function newSession(): Promise<void> {
   state.busy = false
   state.sending = false
   state.planMode = false
+  state.blankWorkMode = 'fast'
   state.goal = ''
   state.goalState = null
   // Mark the blank chat so the orchestration chip starts a new orchestration
@@ -4293,6 +4303,10 @@ async function sendMessage(text: string): Promise<void> {
       const data = await post<{ runId: string; state: SessionState }>('/api/sessions')
       runId = data.runId
       created = true
+      if (state.blankWorkMode === 'thorough') {
+        const selected = await post<{ mode: 'fast' | 'thorough' }>(`/api/sessions/${encodeURIComponent(runId)}/work-mode`, { mode: state.blankWorkMode })
+        data.state.workMode = selected.mode
+      }
       state.current = { runId: data.runId, entries: [], state: data.state }
       state.entries = []
       state.busy = false
@@ -4470,6 +4484,11 @@ async function runCommand(id: string, args = ''): Promise<void> {
       return
     case 'plan-mode':
       await togglePlan(args === 'off' ? false : args === 'on' ? true : undefined)
+      return
+    case 'work-mode':
+      if (args === 'fast' || args === 'thorough') await setWorkMode(args)
+      else if (args) toast('Usage: /work-mode [fast|thorough]', 'error')
+      else toast(tr((state.current?.state.workMode ?? state.blankWorkMode) === 'thorough' ? 'workModeThorough' : 'workModeFast'))
       return
     case 'goal': {
       if (!args) {
@@ -4738,6 +4757,25 @@ async function runAction(action: 'undo' | 'compact' | 'review' | 'model', value?
     }
   } catch (error) {
     toast(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+async function setWorkMode(mode: string): Promise<void> {
+  if (mode !== 'fast' && mode !== 'thorough') return
+  if (state.sending) return
+  const runId = currentRunId()
+  if (!runId) {
+    state.blankWorkMode = mode
+    renderComposer(true)
+    return
+  }
+  try {
+    const result = await post<{ mode: 'fast' | 'thorough' }>(`/api/sessions/${encodeURIComponent(runId)}/work-mode`, { mode })
+    if (state.current?.state.runId === runId) state.current.state.workMode = result.mode
+    renderComposer(true)
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+    renderComposer(true)
   }
 }
 

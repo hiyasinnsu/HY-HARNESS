@@ -17,6 +17,7 @@ export interface StatusData {
   outputTokens?: number
   cacheHitTokens?: number
   cacheMissTokens?: number
+  cacheUsageComplete?: boolean
   lastInputTokens?: number
   lastOutputTokens?: number
   contextWindowTokens?: number
@@ -35,6 +36,7 @@ export function statusText(item: StatusItem, d: StatusData): string {
     case 'tokens':
       return `in ${n(d.inputTokens)} / out ${n(d.outputTokens)}`
     case 'cache': {
+      if (d.cacheUsageComplete === false) return 'cache —'
       const hit = Math.max(0, d.cacheHitTokens ?? 0)
       const total = hit + Math.max(0, d.cacheMissTokens ?? Math.max(0, (d.inputTokens ?? 0) - hit))
       return `cache ${n(hit)} (${total > 0 ? ((hit / total) * 100).toFixed(2) : '0.00'}%)`

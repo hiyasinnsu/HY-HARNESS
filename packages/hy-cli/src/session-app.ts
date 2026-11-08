@@ -145,7 +145,7 @@ function documentToolMap(o: {
   roots: readonly WorkspaceRootConfig[]
 }): LoadedPlugins['tools'] {
   const tools: LoadedPlugins['tools'] = new Map()
-  const description = 'Preview a PDF, image or Office document (Office needs LibreOffice). Returns the served kind, or the conversion error.'
+  const description = 'Prepare a PDF, image or Office preview (Office needs LibreOffice). Returns metadata and a path only; document contents are NOT attached to your context. To inspect a PDF, extract its text or render its pages and call read_image.'
   const input: Schema = { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] }
   tools.set('document_preview', {
     name: 'document_preview',
@@ -160,7 +160,7 @@ function documentToolMap(o: {
           roots: o.roots,
           rel: String(args.path ?? ''),
         })
-        return { ok: true, kind: preview.kind, contentType: preview.contentType, cached: preview.cached, path: preview.file }
+        return { ok: true, kind: preview.kind, contentType: preview.contentType, cached: preview.cached, path: preview.file, contentAttached: false }
       } catch (error) {
         if (error instanceof DocumentError) throw new Error(error.message)
         throw error
@@ -422,7 +422,7 @@ function editToolMap(
   )
   add(
     'edit_file',
-    'Replace old text with new text in a file. old must occur exactly count times (default 1); on a miss the closest lines are returned.',
+    'Replace old text with new text in a file. Read the file first; old must occur exactly count times (default 1). On a miss the closest lines are returned.',
     {
       type: 'object',
       properties: {
@@ -438,7 +438,7 @@ function editToolMap(
   )
   add(
     'read_image',
-    'Attach a PNG/JPEG/WebP/GIF (max 8 MiB, 4096 px) so you can see it. Return the metadata; the image joins the conversation.',
+    'Attach a PNG/JPEG/WebP/GIF (max 8 MiB, 8192 px) so you can see it. Start with the original file; do not create resized previews just to call this tool. Crop only if a needed detail is unclear, using the original dimensions rather than estimated display pixels. Returns metadata; the image joins the conversation.',
     { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
     true,
     (args) => host()!.readImage(args, imagesAllowed()),
@@ -531,6 +531,7 @@ function childRunner(
     answer?: (question: string) => Promise<string>
     print: (event: AgentEvent) => void
     sandboxMode: () => SandboxMode
+    workMode: () => 'fast' | 'thorough'
     roleInstruction?: string
   },
 ): SubagentRunner {
@@ -551,6 +552,7 @@ function childRunner(
       ...(o.roleInstruction ? { roleInstruction: o.roleInstruction } : {}),
     },
   )
+  conv.setWorkMode(o.workMode())
   let controller: AbortController | undefined
   // The old `/subagents` view (and any log reader) expects this marker on the
   // child's own run, exactly like a synchronous delegate leaves behind.
@@ -894,6 +896,7 @@ async function runSubagent(
     spillDir: string
     print: (event: AgentEvent) => void
     roleInstruction?: string
+    workMode: 'fast' | 'thorough'
   } & ConversationSafety,
 ): Promise<{ final: string; steps: number }> {
   subagents += 1
@@ -936,6 +939,7 @@ async function runSubagent(
     maxOutputTokens: subagentRole.maxOutputTokens,
     reasoningHistory: config.reasoningHistory,
     promptVariant: config.promptVariant,
+    workMode: () => o.workMode,
     temperature: subagentRole.temperature ?? 0,
     ...(subagentRole.effort ? { effort: subagentRole.effort } : {}),
     nativeTools: usesNativeTools(subagentRole),
@@ -1020,12 +1024,14 @@ export class Conversation {
   turns = 0
   private readonly usage = { inputTokens: 0, outputTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 }
   private readonly lastUsage = { inputTokens: 0, outputTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 }
+  private cacheUsageComplete = true
   private checkpoints = true
 
   private agent: Agent
   private planMode = false
   private planTools: ReadonlySet<string> = PLAN_MODE_TOOLS
   private planOnly = false
+  private workModeState: { value: 'fast' | 'thorough' }
   private readonly goals: GoalStore
   private turnSource: 'user' | 'orchestrator' | 'worker' | 'system' | 'goal' = 'user'
 
@@ -1055,10 +1061,12 @@ export class Conversation {
     private readonly sandboxState: { mode: SandboxMode },
     /** WP-21: steering inbox shared with every agent built for this session. */
     private readonly inbox: SteerInbox,
+    workModeState: { value: 'fast' | 'thorough' },
     /** WP-22: background subagents (undefined when the host has none). */
     readonly agents: SubagentRegistry | undefined,
   ) {
     this.goals = goals
+    this.workModeState = workModeState
     this.agent = build(sessionRole)
   }
 
@@ -1155,6 +1163,8 @@ export class Conversation {
     const log = new SessionLog(sessionLogPath(config.stateDir))
     log.setRun(runId)
     const events = readEvents(log.file)
+    const lastMode = events.filter((e) => e.runId === runId && e.type === 'session/work-mode').at(-1)?.payload as { mode?: unknown } | undefined
+    const workModeState: { value: 'fast' | 'thorough' } = { value: lastMode?.mode === 'thorough' ? 'thorough' : 'fast' }
     // WP-12: the sandbox mode is durable state; a resume replays the last switch.
     const sandboxState = { mode: resolveSandboxMode(events, runId, config.sandbox) }
     // WP-21: the agent is rebuilt between turns and on a model switch, so the
@@ -1202,6 +1212,7 @@ export class Conversation {
                 ...(answer ? { answer } : {}),
                 print,
                 sandboxMode: () => sandboxState.mode,
+                workMode: () => workModeState.value,
                 ...(options.roleInstruction ? { roleInstruction: options.roleInstruction } : {}),
               }),
             },
@@ -1214,6 +1225,7 @@ export class Conversation {
         task,
         readOnly,
         parentRunId: runId,
+        workMode: workModeState.value,
         approve,
         skills,
         spillDir,
@@ -1394,6 +1406,7 @@ export class Conversation {
         goalMode,
         reasoningHistory: config.reasoningHistory,
         promptVariant: config.promptVariant,
+        workMode: () => workModeState.value,
         ...(goal ? { goal: { objective: goal.objective, phase: goal.phase, ...(goal.blockerReason ? { blockerReason: goal.blockerReason } : {}) } } : {}),
         maxOutputTokens: role.maxOutputTokens,
         temperature: role.temperature ?? 0,
@@ -1427,7 +1440,7 @@ export class Conversation {
       spillStore: context,
       tools,
     })
-    const conv = new Conversation(ctx, config, client, log, runId, options.role ?? config.role, build, context, ledger, tools, skills, hooks, delegate, goals, sandboxState, inbox, agents)
+    const conv = new Conversation(ctx, config, client, log, runId, options.role ?? config.role, build, context, ledger, tools, skills, hooks, delegate, goals, sandboxState, inbox, workModeState, agents)
     goalHost = conv
     convHost = conv
     // Continue an earlier run (`hy resume`): its history and turn count.
@@ -1437,7 +1450,9 @@ export class Conversation {
     for (const e of mine) {
       if (e.type === 'step/end') {
         const u = (e.payload as { usage?: { inputTokens?: number; outputTokens?: number; cacheHitTokens?: number; cacheMissTokens?: number } }).usage
+        if (!u) conv.cacheUsageComplete = false
         if (u) {
+          if (u.cacheHitTokens === undefined || u.cacheMissTokens === undefined) conv.cacheUsageComplete = false
           const input = Number(u.inputTokens ?? 0)
           const output = Number(u.outputTokens ?? 0)
           const hit = Number(u.cacheHitTokens ?? 0)
@@ -1546,6 +1561,7 @@ export class Conversation {
         void this.extractMemories(message, result.final).catch(() => undefined)
       }
       this.lastUsage.inputTokens = result.usage.inputTokens
+      if (result.usage.cacheHitTokens === undefined || result.usage.cacheMissTokens === undefined) this.cacheUsageComplete = false
       this.lastUsage.outputTokens = result.usage.outputTokens
       this.lastUsage.cacheHitTokens = result.usage.cacheHitTokens ?? 0
       this.lastUsage.cacheMissTokens = result.usage.cacheMissTokens ?? 0
@@ -1658,6 +1674,7 @@ export class Conversation {
     outputTokens: number
     cacheHitTokens: number
     cacheMissTokens: number
+    cacheUsageComplete: boolean
     lastInputTokens: number
     lastOutputTokens: number
     lastCacheHitTokens: number
@@ -1665,6 +1682,7 @@ export class Conversation {
   } {
     return {
       ...this.usage,
+      cacheUsageComplete: this.cacheUsageComplete,
       lastInputTokens: this.lastUsage.inputTokens,
       lastOutputTokens: this.lastUsage.outputTokens,
       lastCacheHitTokens: this.lastUsage.cacheHitTokens,
@@ -1674,6 +1692,17 @@ export class Conversation {
 
   currentEffort(): string | undefined {
     return this.sessionRole.effort
+  }
+
+  currentWorkMode(): 'fast' | 'thorough' { return this.workModeState.value }
+
+  setWorkMode(mode: 'fast' | 'thorough'): string {
+    if (this.turnActive) throw new Error('work mode cannot change while a turn is running')
+    if (mode !== this.workModeState.value) {
+      this.log.append('session/work-mode', { mode })
+      this.workModeState.value = mode
+    }
+    return `work mode: ${mode}`
   }
 
   currentModel(): { provider: string; model: string } {

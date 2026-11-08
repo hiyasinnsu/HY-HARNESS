@@ -64,6 +64,13 @@ test('apply takes committed and uncommitted worktree work, and never applies it 
     git(wt.path, 'commit', '-qm', 'more')
     const second = manager.apply('feat')
     assert.deepEqual(second.applied, ['c.txt'])
+    assert.equal(second.committed, true, 'already committed work needs no extra commit')
+    // Main checkout edits must not conflict with already-applied work on retry.
+    git(repo, 'commit', '-qm', 'accept worktree changes')
+    fs.writeFileSync(path.join(repo, 'c.txt'), 'main follow-up\n')
+    git(repo, 'commit', '-qam', 'edit applied file')
+    assert.equal(manager.apply('feat').empty, true)
+    assert.equal(read('c.txt'), 'main follow-up\n')
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }

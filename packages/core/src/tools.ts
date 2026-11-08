@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { stripVTControlCharacters } from 'node:util'
 import type { ExecResult, PatchApplyResult, SandboxMode } from './protocol.js'
 import { ExecRpcClient, ExecRpcError } from './exec-rpc.js'
 import { TOOLS_BY_NAME, TOOLS_BY_SDK, deferredTools, jsonSchemaToTs, validate, type ToolSpec } from './tool-registry.js'
@@ -103,14 +104,12 @@ export function pipeChildGap(
  * Return the human-readable error strings instead of XML noise.
  */
 export function cleanPowerShellOutput(text: string): string {
-  if (!text.includes('#< CLIXML') && !text.includes('<Objs')) return text
+  if (!text.includes('#< CLIXML') && !text.includes('<Objs')) return stripVTControlCharacters(text)
   const errors = [...text.matchAll(/<S S="Error">([\s\S]*?)<\/S>/g)].map((match) => match[1] ?? '')
   const source = errors.length > 0 ? errors.join('') : text
-  return source
-    .replace(/_x000D__x000A_/g, '\n')
-    .replace(/_x000D_/g, '\r')
-    .replace(/_x000A_/g, '\n')
-    .replace(/_x0009_/g, '\t')
+  return stripVTControlCharacters(source
+    .replace(/_x([0-9a-f]{4})_/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\r\n/g, '\n')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
@@ -119,7 +118,7 @@ export function cleanPowerShellOutput(text: string): string {
     .replace(/^#< CLIXML\s*/, '')
     .replace(/<\/?Objs[^>]*>/g, '')
     .replace(/<\/?S[^>]*>/g, '')
-    .trim()
+    .trim())
 }
 
 export interface ToolRuntimeOptions {
@@ -260,7 +259,15 @@ function resolveInside(root: string, rel: string): string {
   if (lexical !== rootReal && !lexical.startsWith(rootReal + path.sep)) {
     throw new Error(`path escapes the workspace: ${rel}`)
   }
-  const real = fs.realpathSync.native(lexical)
+  let real: string
+  try {
+    real = fs.realpathSync.native(lexical)
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+      throw new Error(`path does not exist in the workspace: ${rel} (check the path; use search_glob/search_grep if available)`)
+    }
+    throw error
+  }
   if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
     throw new Error(`path escapes the workspace: ${rel}`)
   }
@@ -311,7 +318,8 @@ const GREP_MAX_FILE_BYTES = 1024 * 1024
 
 /** `read_image` limits (WP-30): a vision model cannot use more than this. */
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024
-export const MAX_IMAGE_PX = 4096
+// High-resolution document scans fit without an agent-created thumbnail; bytes stay capped at 8 MiB.
+export const MAX_IMAGE_PX = 8192
 
 /** PNG / JPEG / WebP / GIF by magic bytes, or undefined. */
 export function imageMimeType(bytes: Buffer): string | undefined {
@@ -932,7 +940,7 @@ export class ToolRuntime {
       const hint =
         name === 'shell' && problems.some((problem) => problem.includes('command'))
           ? ' (expected {"tool":"shell","args":{"command":"..."}}; do not nest args)'
-          : ''
+          : ` Expected arguments: ${jsonSchemaToTs(spec.input)}. In JSON tool calls, put arguments inside "args", not beside "tool".`
       throw new Error(`invalid arguments for ${name}: ${problems.join('; ')}${hint}`)
     }
     const plugin = this.options.plugins?.get(name)
@@ -1379,7 +1387,7 @@ export class ToolRuntime {
       resolved = spilled ? undefined : this.resolveRootPath(input)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      throw new Error(message.includes('does not exist') ? `${message} (use search_glob/search_grep to locate it)` : message)
+      throw new Error(message.includes('does not exist') ? `${message} (check the path; use search_glob/search_grep if available)` : message)
     }
     const full = spilled ?? resolved!.full
     const stat = fs.statSync(full)
@@ -1489,6 +1497,12 @@ export class ToolRuntime {
       return this.writeExtraFile(root, rel, content)
     }
     let patch = typeof args.patch === 'string' ? args.patch.trim() : ''
+    if (patch.startsWith('*** Begin Patch')) {
+      throw new Error('Unsupported patch format: use a unified diff with ---/+++ file headers and numbered @@ hunks, or use file + content. Read existing files first.')
+    }
+    if (/^@@\s*$/m.test(patch)) {
+      throw new Error('Unified diff hunks need line numbers, for example @@ -1,3 +1,3 @@. Alternatively use file + content.')
+    }
     if (!patch.includes('@@') && !patch.startsWith('---')) {
       const file = typeof args.file === 'string' ? args.file : typeof args.path === 'string' ? args.path : undefined
       const content = typeof args.content === 'string' ? args.content : undefined
@@ -1631,6 +1645,7 @@ export class ToolRuntime {
       this.persistentGap = undefined
       return {
         ...result,
+        ...(typeof result.stdout === 'string' ? { stdout: cleanPowerShellOutput(result.stdout) } : {}),
         ...(typeof result.stderr === 'string' ? { stderr: cleanPowerShellOutput(result.stderr) } : {}),
         ...(gap ? { gap } : {}),
       }

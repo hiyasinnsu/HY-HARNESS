@@ -13,6 +13,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readDshSession, readHySession } from './logs.mjs'
+import { runRounds } from './schedule.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repo = path.resolve(here, '..', '..')
@@ -26,11 +27,14 @@ function arg(name, fallback) {
 const runs = Number(arg('runs', '10'))
 const harnesses = String(arg('harness', 'hy,dsh')).split(',')
 const parallel = Number(arg('parallel', '2'))
+if (!Number.isInteger(runs) || runs < 0 || !Number.isInteger(parallel) || parallel < 1 || new Set(harnesses).size !== harnesses.length) throw new Error('runs, parallel, or harness list is invalid')
 const benchRoot = path.resolve(arg('workdir', 'F:/hy-bench/harness'))
 const stamp = arg('stamp', new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19))
+if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(stamp)) throw new Error('stamp must be a simple name')
 const outDir = path.resolve(arg('out', path.join(repo, 'bench', 'results')), stamp)
+if (fs.existsSync(path.join(outDir, 'meta.json')) || fs.existsSync(path.join(outDir, 'runs.jsonl'))) throw new Error(`benchmark results already exist: ${outDir}`)
 fs.mkdirSync(outDir, { recursive: true })
-const SUITES = { 'tb2-financial': './suites/tb2-financial.mjs', stats: './suites/stats.mjs' }
+const SUITES = { 'tb2-financial': './suites/tb2-financial.mjs', 'tb2-async-windows': './suites/async-cancel.mjs', stats: './suites/stats.mjs' }
 const suiteId = String(arg('suite', 'tb2-financial'))
 if (!(suiteId in SUITES)) throw new Error(`unknown suite ${suiteId}; one of ${Object.keys(SUITES).join(', ')}`)
 const suite = (await import(SUITES[suiteId])).createSuite({ cacheRoot: path.join(path.dirname(benchRoot), 'cache') })
@@ -46,7 +50,7 @@ const EXEC_SERVER = path.join(repo, 'target', 'release', 'hy-exec-server.exe')
 const childEnv = { ...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: '*' }
 
 function exec(cmd, args, options) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { ...options, env: options.env ?? childEnv, windowsHide: true })
     let stdout = ''
     let stderr = ''
@@ -55,6 +59,7 @@ function exec(cmd, args, options) {
     if (options.input !== undefined) child.stdin.end(options.input)
     else child.stdin.end()
     const timer = setTimeout(() => child.kill(), options.timeoutMs ?? 3_600_000)
+    child.on('error', (error) => { clearTimeout(timer); reject(error) })
     child.on('close', (code) => {
       clearTimeout(timer)
       resolve({ code, stdout, stderr })
@@ -64,12 +69,12 @@ function exec(cmd, args, options) {
 
 async function prepare(harness, n) {
   const ws = path.join(benchRoot, `${stamp}-${harness}-${n}`)
-  fs.rmSync(ws, { recursive: true, force: true })
-  fs.mkdirSync(ws, { recursive: true })
+  fs.mkdirSync(ws, { recursive: false })
   const prepared = await suite.prepare(ws)
-  await exec('git', ['init', '-q'], { cwd: ws })
-  await exec('git', ['-c', 'core.autocrlf=false', 'add', '-A'], { cwd: ws })
-  await exec('git', ['-c', 'user.email=bench@local', '-c', 'user.name=bench', 'commit', '-qm', 'fixture'], { cwd: ws })
+  for (const args of [['init', '-q'], ['-c', 'core.autocrlf=false', 'add', '-A'], ['-c', 'user.email=bench@local', '-c', 'user.name=bench', 'commit', '--allow-empty', '-qm', 'fixture']]) {
+    const result = await exec('git', args, { cwd: ws })
+    if (result.code !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr || result.stdout}`)
+  }
   return { ws, prepared }
 }
 
@@ -83,12 +88,19 @@ async function prepare(harness, n) {
  */
 function benchHyConfigDir(variant, extra = {}) {
   const dir = path.join(benchRoot, `${stamp}-${variant}-config`)
-  fs.mkdirSync(dir, { recursive: true })
+  fs.mkdirSync(dir, { recursive: false })
   const userDir = process.env.HY_CONFIG_DIR ?? path.join(process.env.APPDATA, 'hy-harness')
   const userFile = path.join(userDir, 'config.json')
   const user = fs.existsSync(userFile) ? JSON.parse(fs.readFileSync(userFile, 'utf8')) : {}
   for (const key of ['mcpServers', 'automation', 'workspaceRoots', 'workspaceRootsByWorkspace']) delete user[key]
-  fs.writeFileSync(path.join(dir, 'config.json'), `${JSON.stringify({ ...user, ...extra }, null, 2)}\n`)
+  const config = { ...user, ...extra }
+  const worker = config.roles?.worker
+  if (runs > 0 && (worker?.provider !== 'opencode' || worker?.model !== MODEL || worker?.effort !== EFFORT)) {
+    throw new Error(`benchmark worker must use opencode/${MODEL} with effort ${EFFORT}`)
+  }
+  // The exec daemon filters its environment; keep the fixture's exFAT Git trust in agent commands too.
+  config.sandbox = { ...config.sandbox, envPassthrough: [...new Set([...(config.sandbox?.envPassthrough ?? []), 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'])] }
+  fs.writeFileSync(path.join(dir, 'config.json'), `${JSON.stringify(config, null, 2)}\n`)
   return dir
 }
 
@@ -96,6 +108,8 @@ function benchHyConfigDir(variant, extra = {}) {
 // setting, so comparing it with `hy` measures exactly that change.
 const HY_VARIANTS = {
   hy: {},
+  'hy-fast': {},
+  'hy-thorough': {},
   'hy-full': { reasoningHistory: 'full' },
   'hy-none': { reasoningHistory: 'none' },
   'hy-legacy': { promptVariant: 'legacy' },
@@ -103,13 +117,15 @@ const HY_VARIANTS = {
   'hy-lean3': { promptVariant: 'lean3' },
   'hy-lean4': { promptVariant: 'lean4' },
 }
+if (harnesses.some((h) => h !== 'dsh' && !Object.hasOwn(HY_VARIANTS, h))) throw new Error('unknown harness')
+fs.mkdirSync(benchRoot, { recursive: true })
 const hyConfigDirs = Object.fromEntries(harnesses.filter((h) => h in HY_VARIANTS).map((h) => [h, benchHyConfigDir(h, HY_VARIANTS[h])]))
 
 async function runHy(ws, n, variant) {
   const state = `${ws}.state`
-  fs.rmSync(state, { recursive: true, force: true })
+  if (fs.existsSync(state) || fs.existsSync(`${ws}.grader`)) throw new Error(`benchmark state or grader already exists: ${ws}`)
   const started = Date.now()
-  const common = ['--cwd', ws, '--state-dir', state, '--json', '--full-auto', '--exec-server', EXEC_SERVER]
+  const common = ['--cwd', ws, '--state-dir', state, '--json', '--full-auto', '--exec-server', EXEC_SERVER, ...(variant === 'hy-fast' || variant === 'hy-thorough' ? ['--work-mode', variant.slice(3)] : [])]
   const options = { cwd: ws, env: { ...childEnv, HY_CONFIG_DIR: hyConfigDirs[variant] }, timeoutMs: suite.agentTimeoutMs }
   // `hy chat` reads one prompt per stdin line; a single (multi-line) task goes
   // through `hy run` as an argument, the way DSH receives it.
@@ -156,45 +172,51 @@ async function runDsh(ws, n) {
 }
 
 async function one(harness, n) {
-  const { ws, prepared } = await prepare(harness, n)
-  const r = harness in HY_VARIANTS ? await runHy(ws, n, harness) : await runDsh(ws, n)
-  const checks = await suite.check(ws, prepared)
-  // A run the provider never served (every turn failed with an HTTP error such
-  // as "server is overloaded") measures the provider, not the harness: it is
-  // recorded and listed, and report.mjs leaves it out of the statistics.
-  const stderr = fs.readFileSync(path.join(outDir, `${harness in HY_VARIANTS ? harness : 'dsh'}-${n}.stderr.log`), 'utf8')
-  const providerErrors = (stderr.match(/turn failed: \S+ HTTP (429|5\d\d)|dsh: (RATE_LIMIT|SERVER|TRANSPORT|OVERLOADED)/g) ?? []).length
-  const providerFailure = providerErrors > 0 && (r.log?.turns ?? 0) < TASKS.length
-  const record = {
-    harness,
-    n,
-    stamp,
-    suite: suite.id,
-    model: MODEL,
-    effort: EFFORT,
-    ws,
-    exit: r.exit,
-    wallMs: r.wallMs,
-    ...(r.sessionId ? { sessionId: r.sessionId } : {}),
-    checks,
-    ...(r.log ?? { logMissing: true }),
-    ...(providerErrors > 0 ? { providerErrors } : {}),
-    ...(providerFailure ? { providerFailure: true } : {}),
+  let stage = 'setup'
+  const ws = path.join(benchRoot, `${stamp}-${harness}-${n}`)
+  try {
+    const { prepared } = await prepare(harness, n)
+    if (fs.existsSync(`${ws}.grader`)) throw new Error(`benchmark grader already exists: ${ws}.grader`)
+    stage = 'run'
+    const r = harness in HY_VARIANTS ? await runHy(ws, n, harness) : await runDsh(ws, n)
+    stage = 'grading'
+    const checks = await suite.check(ws, prepared)
+    // A run the provider never served (every turn failed with an HTTP error such
+    // as "server is overloaded") measures the provider, not the harness: it is
+    // recorded and listed, and report.mjs leaves it out of the statistics.
+    const stderr = fs.readFileSync(path.join(outDir, `${harness in HY_VARIANTS ? harness : 'dsh'}-${n}.stderr.log`), 'utf8')
+    const providerErrors = (stderr.match(/turn failed: \S+ HTTP (429|5\d\d)|dsh: (RATE_LIMIT|SERVER|TRANSPORT|OVERLOADED)/g) ?? []).length
+    const providerFailure = providerErrors > 0 && (r.log?.turns ?? 0) < TASKS.length
+    const record = {
+      harness,
+      n,
+      stamp,
+      suite: suite.id,
+      model: MODEL,
+      effort: EFFORT,
+      ws,
+      exit: r.exit,
+      wallMs: r.wallMs,
+      ...(r.sessionId ? { sessionId: r.sessionId } : {}),
+      checks,
+      ...(r.log ?? { logMissing: true }),
+      ...(providerErrors > 0 ? { providerErrors } : {}),
+      ...(providerFailure ? { providerFailure: true } : {}),
+    }
+    fs.appendFileSync(path.join(outDir, 'runs.jsonl'), `${JSON.stringify(record)}\n`)
+    const graded = Object.entries(checks).filter(([k]) => k !== 'reward')
+    const passed = graded.filter(([, v]) => v).length
+    console.log(`${harness} #${n}: exit ${r.exit}, ${(r.wallMs / 1000).toFixed(0)}s, checks ${passed}/${graded.length}${checks.reward && r.exit === 0 ? ' (solved)' : ''}, input ${r.log?.input ?? '?'}, hit ${r.log?.hitRate ?? '?'}%, tools ${r.log?.toolCalls ?? '?'}`)
+    return record
+  } catch (error) {
+    const failure = { harness, n, stamp, suite: suite.id, model: MODEL, effort: EFFORT, ws, exit: null, checks: {}, logMissing: true, failureStage: stage, failure: String(error?.message ?? error) }
+    fs.appendFileSync(path.join(outDir, 'runs.jsonl'), `${JSON.stringify(failure)}\n`)
+    console.error(`${harness} #${n}: ${stage} failed: ${failure.failure}`)
+    return failure
   }
-  fs.appendFileSync(path.join(outDir, 'runs.jsonl'), `${JSON.stringify(record)}\n`)
-  const graded = Object.entries(checks).filter(([k]) => k !== 'reward')
-  const passed = graded.filter(([, v]) => v).length
-  console.log(`${harness} #${n}: exit ${r.exit}, ${(r.wallMs / 1000).toFixed(0)}s, checks ${passed}/${graded.length}${checks.reward === undefined ? "" : checks.reward ? " (solved)" : ""}, input ${r.log?.input ?? '?'}, hit ${r.log?.hitRate ?? '?'}%, tools ${r.log?.toolCalls ?? '?'}`)
-  return record
 }
 
-// Interleave: run i of every harness is queued before run i+1, so both see the
-// same provider conditions over time.
-const queue = []
-for (let n = 1; n <= runs; n++) for (const h of harnesses) queue.push([h, n])
+// Complete each round before starting the next; rotate order to spread starts.
 fs.writeFileSync(path.join(outDir, 'meta.json'), `${JSON.stringify({ stamp, suite: suite.id, suiteDescription: suite.description, ...(suite.source ? { source: suite.source } : {}), model: MODEL, effort: EFFORT, runs, harnesses, tasks: TASKS, host: os.hostname(), started: new Date().toISOString() }, null, 2)}\n`)
-const workers = Array.from({ length: Math.max(1, parallel) }, async () => {
-  for (let item = queue.shift(); item; item = queue.shift()) await one(item[0], item[1])
-})
-await Promise.all(workers)
+await runRounds(harnesses, runs, parallel, one)
 console.log(`results: ${outDir}`)
