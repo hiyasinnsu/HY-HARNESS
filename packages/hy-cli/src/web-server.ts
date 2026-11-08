@@ -49,8 +49,11 @@ import {
   type Schema,
   type SessionEvent,
   type ToolSpec,
+  INTERACTION_MODES,
+  isInteractionMode,
   isWorkMode,
   WORK_MODES,
+  type InteractionMode,
   type WorkMode,
 } from '../../core/dist/index.js'
 import {
@@ -430,6 +433,7 @@ interface WebSession {
   pendingQuestions: Map<string, Pending<string>>
   planMode: boolean
   workMode?: WorkMode
+  interactionMode?: InteractionMode
   /** WP-12: the session's live sandbox mode (persisted in the session log). */
   sandboxMode: SandboxMode
   goal?: string | undefined
@@ -983,6 +987,7 @@ function sessionState(session: WebSession) {
     turns: session.conv?.turns ?? session.turns,
     planMode: session.conv?.isPlanMode() ?? session.planMode,
     workMode: session.conv?.currentWorkMode() ?? session.workMode ?? 'fast',
+    interactionMode: session.conv?.currentInteractionMode() ?? session.interactionMode ?? 'autonomous',
     sandboxMode: session.conv?.sandboxMode() ?? session.sandboxMode,
     goal: session.conv?.currentGoal() ?? session.goal ?? null,
     goalState: session.conv?.goalView() ?? null,
@@ -1515,6 +1520,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       planMode: kind === 'orchestrator' ? true : planModeOf(events, runId),
       workMode: ((mode: unknown): WorkMode => (isWorkMode(mode) ? mode : 'fast'))(
         (events.filter((e) => e.runId === runId && e.type === 'session/work-mode').at(-1)?.payload as { mode?: unknown } | undefined)?.mode,
+      ),
+      interactionMode: ((mode: unknown): InteractionMode => (isInteractionMode(mode) ? mode : 'autonomous'))(
+        (events.filter((e) => e.runId === runId && e.type === 'session/interaction-mode').at(-1)?.payload as { mode?: unknown } | undefined)?.mode,
       ),
       sandboxMode: resolveSandboxMode(events, runId, config.sandbox),
       model: modelForKind(kind),
@@ -4421,6 +4429,23 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             }
             const result = ensureConversation(session).setWorkMode(body.mode)
             session.workMode = body.mode
+            broadcast(session, { type: 'state', state: sessionState(session) })
+            json(res, 200, { result, mode: body.mode })
+            return
+          }
+
+          if (sub === 'interaction-mode' && method === 'POST') {
+            const body = await readBody()
+            if (!isInteractionMode(body.mode)) {
+              json(res, 400, { error: `mode must be one of ${INTERACTION_MODES.join(', ')}` })
+              return
+            }
+            if (session.busy) {
+              json(res, 409, { error: 'interaction mode cannot change while a turn is running' })
+              return
+            }
+            const result = ensureConversation(session).setInteractionMode(body.mode)
+            session.interactionMode = body.mode
             broadcast(session, { type: 'state', state: sessionState(session) })
             json(res, 200, { result, mode: body.mode })
             return

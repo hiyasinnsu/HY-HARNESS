@@ -634,6 +634,26 @@
     },
     {
       "method": "POST",
+      "path": "/api/sessions/:id/interaction-mode",
+      "summary": "Set how the agent involves the user (autonomous or collaborative).",
+      "errors": [
+        400,
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      }
+    },
+    {
+      "method": "POST",
       "path": "/api/sessions/:id/model",
       "summary": "Switch the session model.",
       "errors": [

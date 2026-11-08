@@ -89,9 +89,10 @@ import type {
   TrajectoryEvent,
   TreeResponse,
   TurnQueueView,
+  InteractionMode,
   WorkMode,
 } from './types.js'
-import { WORK_MODES, isWorkMode } from './types.js'
+import { INTERACTION_MODES, WORK_MODES, isInteractionMode, isWorkMode } from './types.js'
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const element = document.getElementById(id)
@@ -134,6 +135,7 @@ interface State {
   orchestrationBusy: boolean
   planMode: boolean
   blankWorkMode: WorkMode
+  blankInteractionMode: InteractionMode
   goal: string
   goalState: GoalStateView | null
   /**
@@ -294,6 +296,7 @@ const state: State = {
   orchestrationBusy: false,
   planMode: false,
   blankWorkMode: 'fast',
+  blankInteractionMode: 'autonomous',
   goal: '',
   goalState: null,
   freshChat: false,
@@ -423,6 +426,7 @@ function renderToasts(): void {
 
 /** i18n key of each work mode's label. */
 const WORK_MODE_LABEL: Record<WorkMode, string> = { fast: 'workModeFast', thorough: 'workModeThorough', reflective: 'workModeReflective' }
+const INTERACTION_MODE_LABEL: Record<InteractionMode, string> = { autonomous: 'interactionModeAutonomous', collaborative: 'interactionModeCollaborative' }
 
 function tr(key: string, vars?: Record<string, string | number>): string {
   return translate(state.locale, key, vars)
@@ -1296,6 +1300,7 @@ function renderComposer(force = false): void {
         <button type="button" class="chip" data-action="open-goal" title="${tr('setGoal')}">${icon('target', 16)} ${tr('goal')}</button>
         <button type="button" class="chip" data-action="open-model" title="Change model">${icon('cpu', 16)} ${escapeHtml(modelName)}</button>
         <select id="work-mode-select" class="effort-select" title="${tr('workMode')}" aria-label="${tr('workMode')}" ${state.busy || state.sending ? 'disabled' : ''}>${WORK_MODES.map((mode) => `<option value="${mode}" ${(current ? current.workMode ?? 'fast' : state.blankWorkMode) === mode ? 'selected' : ''}>${tr(WORK_MODE_LABEL[mode])}</option>`).join('')}</select>
+        <select id="interaction-mode-select" class="effort-select" title="${tr('interactionMode')}" aria-label="${tr('interactionMode')}" ${state.busy || state.sending ? 'disabled' : ''}>${INTERACTION_MODES.map((mode) => `<option value="${mode}" ${(current ? current.interactionMode ?? 'autonomous' : state.blankInteractionMode) === mode ? 'selected' : ''}>${tr(INTERACTION_MODE_LABEL[mode])}</option>`).join('')}</select>
         <select id="effort-select" class="effort-select" title="${tr('effort')}">${effortValues.map((e) => `<option value="${e}" ${(current?.effort ?? '') === e ? 'selected' : ''}>${e ? tr(`effort_${e}`) : tr('effortDefault')}</option>`).join('')}</select>
         <button type="button" class="chip" data-action="sandbox-menu" title="${tr('sandboxTitle')}">${icon('shield', 16)} ${escapeHtml(sandboxModeLabel(current?.sandboxMode ?? config?.sandbox ?? 'unconfined'))}</button>
         <span class="composer-spacer"></span>
@@ -1334,6 +1339,10 @@ function renderComposer(force = false): void {
   const workModeSelect = document.getElementById('work-mode-select') as HTMLSelectElement | null
   workModeSelect?.addEventListener('change', () => {
     void setWorkMode(workModeSelect.value)
+  })
+  const interactionModeSelect = document.getElementById('interaction-mode-select') as HTMLSelectElement | null
+  interactionModeSelect?.addEventListener('change', () => {
+    void setInteractionMode(interactionModeSelect.value)
   })
   effortSelect?.addEventListener('change', () => {
     void setEffort(effortSelect.value)
@@ -4262,6 +4271,7 @@ async function newSession(): Promise<void> {
   state.sending = false
   state.planMode = false
   state.blankWorkMode = 'fast'
+  state.blankInteractionMode = 'autonomous'
   state.goal = ''
   state.goalState = null
   // Mark the blank chat so the orchestration chip starts a new orchestration
@@ -4311,6 +4321,10 @@ async function sendMessage(text: string): Promise<void> {
       if (state.blankWorkMode !== 'fast') {
         const selected = await post<{ mode: WorkMode }>(`/api/sessions/${encodeURIComponent(runId)}/work-mode`, { mode: state.blankWorkMode })
         data.state.workMode = selected.mode
+      }
+      if (state.blankInteractionMode !== 'autonomous') {
+        const selected = await post<{ mode: InteractionMode }>(`/api/sessions/${encodeURIComponent(runId)}/interaction-mode`, { mode: state.blankInteractionMode })
+        data.state.interactionMode = selected.mode
       }
       state.current = { runId: data.runId, entries: [], state: data.state }
       state.entries = []
@@ -4489,6 +4503,11 @@ async function runCommand(id: string, args = ''): Promise<void> {
       return
     case 'plan-mode':
       await togglePlan(args === 'off' ? false : args === 'on' ? true : undefined)
+      return
+    case 'interaction-mode':
+      if (isInteractionMode(args)) await setInteractionMode(args)
+      else if (args) toast(`Usage: /interaction-mode [${INTERACTION_MODES.join('|')}]`, 'error')
+      else toast(tr(INTERACTION_MODE_LABEL[state.current?.state.interactionMode ?? state.blankInteractionMode]))
       return
     case 'work-mode':
       if (isWorkMode(args)) await setWorkMode(args)
@@ -4777,6 +4796,25 @@ async function setWorkMode(mode: string): Promise<void> {
   try {
     const result = await post<{ mode: WorkMode }>(`/api/sessions/${encodeURIComponent(runId)}/work-mode`, { mode })
     if (state.current?.state.runId === runId) state.current.state.workMode = result.mode
+    renderComposer(true)
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+    renderComposer(true)
+  }
+}
+
+async function setInteractionMode(mode: string): Promise<void> {
+  if (!isInteractionMode(mode)) return
+  if (state.sending) return
+  const runId = currentRunId()
+  if (!runId) {
+    state.blankInteractionMode = mode
+    renderComposer(true)
+    return
+  }
+  try {
+    const result = await post<{ mode: InteractionMode }>(`/api/sessions/${encodeURIComponent(runId)}/interaction-mode`, { mode })
+    if (state.current?.state.runId === runId) state.current.state.interactionMode = result.mode
     renderComposer(true)
   } catch (error) {
     toast(error instanceof Error ? error.message : String(error), 'error')

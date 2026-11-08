@@ -4,6 +4,12 @@ export type WorkMode = (typeof WORK_MODES)[number]
 export function isWorkMode(value: unknown): value is WorkMode {
   return typeof value === 'string' && (WORK_MODES as readonly string[]).includes(value)
 }
+/** How the agent involves the user (core INTERACTION_MODES); combined with any work mode. */
+export const INTERACTION_MODES = ['autonomous', 'collaborative'] as const
+export type InteractionMode = (typeof INTERACTION_MODES)[number]
+export function isInteractionMode(value: unknown): value is InteractionMode {
+  return typeof value === 'string' && (INTERACTION_MODES as readonly string[]).includes(value)
+}
 
 export type SessionKind = 'chat' | 'orchestrator' | 'worker'
 export type WorkerStatus =
@@ -328,6 +334,7 @@ export interface SessionState {
   turns: number
   planMode: boolean
   workMode?: WorkMode
+  interactionMode?: InteractionMode
   /** WP-12: the session's live sandbox mode. */
   sandboxMode?: 'read-only' | 'workspace-write' | 'low-integrity' | 'unconfined'
   goal?: string | null

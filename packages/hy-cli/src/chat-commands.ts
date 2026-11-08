@@ -31,6 +31,7 @@ export const CHAT_COMMANDS: readonly ChatCommand[] = [
   { name: 'init', desc: 'draft an AGENTS.md for this repository' },
   { name: 'compact', desc: 'compact the conversation now' },
   { name: 'plan-mode', args: '[off]', desc: 'read-only planning until turned off' },
+  { name: 'interaction-mode', args: '[autonomous|collaborative]', desc: 'autonomous (decide and proceed) or collaborative (align with you on direction)' },
   { name: 'work-mode', args: '[fast|thorough|reflective]', desc: 'choose fast delivery, thorough verification, or reflective (purpose and priorities first)' },
   { name: 'model', args: '<name>', desc: 'switch the worker model' },
   { name: 'new', desc: 'start a new run (fresh conversation)' },

@@ -120,11 +120,31 @@ const WORK_MODE_TEXT: Record<WorkMode, string> = {
     "Work mode: Reflective. Keep the larger purpose firmly in view, and keep checking that the overall direction of the project is right. When the purpose is unclear, ask the user and align your understanding before going further (use ask_user when available). Always weigh priorities by what achieving the purpose needs: settle the requirements that bear on the purpose thoroughly, and do not get caught up in requirements that do not matter. In the final report, list everything you judged low priority as well, and be honest about what was not verified.",
 }
 
-export function sessionContextBlock(parts: { date?: string; goal?: { objective: string }; workMode?: WorkMode; sections?: readonly string[] }): string {
+/**
+ * How the agent involves the user, combined with any work mode (2026-11-09,
+ * the user's wording: 自律 / 共創). `autonomous` is the default: it matches
+ * how the agent behaved before the setting existed.
+ */
+export const INTERACTION_MODES = ['autonomous', 'collaborative'] as const
+export type InteractionMode = (typeof INTERACTION_MODES)[number]
+
+export function isInteractionMode(value: unknown): value is InteractionMode {
+  return typeof value === 'string' && (INTERACTION_MODES as readonly string[]).includes(value)
+}
+
+const INTERACTION_MODE_TEXT: Record<InteractionMode, string> = {
+  autonomous:
+    "Interaction: Autonomous. Judge for yourself and proceed without waiting for the user's instructions. When a choice is needed, decide it yourself in line with the overall direction of the project. If the direction is unclear, do not ask about it piecemeal while working: ask as early as possible, at the point where the user is setting the direction, so the direction is settled first. Ask the user only about choices that cost significant time or money; even for those, if the user has given a general guideline for such choices, follow it and decide yourself.",
+  collaborative:
+    'Interaction: Collaborative. Keep aligning your views with the user as you go. Do not decide on your own anything that sets the direction of the project: present the options and ask the user (use ask_user when available). Where the user has given a general guideline for a kind of choice, decide yourself only within what that guideline covers.',
+}
+
+export function sessionContextBlock(parts: { date?: string; goal?: { objective: string }; workMode?: WorkMode; interactionMode?: InteractionMode; sections?: readonly string[] }): string {
   const body = [
     'Current session context (it replaces any earlier hy_session_context block):',
     ...(parts.date ? [`Today is ${parts.date}.`] : []),
     ...(parts.workMode ? [WORK_MODE_TEXT[parts.workMode]] : []),
+    ...(parts.interactionMode ? [INTERACTION_MODE_TEXT[parts.interactionMode]] : []),
     ...(parts.goal ? [goalPrompt(parts.goal)] : []),
     ...(parts.sections ?? []).filter(Boolean),
   ]

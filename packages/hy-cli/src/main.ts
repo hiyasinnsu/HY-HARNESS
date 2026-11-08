@@ -68,6 +68,8 @@ import {
   userConfigDir,
   userConfigJsonSchema,
   usesNativeTools,
+  INTERACTION_MODES,
+  isInteractionMode,
   isWorkMode,
   WORK_MODES,
 } from '../../core/dist/index.js'
@@ -170,6 +172,7 @@ Options:
   --provider <kind>       ollama | deepseek | openai-compatible | opencode | gemini | mock
   --model <name>          Model name
   --work-mode <mode>     fast, thorough or reflective (hy run/chat)
+  --interaction-mode <m> autonomous (default) or collaborative (hy run/chat)
   --base-url <url>        Provider base URL
   --api-key-env <name>    Environment variable holding the API key
   --sandbox <mode>        workspace-write (default) | read-only | unconfined
@@ -351,11 +354,18 @@ function writeLastMessage(p: Parsed, text: string): void {
   if (file) fs.writeFileSync(path.resolve(file), `${text}\n`, 'utf8')
 }
 
+/** `--work-mode` and `--interaction-mode`; each is independent of the other. */
 function applyWorkModeOption(conv: Conversation, p: Parsed): void {
-  if (p.flags['work-mode'] === undefined) return
-  const mode = str(p.flags, 'work-mode')
-  if (!isWorkMode(mode)) throw new Error(`--work-mode must be one of ${WORK_MODES.join(', ')}`)
-  conv.setWorkMode(mode)
+  if (p.flags['work-mode'] !== undefined) {
+    const mode = str(p.flags, 'work-mode')
+    if (!isWorkMode(mode)) throw new Error(`--work-mode must be one of ${WORK_MODES.join(', ')}`)
+    conv.setWorkMode(mode)
+  }
+  if (p.flags['interaction-mode'] !== undefined) {
+    const interaction = str(p.flags, 'interaction-mode')
+    if (!isInteractionMode(interaction)) throw new Error(`--interaction-mode must be one of ${INTERACTION_MODES.join(', ')}`)
+    conv.setInteractionMode(interaction)
+  }
 }
 
 async function run(p: Parsed): Promise<number> {
@@ -577,6 +587,9 @@ async function chatLoop(p: Parsed, config: HarnessConfig, client: ExecRpcClient,
             break
           case '/plan-mode':
             out = conv.setPlanMode(rest !== 'off')
+            break
+          case '/interaction-mode':
+            out = isInteractionMode(rest) ? conv.setInteractionMode(rest) : rest ? `usage: /interaction-mode [${INTERACTION_MODES.join('|')}]` : `interaction mode: ${conv.currentInteractionMode()}`
             break
           case '/work-mode':
             out = isWorkMode(rest) ? conv.setWorkMode(rest) : rest ? `usage: /work-mode [${WORK_MODES.join('|')}]` : `work mode: ${conv.currentWorkMode()}`

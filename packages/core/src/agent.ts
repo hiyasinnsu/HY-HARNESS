@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { LlmError, type ChatMessage, type Completion, type ImageInput, type LlmProvider, type Usage } from './llm.js'
 import type { SessionEvent, SessionLog } from './session-log.js'
-import { buildSystemPrompt, lastSessionContext, nativeToolDefs, sessionContextBlock, type PromptExtras, type WorkMode } from './prompt.js'
+import { buildSystemPrompt, lastSessionContext, nativeToolDefs, sessionContextBlock, type InteractionMode, type PromptExtras, type WorkMode } from './prompt.js'
 import { AbortRunError, type ToolRuntime } from './tools.js'
 import { Ledger, discoverPinned } from './ledger.js'
 import type { SkillInfo } from './skills.js'
@@ -72,6 +72,8 @@ export interface AgentOptions {
   /** System-prompt variant (benchmark experiments; HarnessConfig.promptVariant). */
   promptVariant?: 'lean' | 'legacy' | 'lean2' | 'lean3' | 'lean4'
   workMode?: () => WorkMode
+  /** How the agent involves the user (session context, like the work mode). */
+  interactionMode?: () => InteractionMode
   /** CP-38: resolved feature flags (streaming can be turned off). */
   features?: Readonly<Record<string, boolean>>
   /** CP-19: lifecycle hooks (userPromptSubmit, modelRequest, …). Default: none. */
@@ -476,6 +478,7 @@ export class Agent {
       // it differ, so the current block is always in the request (Goal 3).
       const context = sessionContextBlock({
         ...(this.options.workMode ? { workMode: this.options.workMode() } : {}),
+        ...(this.options.interactionMode ? { interactionMode: this.options.interactionMode() } : {}),
         // The model's own sense of "now" is its training cutoff (DSH time context).
         date: new Date().toLocaleDateString('sv-SE'),
         ...(this.options.goal ? { goal: this.options.goal } : {}),

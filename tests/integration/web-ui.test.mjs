@@ -106,6 +106,32 @@ async function turn(ctx, runId, message, body = {}) {
   return snapshot(ctx, runId)
 }
 
+test('interaction mode switches, combines with the work mode and survives a server restart', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 120_000, concurrency: false }, async () => {
+  const dir = fixture()
+  let ctx = await runServer(dir)
+  try {
+    const id = await newSession(ctx)
+    assert.equal((await snapshot(ctx, id)).state.interactionMode, 'autonomous')
+    const url = `/api/sessions/${encodeURIComponent(id)}/interaction-mode`
+    assert.equal((await ctx.request(url, { method: 'POST', body: JSON.stringify({ mode: 'fast' }) })).status, 400)
+    assert.equal((await ctx.request(url, { method: 'POST', body: JSON.stringify({ mode: 'collaborative' }) })).status, 200)
+    assert.equal((await ctx.request(`/api/sessions/${encodeURIComponent(id)}/work-mode`, { method: 'POST', body: JSON.stringify({ mode: 'reflective' }) })).status, 200)
+    await turn(ctx, id, 'SAY together')
+    const events = readEvents(sessionLogPath(ctx.handle.config.stateDir))
+    const sent = events.filter(e => e.runId === id && e.type === 'context/update').at(-1)?.payload.content ?? ''
+    assert.match(sent, /Work mode: Reflective/)
+    assert.match(sent, /Interaction: Collaborative/)
+    await ctx.close()
+    ctx = await runServer(dir)
+    const after = (await snapshot(ctx, id)).state
+    assert.equal(after.interactionMode, 'collaborative')
+    assert.equal(after.workMode, 'reflective')
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('work mode switches, validates input and survives a server restart', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 120_000, concurrency: false }, async () => {
   const dir = fixture()
   let ctx = await runServer(dir)

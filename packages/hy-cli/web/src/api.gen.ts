@@ -355,6 +355,15 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
   },
   {
     method: "POST",
+    path: "/api/sessions/:id/interaction-mode",
+    summary: "Set how the agent involves the user (autonomous or collaborative).",
+    errors: [400, 409],
+    request: {
+    mode: { type: "string", required: true },
+    },
+  },
+  {
+    method: "POST",
     path: "/api/sessions/:id/model",
     summary: "Switch the session model.",
     errors: [400],

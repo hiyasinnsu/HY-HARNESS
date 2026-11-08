@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { WORK_MODES, buildSystemPrompt, isWorkMode, sessionContextBlock } from './prompt.js'
+import { INTERACTION_MODES, WORK_MODES, buildSystemPrompt, isInteractionMode, isWorkMode, sessionContextBlock } from './prompt.js'
 
 // Cross-session prefix cache: two sessions with the same tool set share the
 // system prompt up to "This session:", whatever their workspace or role.
@@ -156,4 +156,20 @@ test('every work mode has its own text in the session context, never in the syst
   assert.equal(isWorkMode('reflective'), true)
   assert.equal(isWorkMode('deep'), false)
   assert.equal(isWorkMode(undefined), false)
+})
+
+test('the interaction mode combines with any work mode in the session context', () => {
+  assert.deepEqual([...INTERACTION_MODES], ['autonomous', 'collaborative'])
+  const both = sessionContextBlock({ workMode: 'reflective', interactionMode: 'collaborative' })
+  assert.match(both, /Work mode: Reflective/)
+  assert.match(both, /Interaction: Collaborative/)
+  assert.match(both, /Do not decide on your own anything that sets the direction/)
+  assert.match(both, /general guideline/)
+  const autonomous = sessionContextBlock({ interactionMode: 'autonomous' })
+  assert.match(autonomous, /proceed without waiting for the user's instructions/)
+  assert.match(autonomous, /cost significant time or money/)
+  assert.match(autonomous, /ask as early as possible/)
+  assert.doesNotMatch(sessionContextBlock({ workMode: 'fast' }), /Interaction:/)
+  assert.equal(isInteractionMode('collaborative'), true)
+  assert.equal(isInteractionMode('fast'), false)
 })

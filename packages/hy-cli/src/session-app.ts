@@ -58,9 +58,14 @@ import {
   type SteerMessage,
   type ToolSpec,
   type WorkspaceRootConfig,
+  isInteractionMode,
   isWorkMode,
+  type InteractionMode,
   type WorkMode,
 } from '../../core/dist/index.js'
+
+/** The session's work mode and interaction mode, shared by its agents and subagents. */
+type ModeState = { value: WorkMode; interaction: InteractionMode }
 import {
   Budget4D,
   Guardian,
@@ -534,6 +539,7 @@ function childRunner(
     print: (event: AgentEvent) => void
     sandboxMode: () => SandboxMode
     workMode: () => WorkMode
+    interactionMode: () => InteractionMode
     roleInstruction?: string
   },
 ): SubagentRunner {
@@ -555,6 +561,7 @@ function childRunner(
     },
   )
   conv.setWorkMode(o.workMode())
+  conv.setInteractionMode(o.interactionMode())
   let controller: AbortController | undefined
   // The old `/subagents` view (and any log reader) expects this marker on the
   // child's own run, exactly like a synchronous delegate leaves behind.
@@ -899,6 +906,7 @@ async function runSubagent(
     print: (event: AgentEvent) => void
     roleInstruction?: string
     workMode: WorkMode
+    interactionMode: InteractionMode
   } & ConversationSafety,
 ): Promise<{ final: string; steps: number }> {
   subagents += 1
@@ -942,6 +950,7 @@ async function runSubagent(
     reasoningHistory: config.reasoningHistory,
     promptVariant: config.promptVariant,
     workMode: () => o.workMode,
+    interactionMode: () => o.interactionMode,
     temperature: subagentRole.temperature ?? 0,
     ...(subagentRole.effort ? { effort: subagentRole.effort } : {}),
     nativeTools: usesNativeTools(subagentRole),
@@ -1033,7 +1042,7 @@ export class Conversation {
   private planMode = false
   private planTools: ReadonlySet<string> = PLAN_MODE_TOOLS
   private planOnly = false
-  private workModeState: { value: WorkMode }
+  private workModeState: ModeState
   private readonly goals: GoalStore
   private turnSource: 'user' | 'orchestrator' | 'worker' | 'system' | 'goal' = 'user'
 
@@ -1063,7 +1072,7 @@ export class Conversation {
     private readonly sandboxState: { mode: SandboxMode },
     /** WP-21: steering inbox shared with every agent built for this session. */
     private readonly inbox: SteerInbox,
-    workModeState: { value: WorkMode },
+    workModeState: ModeState,
     /** WP-22: background subagents (undefined when the host has none). */
     readonly agents: SubagentRegistry | undefined,
   ) {
@@ -1166,7 +1175,11 @@ export class Conversation {
     log.setRun(runId)
     const events = readEvents(log.file)
     const lastMode = events.filter((e) => e.runId === runId && e.type === 'session/work-mode').at(-1)?.payload as { mode?: unknown } | undefined
-    const workModeState: { value: WorkMode } = { value: isWorkMode(lastMode?.mode) ? lastMode.mode : 'fast' }
+    const lastInteraction = events.filter((e) => e.runId === runId && e.type === 'session/interaction-mode').at(-1)?.payload as { mode?: unknown } | undefined
+    const workModeState: ModeState = {
+      value: isWorkMode(lastMode?.mode) ? lastMode.mode : 'fast',
+      interaction: isInteractionMode(lastInteraction?.mode) ? lastInteraction.mode : 'autonomous',
+    }
     // WP-12: the sandbox mode is durable state; a resume replays the last switch.
     const sandboxState = { mode: resolveSandboxMode(events, runId, config.sandbox) }
     // WP-21: the agent is rebuilt between turns and on a model switch, so the
@@ -1215,6 +1228,7 @@ export class Conversation {
                 print,
                 sandboxMode: () => sandboxState.mode,
                 workMode: () => workModeState.value,
+                interactionMode: () => workModeState.interaction,
                 ...(options.roleInstruction ? { roleInstruction: options.roleInstruction } : {}),
               }),
             },
@@ -1228,6 +1242,7 @@ export class Conversation {
         readOnly,
         parentRunId: runId,
         workMode: workModeState.value,
+        interactionMode: workModeState.interaction,
         approve,
         skills,
         spillDir,
@@ -1409,6 +1424,7 @@ export class Conversation {
         reasoningHistory: config.reasoningHistory,
         promptVariant: config.promptVariant,
         workMode: () => workModeState.value,
+        interactionMode: () => workModeState.interaction,
         ...(goal ? { goal: { objective: goal.objective, phase: goal.phase, ...(goal.blockerReason ? { blockerReason: goal.blockerReason } : {}) } } : {}),
         maxOutputTokens: role.maxOutputTokens,
         temperature: role.temperature ?? 0,
@@ -1705,6 +1721,17 @@ export class Conversation {
       this.workModeState.value = mode
     }
     return `work mode: ${mode}`
+  }
+
+  currentInteractionMode(): InteractionMode { return this.workModeState.interaction }
+
+  setInteractionMode(mode: InteractionMode): string {
+    if (this.turnActive) throw new Error('interaction mode cannot change while a turn is running')
+    if (mode !== this.workModeState.interaction) {
+      this.log.append('session/interaction-mode', { mode })
+      this.workModeState.interaction = mode
+    }
+    return `interaction mode: ${mode}`
   }
 
   currentModel(): { provider: string; model: string } {
