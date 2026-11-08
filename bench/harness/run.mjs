@@ -112,6 +112,7 @@ const HY_VARIANTS = {
   'hy-lean': { promptVariant: 'lean' },
   'hy-fast': {},
   'hy-thorough': {},
+  'hy-reflective': {},
   'hy-full': { reasoningHistory: 'full' },
   'hy-none': { reasoningHistory: 'none' },
   'hy-legacy': { promptVariant: 'legacy' },
@@ -127,7 +128,7 @@ async function runHy(ws, n, variant) {
   const state = `${ws}.state`
   if (fs.existsSync(state) || fs.existsSync(`${ws}.grader`)) throw new Error(`benchmark state or grader already exists: ${ws}`)
   const started = Date.now()
-  const common = ['--cwd', ws, '--state-dir', state, '--json', '--full-auto', '--exec-server', EXEC_SERVER, ...(variant === 'hy-fast' || variant === 'hy-thorough' ? ['--work-mode', variant.slice(3)] : [])]
+  const common = ['--cwd', ws, '--state-dir', state, '--json', '--full-auto', '--exec-server', EXEC_SERVER, ...(['hy-fast', 'hy-thorough', 'hy-reflective'].includes(variant) ? ['--work-mode', variant.slice(3)] : [])]
   const options = { cwd: ws, env: { ...childEnv, HY_CONFIG_DIR: hyConfigDirs[variant] }, timeoutMs: suite.agentTimeoutMs }
   // `hy chat` reads one prompt per stdin line; a single (multi-line) task goes
   // through `hy run` as an argument, the way DSH receives it.

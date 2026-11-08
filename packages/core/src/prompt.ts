@@ -102,15 +102,29 @@ export const SESSION_CONTEXT_CLOSE = '</hy_session_context>'
  * rewriting the system prompt: the request prefix stays byte-identical, so the
  * provider's prefix cache keeps the whole history (DSH "in-history" updates).
  */
-export type WorkMode = 'fast' | 'thorough'
+/** The work modes, in the order the GUI and the CLI list them; `fast` is the default. */
+export const WORK_MODES = ['fast', 'thorough', 'reflective'] as const
+export type WorkMode = (typeof WORK_MODES)[number]
+
+export function isWorkMode(value: unknown): value is WorkMode {
+  return typeof value === 'string' && (WORK_MODES as readonly string[]).includes(value)
+}
+
+/** What each mode tells the model; sent in the session context, never in the system prompt. */
+const WORK_MODE_TEXT: Record<WorkMode, string> = {
+  fast: 'Work mode: Fast. Keep the whole objective in view and make the smallest complete change. Check the essential requirements and their relevant failure paths in proportion to the risks, then deliver promptly. Never skip checks needed for safety or correctness, or claim more than was verified.',
+  thorough:
+    'Work mode: Thorough. Work carefully through the whole objective and its details. Inspect connected behavior and edge cases, verify changes and relevant failure paths, and resolve defects before delivering. Prioritize checks that reveal distinct risks; repeat equivalent checks when variability or new evidence warrants it. Keep investigation proportional to the requirements and risks; deliver once the necessary checks are complete. Be honest about what was not verified; perfection cannot be guaranteed.',
+  // 2026-11-09, the user's wording (思索).
+  reflective:
+    "Work mode: Reflective. Keep the larger purpose firmly in view, and keep checking that the overall direction of the project is right. When the purpose is unclear, ask the user and align your understanding before going further (use ask_user when available). Always weigh priorities by what achieving the purpose needs: settle the requirements that bear on the purpose thoroughly, and do not get caught up in requirements that do not matter. In the final report, list everything you judged low priority as well, and be honest about what was not verified.",
+}
 
 export function sessionContextBlock(parts: { date?: string; goal?: { objective: string }; workMode?: WorkMode; sections?: readonly string[] }): string {
   const body = [
     'Current session context (it replaces any earlier hy_session_context block):',
     ...(parts.date ? [`Today is ${parts.date}.`] : []),
-    ...(parts.workMode ? [parts.workMode === 'fast'
-      ? 'Work mode: Fast. Keep the whole objective in view and make the smallest complete change. Check the essential requirements and their relevant failure paths in proportion to the risks, then deliver promptly. Never skip checks needed for safety or correctness, or claim more than was verified.'
-      : 'Work mode: Thorough. Work carefully through the whole objective and its details. Inspect connected behavior and edge cases, verify changes and relevant failure paths, and resolve defects before delivering. Prioritize checks that reveal distinct risks; repeat equivalent checks when variability or new evidence warrants it. Keep investigation proportional to the requirements and risks; deliver once the necessary checks are complete. Be honest about what was not verified; perfection cannot be guaranteed.'] : []),
+    ...(parts.workMode ? [WORK_MODE_TEXT[parts.workMode]] : []),
     ...(parts.goal ? [goalPrompt(parts.goal)] : []),
     ...(parts.sections ?? []).filter(Boolean),
   ]

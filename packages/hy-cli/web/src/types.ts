@@ -1,3 +1,10 @@
+/** The work modes the server accepts (core WORK_MODES), in display order. */
+export const WORK_MODES = ['fast', 'thorough', 'reflective'] as const
+export type WorkMode = (typeof WORK_MODES)[number]
+export function isWorkMode(value: unknown): value is WorkMode {
+  return typeof value === 'string' && (WORK_MODES as readonly string[]).includes(value)
+}
+
 export type SessionKind = 'chat' | 'orchestrator' | 'worker'
 export type WorkerStatus =
   | 'queued'
@@ -320,7 +327,7 @@ export interface SessionState {
   busy: boolean
   turns: number
   planMode: boolean
-  workMode?: 'fast' | 'thorough'
+  workMode?: WorkMode
   /** WP-12: the session's live sandbox mode. */
   sandboxMode?: 'read-only' | 'workspace-write' | 'low-integrity' | 'unconfined'
   goal?: string | null

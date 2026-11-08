@@ -89,7 +89,9 @@ import type {
   TrajectoryEvent,
   TreeResponse,
   TurnQueueView,
+  WorkMode,
 } from './types.js'
+import { WORK_MODES, isWorkMode } from './types.js'
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const element = document.getElementById(id)
@@ -131,7 +133,7 @@ interface State {
   busy: boolean
   orchestrationBusy: boolean
   planMode: boolean
-  blankWorkMode: 'fast' | 'thorough'
+  blankWorkMode: WorkMode
   goal: string
   goalState: GoalStateView | null
   /**
@@ -418,6 +420,9 @@ function renderToasts(): void {
     )
     .join('')
 }
+
+/** i18n key of each work mode's label. */
+const WORK_MODE_LABEL: Record<WorkMode, string> = { fast: 'workModeFast', thorough: 'workModeThorough', reflective: 'workModeReflective' }
 
 function tr(key: string, vars?: Record<string, string | number>): string {
   return translate(state.locale, key, vars)
@@ -1290,7 +1295,7 @@ function renderComposer(force = false): void {
         <button type="button" class="chip ${isActiveOrchestrator ? 'active' : ''}" data-action="toggle-orchestration" title="${isActiveOrchestrator ? tr('stopOrchestration') : orchestrationLabel}">${icon('bot', 16)} ${orchestrationLabel}</button>
         <button type="button" class="chip" data-action="open-goal" title="${tr('setGoal')}">${icon('target', 16)} ${tr('goal')}</button>
         <button type="button" class="chip" data-action="open-model" title="Change model">${icon('cpu', 16)} ${escapeHtml(modelName)}</button>
-        <select id="work-mode-select" class="effort-select" title="${tr('workMode')}" aria-label="${tr('workMode')}" ${state.busy || state.sending ? 'disabled' : ''}><option value="fast" ${(current ? current.workMode ?? 'fast' : state.blankWorkMode) === 'fast' ? 'selected' : ''}>${tr('workModeFast')}</option><option value="thorough" ${(current ? current.workMode ?? 'fast' : state.blankWorkMode) === 'thorough' ? 'selected' : ''}>${tr('workModeThorough')}</option></select>
+        <select id="work-mode-select" class="effort-select" title="${tr('workMode')}" aria-label="${tr('workMode')}" ${state.busy || state.sending ? 'disabled' : ''}>${WORK_MODES.map((mode) => `<option value="${mode}" ${(current ? current.workMode ?? 'fast' : state.blankWorkMode) === mode ? 'selected' : ''}>${tr(WORK_MODE_LABEL[mode])}</option>`).join('')}</select>
         <select id="effort-select" class="effort-select" title="${tr('effort')}">${effortValues.map((e) => `<option value="${e}" ${(current?.effort ?? '') === e ? 'selected' : ''}>${e ? tr(`effort_${e}`) : tr('effortDefault')}</option>`).join('')}</select>
         <button type="button" class="chip" data-action="sandbox-menu" title="${tr('sandboxTitle')}">${icon('shield', 16)} ${escapeHtml(sandboxModeLabel(current?.sandboxMode ?? config?.sandbox ?? 'unconfined'))}</button>
         <span class="composer-spacer"></span>
@@ -4303,8 +4308,8 @@ async function sendMessage(text: string): Promise<void> {
       const data = await post<{ runId: string; state: SessionState }>('/api/sessions')
       runId = data.runId
       created = true
-      if (state.blankWorkMode === 'thorough') {
-        const selected = await post<{ mode: 'fast' | 'thorough' }>(`/api/sessions/${encodeURIComponent(runId)}/work-mode`, { mode: state.blankWorkMode })
+      if (state.blankWorkMode !== 'fast') {
+        const selected = await post<{ mode: WorkMode }>(`/api/sessions/${encodeURIComponent(runId)}/work-mode`, { mode: state.blankWorkMode })
         data.state.workMode = selected.mode
       }
       state.current = { runId: data.runId, entries: [], state: data.state }
@@ -4486,9 +4491,9 @@ async function runCommand(id: string, args = ''): Promise<void> {
       await togglePlan(args === 'off' ? false : args === 'on' ? true : undefined)
       return
     case 'work-mode':
-      if (args === 'fast' || args === 'thorough') await setWorkMode(args)
-      else if (args) toast('Usage: /work-mode [fast|thorough]', 'error')
-      else toast(tr((state.current?.state.workMode ?? state.blankWorkMode) === 'thorough' ? 'workModeThorough' : 'workModeFast'))
+      if (isWorkMode(args)) await setWorkMode(args)
+      else if (args) toast(`Usage: /work-mode [${WORK_MODES.join('|')}]`, 'error')
+      else toast(tr(WORK_MODE_LABEL[state.current?.state.workMode ?? state.blankWorkMode]))
       return
     case 'goal': {
       if (!args) {
@@ -4761,7 +4766,7 @@ async function runAction(action: 'undo' | 'compact' | 'review' | 'model', value?
 }
 
 async function setWorkMode(mode: string): Promise<void> {
-  if (mode !== 'fast' && mode !== 'thorough') return
+  if (!isWorkMode(mode)) return
   if (state.sending) return
   const runId = currentRunId()
   if (!runId) {
@@ -4770,7 +4775,7 @@ async function setWorkMode(mode: string): Promise<void> {
     return
   }
   try {
-    const result = await post<{ mode: 'fast' | 'thorough' }>(`/api/sessions/${encodeURIComponent(runId)}/work-mode`, { mode })
+    const result = await post<{ mode: WorkMode }>(`/api/sessions/${encodeURIComponent(runId)}/work-mode`, { mode })
     if (state.current?.state.runId === runId) state.current.state.workMode = result.mode
     renderComposer(true)
   } catch (error) {

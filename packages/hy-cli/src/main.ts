@@ -68,6 +68,8 @@ import {
   userConfigDir,
   userConfigJsonSchema,
   usesNativeTools,
+  isWorkMode,
+  WORK_MODES,
 } from '../../core/dist/index.js'
 import {
   Budget4D,
@@ -167,7 +169,7 @@ Options:
   --state-dir <dir>       State directory (default: %LOCALAPPDATA%\\hy-harness\\state\\<id>)
   --provider <kind>       ollama | deepseek | openai-compatible | opencode | gemini | mock
   --model <name>          Model name
-  --work-mode <mode>     fast or thorough (hy run/chat)
+  --work-mode <mode>     fast, thorough or reflective (hy run/chat)
   --base-url <url>        Provider base URL
   --api-key-env <name>    Environment variable holding the API key
   --sandbox <mode>        workspace-write (default) | read-only | unconfined
@@ -352,7 +354,7 @@ function writeLastMessage(p: Parsed, text: string): void {
 function applyWorkModeOption(conv: Conversation, p: Parsed): void {
   if (p.flags['work-mode'] === undefined) return
   const mode = str(p.flags, 'work-mode')
-  if (mode !== 'fast' && mode !== 'thorough') throw new Error('--work-mode must be fast or thorough')
+  if (!isWorkMode(mode)) throw new Error(`--work-mode must be one of ${WORK_MODES.join(', ')}`)
   conv.setWorkMode(mode)
 }
 
@@ -577,7 +579,7 @@ async function chatLoop(p: Parsed, config: HarnessConfig, client: ExecRpcClient,
             out = conv.setPlanMode(rest !== 'off')
             break
           case '/work-mode':
-            out = rest === 'fast' || rest === 'thorough' ? conv.setWorkMode(rest) : rest ? 'usage: /work-mode [fast|thorough]' : `work mode: ${conv.currentWorkMode()}`
+            out = isWorkMode(rest) ? conv.setWorkMode(rest) : rest ? `usage: /work-mode [${WORK_MODES.join('|')}]` : `work mode: ${conv.currentWorkMode()}`
             break
           case '/model':
             out = rest ? conv.setModel(rest) : `model: ${config.role.provider}/${config.role.model}`

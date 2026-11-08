@@ -58,6 +58,8 @@ import {
   type SteerMessage,
   type ToolSpec,
   type WorkspaceRootConfig,
+  isWorkMode,
+  type WorkMode,
 } from '../../core/dist/index.js'
 import {
   Budget4D,
@@ -531,7 +533,7 @@ function childRunner(
     answer?: (question: string) => Promise<string>
     print: (event: AgentEvent) => void
     sandboxMode: () => SandboxMode
-    workMode: () => 'fast' | 'thorough'
+    workMode: () => WorkMode
     roleInstruction?: string
   },
 ): SubagentRunner {
@@ -896,7 +898,7 @@ async function runSubagent(
     spillDir: string
     print: (event: AgentEvent) => void
     roleInstruction?: string
-    workMode: 'fast' | 'thorough'
+    workMode: WorkMode
   } & ConversationSafety,
 ): Promise<{ final: string; steps: number }> {
   subagents += 1
@@ -1031,7 +1033,7 @@ export class Conversation {
   private planMode = false
   private planTools: ReadonlySet<string> = PLAN_MODE_TOOLS
   private planOnly = false
-  private workModeState: { value: 'fast' | 'thorough' }
+  private workModeState: { value: WorkMode }
   private readonly goals: GoalStore
   private turnSource: 'user' | 'orchestrator' | 'worker' | 'system' | 'goal' = 'user'
 
@@ -1061,7 +1063,7 @@ export class Conversation {
     private readonly sandboxState: { mode: SandboxMode },
     /** WP-21: steering inbox shared with every agent built for this session. */
     private readonly inbox: SteerInbox,
-    workModeState: { value: 'fast' | 'thorough' },
+    workModeState: { value: WorkMode },
     /** WP-22: background subagents (undefined when the host has none). */
     readonly agents: SubagentRegistry | undefined,
   ) {
@@ -1164,7 +1166,7 @@ export class Conversation {
     log.setRun(runId)
     const events = readEvents(log.file)
     const lastMode = events.filter((e) => e.runId === runId && e.type === 'session/work-mode').at(-1)?.payload as { mode?: unknown } | undefined
-    const workModeState: { value: 'fast' | 'thorough' } = { value: lastMode?.mode === 'thorough' ? 'thorough' : 'fast' }
+    const workModeState: { value: WorkMode } = { value: isWorkMode(lastMode?.mode) ? lastMode.mode : 'fast' }
     // WP-12: the sandbox mode is durable state; a resume replays the last switch.
     const sandboxState = { mode: resolveSandboxMode(events, runId, config.sandbox) }
     // WP-21: the agent is rebuilt between turns and on a model switch, so the
@@ -1694,9 +1696,9 @@ export class Conversation {
     return this.sessionRole.effort
   }
 
-  currentWorkMode(): 'fast' | 'thorough' { return this.workModeState.value }
+  currentWorkMode(): WorkMode { return this.workModeState.value }
 
-  setWorkMode(mode: 'fast' | 'thorough'): string {
+  setWorkMode(mode: WorkMode): string {
     if (this.turnActive) throw new Error('work mode cannot change while a turn is running')
     if (mode !== this.workModeState.value) {
       this.log.append('session/work-mode', { mode })

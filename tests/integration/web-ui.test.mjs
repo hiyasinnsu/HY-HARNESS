@@ -127,6 +127,15 @@ test('work mode switches, validates input and survives a server restart', { skip
     assert.equal((await snapshot(ctx, id)).state.usage.cacheUsageComplete, false)
     assert.equal((await ctx.request(url, { method: 'POST', body: JSON.stringify({ mode: 'fast' }) })).status, 200)
     assert.equal((await snapshot(ctx, id)).state.workMode, 'fast')
+    // The reflective mode reaches the model and survives a restart too
+    // (restore used to know only thorough and fall back to fast).
+    assert.equal((await ctx.request(url, { method: 'POST', body: JSON.stringify({ mode: 'reflective' }) })).status, 200)
+    await turn(ctx, id, 'SAY reflective')
+    const after = readEvents(sessionLogPath(ctx.handle.config.stateDir))
+    assert.ok(after.some(e => e.runId === id && e.type === 'context/update' && e.payload.content.includes('Work mode: Reflective')))
+    await ctx.close()
+    ctx = await runServer(dir)
+    assert.equal((await snapshot(ctx, id)).state.workMode, 'reflective')
   } finally {
     await ctx.close()
     fs.rmSync(dir, { recursive: true, force: true })

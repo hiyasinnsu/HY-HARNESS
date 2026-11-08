@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildSystemPrompt } from './prompt.js'
+import { WORK_MODES, buildSystemPrompt, isWorkMode, sessionContextBlock } from './prompt.js'
 
 // Cross-session prefix cache: two sessions with the same tool set share the
 // system prompt up to "This session:", whatever their workspace or role.
@@ -140,4 +140,20 @@ test('skill and MCP catalogs sit in the session part (only the tools they add ch
   assert.match(tail, /MCP servers: docs-server/)
   assert.match(tail, /review-diff/)
   assert.doesNotMatch(head, /MCP servers: docs-server|alpha/)
+})
+
+test('every work mode has its own text in the session context, never in the system prompt', () => {
+  assert.deepEqual([...WORK_MODES], ['fast', 'thorough', 'reflective'])
+  const texts = WORK_MODES.map((mode) => sessionContextBlock({ workMode: mode }))
+  assert.equal(new Set(texts).size, WORK_MODES.length)
+  const reflective = sessionContextBlock({ workMode: 'reflective' })
+  assert.match(reflective, /Work mode: Reflective/)
+  assert.match(reflective, /larger purpose/)
+  assert.match(reflective, /ask the user/)
+  assert.match(reflective, /low priority/)
+  assert.match(reflective, /not verified/)
+  assert.doesNotMatch(buildSystemPrompt('C:\work\alpha', false, false, { native: true, promptVariant: 'lean4' }), /Work mode/)
+  assert.equal(isWorkMode('reflective'), true)
+  assert.equal(isWorkMode('deep'), false)
+  assert.equal(isWorkMode(undefined), false)
 })

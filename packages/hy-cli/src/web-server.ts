@@ -49,6 +49,9 @@ import {
   type Schema,
   type SessionEvent,
   type ToolSpec,
+  isWorkMode,
+  WORK_MODES,
+  type WorkMode,
 } from '../../core/dist/index.js'
 import {
   Conversation,
@@ -426,7 +429,7 @@ interface WebSession {
   pendingApprovals: Map<string, Pending<boolean | { approved: boolean; reason?: string }>>
   pendingQuestions: Map<string, Pending<string>>
   planMode: boolean
-  workMode?: 'fast' | 'thorough'
+  workMode?: WorkMode
   /** WP-12: the session's live sandbox mode (persisted in the session log). */
   sandboxMode: SandboxMode
   goal?: string | undefined
@@ -1510,7 +1513,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       pendingApprovals: new Map(),
       pendingQuestions: new Map(),
       planMode: kind === 'orchestrator' ? true : planModeOf(events, runId),
-      workMode: (events.filter((e) => e.runId === runId && e.type === 'session/work-mode').at(-1)?.payload as { mode?: unknown } | undefined)?.mode === 'thorough' ? 'thorough' : 'fast',
+      workMode: ((mode: unknown): WorkMode => (isWorkMode(mode) ? mode : 'fast'))(
+        (events.filter((e) => e.runId === runId && e.type === 'session/work-mode').at(-1)?.payload as { mode?: unknown } | undefined)?.mode,
+      ),
       sandboxMode: resolveSandboxMode(events, runId, config.sandbox),
       model: modelForKind(kind),
       goal: goalOf(events, runId),
@@ -4406,8 +4411,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
 
           if (sub === 'work-mode' && method === 'POST') {
             const body = await readBody()
-            if (body.mode !== 'fast' && body.mode !== 'thorough') {
-              json(res, 400, { error: 'mode must be fast or thorough' })
+            if (!isWorkMode(body.mode)) {
+              json(res, 400, { error: `mode must be one of ${WORK_MODES.join(', ')}` })
               return
             }
             if (session.busy) {
