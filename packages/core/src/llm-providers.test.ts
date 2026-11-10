@@ -68,7 +68,7 @@ test('the Anthropic adapter sends Messages API requests and parses tool_use', as
     })
     assert.equal(completion.content, 'Reading now.')
     assert.equal(completion.reasoning, 'I should read it.')
-    assert.deepEqual(completion.toolCalls, [{ name: 'read_file', args: { path: 'README.md' } }])
+    assert.deepEqual(completion.toolCalls, [{ name: 'read_file', args: { path: 'README.md' }, id: 'toolu_1' }])
     assert.deepEqual(completion.usage, { inputTokens: 120, outputTokens: 30, cacheHitTokens: 100, cacheMissTokens: 20 })
 
     const sent = stub.requests[0]!

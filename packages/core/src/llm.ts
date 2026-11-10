@@ -31,7 +31,112 @@ export interface ChatMessage {
   reasoning?: string
   /** Provider continuation metadata. Local history remains authoritative. */
   gemini?: GeminiContinuation & { content: string }
+  /**
+   * Assistant messages: the native calls this reply made. `content` keeps them
+   * in the text protocol's form (logs, the text-protocol fallback); adapters
+   * that offer tools replay them in the API's own call shape instead, so the
+   * model never sees its own calls as JSON prose to imitate.
+   */
+  toolCalls?: HistoryToolCall[]
+  /** User messages: one result per call of the assistant message before it. */
   toolResults?: { entries: NativeToolResult[]; rendered: string }
+  /** Assistant messages: signed thinking blocks (Anthropic), replayed before tool_use. */
+  thinkingBlocks?: unknown[]
+}
+
+/** A native call kept on its assistant message (`ChatMessage.toolCalls`). */
+export interface HistoryToolCall {
+  id: string
+  name: string
+  args: unknown
+}
+
+/** One step's calls and the result text of each, in call order. */
+interface ToolExchange {
+  calls: HistoryToolCall[]
+  results: Array<{ id: string; name: string; text: string }>
+  /** Text that rode on the results message after the results (session context, notes). */
+  extra: string
+  images?: ImageInput[]
+}
+
+export type WireItem = { kind: 'message'; message: ChatMessage } | { kind: 'exchange'; message: ChatMessage; exchange: ToolExchange }
+
+/**
+ * The conversation with each tool step paired up: an assistant message that
+ * made native calls, and the results that answered them. With `structured`
+ * false (no tools offered: the text protocol) every message stays as it is.
+ *
+ * The results are taken per call when the results message is unchanged since
+ * the step ran. Compaction rewrites old results into a locator; then the whole
+ * message answers the first call, so every call still gets its answer (the
+ * APIs reject a call without one) and nothing pruned comes back.
+ */
+export function wireItems(messages: readonly ChatMessage[], structured: boolean | ((message: ChatMessage) => boolean)): WireItem[] {
+  const out: WireItem[] = []
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]!
+    const allowed = typeof structured === 'function' ? structured(message) : structured
+    if (!allowed || message.role !== 'assistant' || !message.toolCalls?.length) {
+      out.push({ kind: 'message', message })
+      continue
+    }
+    const calls = message.toolCalls
+    const next = messages[i + 1]?.role === 'user' ? messages[i + 1] : undefined
+    const results = next?.toolResults
+    const exact = next && results && next.content.startsWith(results.rendered) &&
+      results.entries.length === calls.length && results.entries.every((entry, k) => entry.id === calls[k]!.id)
+    const exchange: ToolExchange = exact
+      ? {
+          calls,
+          results: results.entries.map(({ id, name, text }) => ({ id, name, text })),
+          extra: next.content.slice(results.rendered.length).trim(),
+          ...(next.images?.length ? { images: next.images } : {}),
+        }
+      : {
+          calls,
+          results: calls.map((call, k) => ({
+            id: call.id,
+            name: call.name,
+            text: k === 0 ? next?.content || '(no result recorded)' : '(this result is included in the first result of this step)',
+          })),
+          extra: '',
+          ...(next?.images?.length ? { images: next.images } : {}),
+        }
+    out.push({ kind: 'exchange', message, exchange })
+    if (next) i += 1
+  }
+  return out
+}
+
+/**
+ * Reasoning written into the reply text as `<think>…</think>` (models served
+ * through chat templates that do not split it out) belongs in `reasoning`: left
+ * in `content` it became the final answer, and a `{` inside it could be read as
+ * a tool call. A reply that opens `<think>` and never closes it was cut off
+ * while thinking; one that only closes it (`…</think>answer`) had the opening
+ * tag eaten by the template.
+ */
+export function splitThinkTags(content: string): { content: string; reasoning?: string } {
+  const open = /^\s*<think>/.exec(content)
+  if (open) {
+    const rest = content.slice(open[0].length)
+    const close = rest.indexOf('</think>')
+    if (close < 0) return { content: '', reasoning: rest.trim() }
+    return { content: rest.slice(close + '</think>'.length).trim(), reasoning: rest.slice(0, close).trim() }
+  }
+  const close = content.indexOf('</think>')
+  if (close >= 0 && !content.includes('<think>') && !content.slice(0, close).includes('```')) {
+    return { content: content.slice(close + '</think>'.length).trim(), reasoning: content.slice(0, close).trim() }
+  }
+  return { content }
+}
+
+/** Joins reasoning from a separate channel and from `<think>` tags. */
+function withThinkSplit(content: string, reasoning: string | undefined): { content: string; reasoning?: string } {
+  const split = splitThinkTags(content)
+  const joined = [reasoning, split.reasoning].filter((part) => part && part.trim()).join('\n')
+  return { content: split.content, ...(joined ? { reasoning: joined } : {}) }
 }
 
 interface GeminiContinuation {
@@ -52,9 +157,18 @@ export interface ImageInput {
   data: string
 }
 
-/** Messages in Ollama's shape: images as a base64 list beside the text. */
-function ollamaMessages(messages: ChatMessage[]) {
-  return messages.map((m) => (m.images?.length ? { role: m.role, content: m.content, images: m.images.map((i) => i.data) } : { role: m.role, content: m.content }))
+/** Messages in Ollama's shape: images as a base64 list beside the text; tool steps as `tool_calls` / `role: tool`. */
+function ollamaMessages(messages: ChatMessage[], structured = false) {
+  const plain = (m: ChatMessage) => (m.images?.length ? { role: m.role, content: m.content, images: m.images.map((i) => i.data) } : { role: m.role, content: m.content })
+  return wireItems(messages, structured).flatMap((item): unknown[] => {
+    if (item.kind === 'message') return [plain(item.message)]
+    const { calls, results, extra, images } = item.exchange
+    return [
+      { role: 'assistant', content: '', tool_calls: calls.map((call) => ({ function: { name: call.name, arguments: call.args ?? {} } })) },
+      ...results.map((result) => ({ role: 'tool', content: result.text, tool_name: result.name })),
+      ...(extra || images?.length ? [{ role: 'user', content: extra, ...(images?.length ? { images: images.map((i) => i.data) } : {}) }] : []),
+    ]
+  })
 }
 
 /** Messages in the OpenAI Chat Completions shape: images as data-URL content parts. */
@@ -63,20 +177,36 @@ function ollamaMessages(messages: ChatMessage[]) {
  * reasoning as `reasoning_content` (DeepSeek, including through OpenCode);
  * other OpenAI-compatible servers may reject the field, so it is opt-in.
  */
-function openAiMessages(messages: ChatMessage[], withReasoning = false) {
-  return messages.map((m) =>
-    withReasoning && m.role === 'assistant' && m.reasoning
-      ? { role: m.role, content: m.content, reasoning_content: m.reasoning }
-      : m.images?.length
+export function openAiMessages(messages: ChatMessage[], withReasoning = false, structured = false) {
+  const withImages = (role: string, text: string, images: ImageInput[] | undefined) =>
+    images?.length
       ? {
-          role: m.role,
+          role,
           content: [
-            { type: 'text', text: m.content },
-            ...m.images.map((i) => ({ type: 'image_url', image_url: { url: `data:${i.mimeType};base64,${i.data}` } })),
+            { type: 'text', text },
+            ...images.map((i) => ({ type: 'image_url', image_url: { url: `data:${i.mimeType};base64,${i.data}` } })),
           ],
         }
-      : { role: m.role, content: m.content },
-  )
+      : { role, content: text }
+  return wireItems(messages, structured).flatMap((item): unknown[] => {
+    const m = item.message
+    const reasoning = withReasoning && m.role === 'assistant' && m.reasoning ? { reasoning_content: m.reasoning } : {}
+    if (item.kind === 'message') {
+      return [reasoning.reasoning_content ? { role: m.role, content: m.content, ...reasoning } : withImages(m.role, m.content, m.images)]
+    }
+    const { calls, results, extra, images } = item.exchange
+    return [
+      {
+        role: 'assistant',
+        // An empty string, not null: several compatible servers reject null content.
+        content: '',
+        ...reasoning,
+        tool_calls: calls.map((call) => ({ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) } })),
+      },
+      ...results.map((result) => ({ role: 'tool', tool_call_id: result.id, content: result.text })),
+      ...(extra || images?.length ? [withImages('user', extra, images)] : []),
+    ]
+  })
 }
 
 export interface Usage {
@@ -106,6 +236,8 @@ export interface Completion {
   /** The provider stopped at its output limit. A partial tool batch must never run. */
   outputLimited?: true
   gemini?: GeminiContinuation
+  /** Signed thinking blocks to replay with this reply's tool calls (Anthropic). */
+  thinkingBlocks?: unknown[]
   /**
    * Set when the harness cut the stream because the model fell into a loop
    * repeating a short fragment; `content` / `reasoning` end where the loop
@@ -400,7 +532,7 @@ export class OllamaProvider implements LlmProvider {
         headers: requestHeaders(this.role, '', { 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           model: this.role.model,
-          messages: ollamaMessages(messages),
+          messages: ollamaMessages(messages, Boolean(options.tools?.length)),
           stream: false,
           // Local reasoning models are opt-in: `think` stays off unless the
           // role asks for it through `effort`.
@@ -421,14 +553,18 @@ export class OllamaProvider implements LlmProvider {
       this.retry,
     )
     const body = JSON.parse(text) as {
-      message?: { content?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: unknown } }> }
+      message?: { content?: string; thinking?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: unknown } }> }
       done_reason?: string
       prompt_eval_count?: number
       eval_count?: number
     }
     const calls = (body.message?.tool_calls ?? []).filter((c) => c.function?.name)
+    // Ollama returns reasoning in `thinking` when `think` is on, and in
+    // `<think>` tags inside the content on older servers and templates.
+    const split = withThinkSplit(body.message?.content ?? '', body.message?.thinking)
     return {
-      content: body.message?.content ?? '',
+      content: split.content,
+      ...(split.reasoning ? { reasoning: split.reasoning } : {}),
       ...(body.done_reason === 'length' ? { outputLimited: true } : {}),
       usage: {
         inputTokens: body.prompt_eval_count ?? 0,
@@ -498,7 +634,8 @@ export class OpenAiProvider implements LlmProvider {
     const echo = this.role.reasoningEcho ?? this.echoReasoning
     return JSON.stringify({
       model: this.role.model,
-      messages: openAiMessages(messages, echo && !drop.has('reasoning_content')),
+      // Tool steps go back as `tool_calls` / `role: tool` while tools are offered.
+      messages: openAiMessages(messages, echo && !drop.has('reasoning_content'), Boolean(options.tools?.length) && !drop.has('tools')),
       ...(streaming ? { stream: true, ...(drop.has('stream_options') ? {} : { stream_options: { include_usage: true } }) } : {}),
       [tokenField]: options.maxTokens,
       ...(drop.has('temperature') ? {} : { temperature: options.temperature }),
@@ -575,7 +712,7 @@ export class OpenAiProvider implements LlmProvider {
       let buffer = ''
       let content = ''
       let reasoning = ''
-      const calls = new Map<number, { name: string; args: string }>()
+      const calls = new Map<number, { name: string; args: string; id?: string }>()
       let usage: Usage = { inputTokens: 0, outputTokens: 0 }
       // A stream that ends without `[DONE]` or a finish_reason was cut off
       // (a dropped connection, a proxy timeout): its partial answer must not
@@ -601,6 +738,36 @@ export class OpenAiProvider implements LlmProvider {
         }
         return false
       }
+      // Live deltas: text inside a leading `<think>…</think>` is shown as
+      // reasoning, not as the answer. Up to 7 characters are held back while a
+      // tag may still be arriving.
+      let thinkState: 'pending' | 'in' | 'out' = 'pending'
+      let shown = 0
+      const emitContent = () => {
+        if (!options.onDelta) return
+        if (thinkState === 'pending') {
+          const head = content.trimStart()
+          if (head.length < '<think>'.length && '<think>'.startsWith(head)) return
+          thinkState = head.startsWith('<think>') ? 'in' : 'out'
+          if (thinkState === 'in') shown = content.indexOf('<think>') + '<think>'.length
+        }
+        if (thinkState === 'in') {
+          const close = content.indexOf('</think>', shown)
+          if (close < 0) {
+            const safe = content.length - '</think>'.length
+            if (safe > shown) options.onDelta({ reasoning: content.slice(shown, safe) })
+            shown = Math.max(shown, safe)
+            return
+          }
+          if (close > shown) options.onDelta({ reasoning: content.slice(shown, close) })
+          shown = close + '</think>'.length
+          thinkState = 'out'
+        }
+        if (content.length > shown) {
+          options.onDelta({ content: content.slice(shown) })
+          shown = content.length
+        }
+      }
       for (;;) {
         if (degenerate) break
         const { done, value } = await reader.read()
@@ -623,7 +790,7 @@ export class OpenAiProvider implements LlmProvider {
                 content?: unknown
                 reasoning_content?: unknown
                 reasoning?: unknown
-                tool_calls?: Array<{ index?: number; function?: { name?: string; arguments?: string } }>
+                tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }>
               }
             }>
           }
@@ -643,7 +810,7 @@ export class OpenAiProvider implements LlmProvider {
           const piece = textOf(delta.content)
           if (piece.length > 0) {
             content += piece
-            options.onDelta?.({ content: piece })
+            emitContent()
           }
           const thought = textOf(delta.reasoning_content) || textOf(delta.reasoning)
           if (thought.length > 0) {
@@ -655,6 +822,7 @@ export class OpenAiProvider implements LlmProvider {
           for (const [i, call] of (delta.tool_calls ?? []).entries()) {
             const index = call.index ?? i
             const current = calls.get(index) ?? { name: '', args: '' }
+            if (call.id && !current.id) current.id = call.id
             if (call.function?.name) current.name += call.function.name
             if (call.function?.arguments) current.args += call.function.arguments
             calls.set(index, current)
@@ -677,10 +845,11 @@ export class OpenAiProvider implements LlmProvider {
         }
       }
       if (!finished) throw new LlmError(`${this.role.provider}: the stream ended before the response was complete`)
-      const toolCalls = [...calls.values()].filter((call) => call.name.length > 0).map((call) => ({ name: call.name, args: parseArgs(call.args) }))
+      const toolCalls = [...calls.values()].filter((call) => call.name.length > 0).map((call) => ({ name: call.name, args: parseArgs(call.args), ...(call.id ? { id: call.id } : {}) }))
+      const split = withThinkSplit(content, reasoning || undefined)
       return {
-        content,
-        ...(reasoning.length > 0 ? { reasoning } : {}),
+        content: split.content,
+        ...(split.reasoning ? { reasoning: split.reasoning } : {}),
         ...(outputLimited ? { outputLimited: true } : {}),
         usage,
         ...(toolCalls.length > 0 ? { toolCalls } : {}),
@@ -713,22 +882,23 @@ export class OpenAiProvider implements LlmProvider {
           content?: unknown
           reasoning_content?: unknown
           reasoning?: unknown
-          tool_calls?: Array<{ function?: { name?: string; arguments?: unknown } }>
+          tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: unknown } }>
         }
       }>
       usage?: RawUsage
     }
     const message = body.choices?.[0]?.message
     const calls = (message?.tool_calls ?? []).filter((c) => c.function?.name)
-    const reasoning = textOf(message?.reasoning_content) || textOf(message?.reasoning) || undefined
+    const channel = textOf(message?.reasoning_content) || textOf(message?.reasoning) || undefined
     // The endpoint returns reasoning: send it back on later requests.
-    if (reasoning && this.role.reasoningEcho === undefined) this.learnReasoningEcho()
+    if (channel && this.role.reasoningEcho === undefined) this.learnReasoningEcho()
+    const split = withThinkSplit(textOf(message?.content), channel)
     return {
-      content: textOf(message?.content),
+      content: split.content,
       ...(/^(length|max_tokens)$/.test(body.choices?.[0]?.finish_reason ?? '') ? { outputLimited: true } : {}),
       usage: normalizeUsage(body.usage),
-      ...(reasoning ? { reasoning } : {}),
-      ...(calls.length > 0 ? { toolCalls: calls.map((c) => ({ name: c.function!.name!, args: parseArgs(c.function!.arguments) })) } : {}),
+      ...(split.reasoning ? { reasoning: split.reasoning } : {}),
+      ...(calls.length > 0 ? { toolCalls: calls.map((c) => ({ name: c.function!.name!, args: parseArgs(c.function!.arguments), ...(c.id ? { id: c.id } : {}) })) } : {}),
     }
   }
 }
@@ -1192,6 +1362,10 @@ type CacheControl = { cache_control?: { type: 'ephemeral' } }
 type AnthropicBlock =
   | ({ type: 'text'; text: string } & CacheControl)
   | ({ type: 'image'; source: { type: 'base64'; media_type: string; data: string } } & CacheControl)
+  | ({ type: 'tool_use'; id: string; name: string; input: unknown } & CacheControl)
+  | ({ type: 'tool_result'; tool_use_id: string; content: string } & CacheControl)
+  | ({ type: 'thinking'; thinking: string; signature: string } & CacheControl)
+  | ({ type: 'redacted_thinking'; data: string } & CacheControl)
 
 /**
  * Anthropic caches a prefix only up to a block marked with `cache_control`
@@ -1215,21 +1389,55 @@ export function withAnthropicCacheBreakpoints(
   return messages
 }
 
-/** The Messages API wants alternating roles; the harness can emit two user turns. */
-export function anthropicMessages(messages: readonly ChatMessage[]): Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> {
+/** Tool ids from another provider's history, made valid for the Messages API (`^[a-zA-Z0-9_-]+$`). */
+function anthropicToolId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]/g, '_') || 'call'
+}
+
+/**
+ * The Messages API wants alternating roles; the harness can emit two user
+ * turns. With `structured` (tools offered), tool steps become `tool_use` /
+ * `tool_result` blocks. With extended thinking on, a `tool_use` must follow its
+ * signed thinking block, so a step without one (a resumed session, another
+ * provider's history) stays text.
+ */
+export function anthropicMessages(
+  messages: readonly ChatMessage[],
+  structured: boolean | ((message: ChatMessage) => boolean) = false,
+): Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> {
   const out: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
-  for (const message of messages) {
-    if (message.role === 'system') continue
-    const role = message.role === 'assistant' ? 'assistant' : 'user'
-    const blocks: AnthropicBlock[] = []
-    if (message.content) blocks.push({ type: 'text', text: message.content })
-    for (const image of message.images ?? []) {
-      blocks.push({ type: 'image', source: { type: 'base64', media_type: image.mimeType, data: image.data } })
-    }
-    if (blocks.length === 0) continue
+  const push = (role: 'user' | 'assistant', blocks: AnthropicBlock[]) => {
+    if (blocks.length === 0) return
     const previous = out.at(-1)
     if (previous && previous.role === role) previous.content.push(...blocks)
     else out.push({ role, content: blocks })
+  }
+  const images = (list: ImageInput[] | undefined): AnthropicBlock[] =>
+    (list ?? []).map((image) => ({ type: 'image', source: { type: 'base64', media_type: image.mimeType, data: image.data } }))
+  for (const item of wireItems(messages.filter((message) => message.role !== 'system'), structured)) {
+    if (item.kind === 'message') {
+      const message = item.message
+      push(message.role === 'assistant' ? 'assistant' : 'user', [
+        ...(message.content ? [{ type: 'text' as const, text: message.content }] : []),
+        ...images(message.images),
+      ])
+      continue
+    }
+    const { calls, results, extra } = item.exchange
+    push('assistant', [
+      ...((item.message.thinkingBlocks ?? []) as AnthropicBlock[]),
+      ...calls.map((call): AnthropicBlock => ({
+        type: 'tool_use',
+        id: anthropicToolId(call.id),
+        name: call.name,
+        input: call.args && typeof call.args === 'object' && !Array.isArray(call.args) ? call.args : {},
+      })),
+    ])
+    push('user', [
+      ...results.map((result): AnthropicBlock => ({ type: 'tool_result', tool_use_id: anthropicToolId(result.id), content: result.text })),
+      ...(extra ? [{ type: 'text' as const, text: extra }] : []),
+      ...images(item.exchange.images),
+    ])
   }
   return out
 }
@@ -1260,7 +1468,10 @@ export class AnthropicProvider implements LlmProvider {
       ...(thinking === undefined ? { temperature: options.temperature } : { thinking: { type: 'enabled', budget_tokens: thinking } }),
       // Prompt caching: explicit breakpoints (see withAnthropicCacheBreakpoints).
       ...(system ? { system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] } : {}),
-      messages: withAnthropicCacheBreakpoints(anthropicMessages(messages)),
+      messages: withAnthropicCacheBreakpoints(anthropicMessages(
+        messages,
+        (message) => Boolean(options.tools?.length) && (thinking === undefined || Boolean(message.thinkingBlocks?.length)),
+      )),
       ...(options.tools && options.tools.length > 0
         ? { tools: options.tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })) }
         : {}),
@@ -1287,7 +1498,7 @@ export class AnthropicProvider implements LlmProvider {
 /** Parses one Messages API response (exported for the contract test). */
 export function parseAnthropicResponse(text: string): Completion {
   let body: {
-    content?: Array<{ type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }>
+    content?: Array<{ type?: string; text?: string; thinking?: string; signature?: string; data?: string; id?: string; name?: string; input?: unknown }>
     stop_reason?: string
     usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
     error?: { type?: string; message?: string }
@@ -1300,12 +1511,17 @@ export function parseAnthropicResponse(text: string): Completion {
   if (body.error?.message) throw new LlmError(`Anthropic: ${body.error.message}`)
   const blocks = body.content ?? []
   const textParts: string[] = []
-  const toolCalls: Array<{ name: string; args: unknown }> = []
+  const toolCalls: Array<{ name: string; args: unknown; id?: string }> = []
+  const thinkingBlocks: unknown[] = []
   let reasoning = ''
   for (const block of blocks) {
     if (block.type === 'text' && typeof block.text === 'string') textParts.push(block.text)
-    else if (block.type === 'thinking' && typeof block.thinking === 'string') reasoning += block.thinking
-    else if (block.type === 'tool_use' && typeof block.name === 'string') toolCalls.push({ name: block.name, args: block.input ?? {} })
+    else if (block.type === 'thinking' && typeof block.thinking === 'string') {
+      reasoning += block.thinking
+      // Replayed before this reply's tool_use blocks (required with thinking on).
+      if (typeof block.signature === 'string') thinkingBlocks.push({ type: 'thinking', thinking: block.thinking, signature: block.signature })
+    } else if (block.type === 'redacted_thinking' && typeof block.data === 'string') thinkingBlocks.push({ type: 'redacted_thinking', data: block.data })
+    else if (block.type === 'tool_use' && typeof block.name === 'string') toolCalls.push({ name: block.name, args: block.input ?? {}, ...(block.id ? { id: block.id } : {}) })
   }
   const inputTokens = body.usage?.input_tokens ?? 0
   const cacheHitTokens = body.usage?.cache_read_input_tokens ?? 0
@@ -1323,6 +1539,7 @@ export function parseAnthropicResponse(text: string): Completion {
     usage,
     ...(reasoning ? { reasoning } : {}),
     ...(toolCalls.length > 0 ? { toolCalls } : {}),
+    ...(toolCalls.length > 0 && thinkingBlocks.length > 0 ? { thinkingBlocks } : {}),
   }
 }
 
@@ -1349,21 +1566,29 @@ export class OpenAiResponsesProvider implements LlmProvider {
 
   async complete(messages: ChatMessage[], options: CompleteOptions): Promise<Completion> {
     const instructions = messages.find((message) => message.role === 'system')?.content
-    const input = messages
-      .filter((message) => message.role !== 'system')
-      .map((message) => ({
-        role: message.role,
-        content:
-          message.images && message.images.length > 0
-            ? [
-                ...(message.content ? [{ type: 'input_text' as const, text: message.content }] : []),
-                ...message.images.map((image) => ({
-                  type: 'input_image' as const,
-                  image_url: `data:${image.mimeType};base64,${image.data}`,
-                })),
-              ]
-            : message.content,
-      }))
+    const turn = (role: string, text: string, images: ImageInput[] | undefined) => ({
+      role,
+      content:
+        images && images.length > 0
+          ? [
+              ...(text ? [{ type: 'input_text' as const, text }] : []),
+              ...images.map((image) => ({
+                type: 'input_image' as const,
+                image_url: `data:${image.mimeType};base64,${image.data}`,
+              })),
+            ]
+          : text,
+    })
+    // Tool steps go back as `function_call` / `function_call_output` items while tools are offered.
+    const input = wireItems(messages.filter((message) => message.role !== 'system'), Boolean(options.tools?.length)).flatMap((item): unknown[] => {
+      if (item.kind === 'message') return [turn(item.message.role, item.message.content, item.message.images)]
+      const { calls, results, extra, images } = item.exchange
+      return [
+        ...calls.map((call) => ({ type: 'function_call', call_id: call.id, name: call.name, arguments: JSON.stringify(call.args ?? {}) })),
+        ...results.map((result) => ({ type: 'function_call_output', call_id: result.id, output: result.text })),
+        ...(extra || images?.length ? [turn('user', extra, images)] : []),
+      ]
+    })
     const body = {
       model: this.role.model,
       input,
@@ -1544,18 +1769,49 @@ function modelPricing(role: RoleConfig): RoleConfig['pricing'] | undefined {
   return role.pricing ?? catalogForRole(role)?.pricing
 }
 
+/**
+ * A message with GitHub credentials masked in every part the adapters send:
+ * the text, the reasoning, and the structured calls and results (which repeat
+ * the text and would otherwise carry the credential past the mask). Other
+ * fields (provider continuation, images) are kept.
+ */
+export function redactMessage(message: ChatMessage): ChatMessage {
+  const content = redactGitHubSecrets(message.content)
+  const reasoning = message.reasoning === undefined ? undefined : redactGitHubSecrets(message.reasoning)
+  let toolCalls = message.toolCalls
+  if (toolCalls) {
+    try {
+      const masked = toolCalls.map((call) => ({ ...call, args: JSON.parse(redactGitHubSecrets(JSON.stringify(call.args ?? {}))) as unknown }))
+      toolCalls = JSON.stringify(masked) === JSON.stringify(toolCalls) ? toolCalls : masked
+    } catch {
+      // The masked arguments are not JSON: the step goes back as (masked) text.
+      toolCalls = undefined
+    }
+  }
+  const toolResults = message.toolResults && {
+    rendered: redactGitHubSecrets(message.toolResults.rendered),
+    entries: message.toolResults.entries.map((entry) => ({ ...entry, text: redactGitHubSecrets(entry.text) })),
+  }
+  const resultsChanged = toolResults !== undefined &&
+    (toolResults.rendered !== message.toolResults!.rendered || toolResults.entries.some((entry, i) => entry.text !== message.toolResults!.entries[i]!.text))
+  if (content === message.content && reasoning === message.reasoning && toolCalls === message.toolCalls && !resultsChanged) return message
+  const { toolCalls: _calls, toolResults: _results, ...rest } = message
+  return {
+    ...rest,
+    content,
+    ...(reasoning === undefined ? {} : { reasoning }),
+    ...(toolCalls ? { toolCalls } : {}),
+    ...(toolResults ? { toolResults } : {}),
+  }
+}
+
 export function createProvider(role: RoleConfig, workspaceRoot: string, runId?: string): LlmProvider {
   const provider = createUnbudgetedProvider(role, workspaceRoot, runId)
   return {
     name: provider.name,
     async complete(messages, options) {
       // Old sessions can contain credentials from before the Git host boundary.
-      const safeMessages = messages.map((message) => {
-        const content = redactGitHubSecrets(message.content)
-        const reasoning = message.reasoning === undefined ? undefined : redactGitHubSecrets(message.reasoning)
-        if (content === message.content && reasoning === message.reasoning) return message
-        return { role: message.role, content, ...(message.images ? { images: message.images } : {}), ...(reasoning === undefined ? {} : { reasoning }) }
-      })
+      const safeMessages = messages.map(redactMessage)
       const reserve = modelBudget.getStore()
       if (!reserve || role.provider === 'mock' || role.provider === 'ollama') return provider.complete(safeMessages, options)
       const pricing = modelPricing(role)

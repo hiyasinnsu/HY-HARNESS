@@ -549,8 +549,8 @@ test('OpenAI-compatible: native tools replace response_format; string arguments 
     const r = await new OpenAiProvider(role('openai-compatible', s.base), fast).complete(messages, { maxTokens: 64, temperature: 0, tools })
     assert.equal(r.content, '')
     assert.deepEqual(r.toolCalls, [
-      { name: 'read_file', args: { path: 'README.md' } },
-      { name: 'shell', args: 'not json' },
+      { name: 'read_file', args: { path: 'README.md' }, id: 'call_1' },
+      { name: 'shell', args: 'not json', id: 'call_2' },
     ])
     assert.equal(s.seen[0]!.body.response_format, undefined)
     assert.deepEqual(s.seen[0]!.body.tools, [{ type: 'function', function: tools[0] }])

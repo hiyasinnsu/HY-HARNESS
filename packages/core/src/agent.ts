@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { LlmError, parseLooseJsonObject, type ChatMessage, type CompleteOptions, type Completion, type ImageInput, type LlmProvider, type Usage } from './llm.js'
 import type { SessionEvent, SessionLog } from './session-log.js'
 import { buildSystemPrompt, lastSessionContext, nativeToolDefs, sessionContextBlock, type InteractionMode, type PromptExtras, type WorkMode } from './prompt.js'
@@ -214,6 +214,18 @@ function replay(messages: readonly ChatMessage[], withAssistant: boolean): { ass
   }
 }
 
+/** The native calls of a logged reply: its text-protocol calls zipped with the logged ids. */
+function loggedToolCalls(content: string, ids: readonly unknown[]): ChatMessage['toolCalls'] {
+  try {
+    const parsed = JSON.parse(content) as { tool?: unknown; args?: unknown; calls?: unknown }
+    const list = Array.isArray(parsed.calls) ? parsed.calls as Array<{ tool?: unknown; args?: unknown }> : [parsed]
+    if (list.length !== ids.length || !list.every((call) => typeof call.tool === 'string') || !ids.every((id) => typeof id === 'string')) return undefined
+    return list.map((call, i) => ({ id: ids[i] as string, name: call.tool as string, args: call.args }))
+  } catch {
+    return undefined
+  }
+}
+
 export function rebuildHistory(events: readonly SessionEvent[], runId: string): ChatMessage[] {
   const history: ChatMessage[] = []
   const turnStarts = new Map<number, number>()
@@ -252,7 +264,12 @@ export function rebuildHistory(events: readonly SessionEvent[], runId: string): 
       case 'image/attached': {
         const files = Array.isArray(p.files) ? p.files.map(String) : []
         const prev = history.at(-1)
-        if (files.length > 0 && prev?.role === 'user') prev.content = `${prev.content}\n\n[image attached: ${files.join(', ')}]`
+        if (files.length > 0 && prev?.role === 'user') {
+          // The note is part of the rendered results, as in the running agent.
+          const rendered = prev.toolResults && prev.content === prev.toolResults.rendered
+          prev.content = `${prev.content}\n\n[image attached: ${files.join(', ')}]`
+          if (rendered) prev.toolResults = { ...prev.toolResults!, rendered: prev.content }
+        }
         break
       }
       case 'turn/retry':
@@ -272,9 +289,12 @@ export function rebuildHistory(events: readonly SessionEvent[], runId: string): 
       case 'assistant/thinking':
         lastThinking = String(p.content ?? '')
         break
-      case 'assistant/message':
-        history.push(reply(String(p.content ?? ''), p.withReasoning))
+      case 'assistant/message': {
+        const message = reply(String(p.content ?? ''), p.withReasoning)
+        const toolCalls = Array.isArray(p.toolCallIds) ? loggedToolCalls(message.content, p.toolCallIds) : undefined
+        history.push(toolCalls ? { ...message, toolCalls } : message)
         break
+      }
       case 'compaction/prune': {
         // Older logs only recorded a count. Preserve the original results in that case.
         if (!Array.isArray(p.replacements)) break
@@ -352,8 +372,14 @@ export function rebuildHistory(events: readonly SessionEvent[], runId: string): 
         const text = p.isError === true ? toolErrorMessage(name, output) : toolResultMessage(name, output)
         // Results of one step's several calls share one user message.
         const prev = history.at(-1)
-        if (prevType === 'tool/result' && prev?.role === 'user') prev.content = `${prev.content}\n\n${text}`
-        else history.push({ role: 'user', content: text })
+        const entry = typeof p.toolCallId === 'string' ? { id: p.toolCallId, name, text } : undefined
+        if (prevType === 'tool/result' && prev?.role === 'user') {
+          prev.content = `${prev.content}\n\n${text}`
+          if (prev.toolResults && entry) prev.toolResults = { entries: [...prev.toolResults.entries, entry], rendered: prev.content }
+          else delete prev.toolResults
+        } else {
+          history.push({ role: 'user', content: text, ...(entry ? { toolResults: { entries: [entry], rendered: text } } : {}) })
+        }
         break
       }
     }
@@ -836,13 +862,20 @@ export class Agent {
       const kept = this.options.reasoningHistory === 'full' && completion.reasoning?.trim() ? completion.reasoning : undefined
       // Native arguments arrive as an object on most endpoints, but some send a
       // JSON string or a one-element array; coerce before deciding they are broken.
-      const nativeCalls = completion.toolCalls?.map(({ name, args }) => ({ tool: name, args: coerceArgs(args) }))
+      // Every native call gets an id (the provider's, else one of ours), so the
+      // adapters can replay the step in the API's own call/result shape.
+      const nativeCalls = completion.toolCalls?.map(({ name, args, id }) => ({ tool: name, args: coerceArgs(args), id: id || `call_${randomUUID().replace(/-/g, '').slice(0, 16)}` }))
       const wireCalls = nativeCalls?.flatMap((call) => (call.args === undefined ? [] : [{ tool: call.tool, args: call.args }]))
+      const historyCalls = nativeCalls?.length && wireCalls?.length === nativeCalls.length
+        ? nativeCalls.map((call) => ({ id: call.id, name: call.tool, args: call.args }))
+        : undefined
       const wireReply = wireCalls?.length ? JSON.stringify(wireCalls.length === 1 ? wireCalls[0] : { calls: wireCalls }) : completion.content.trim()
       const reply = (text: string): ChatMessage => ({
         role: 'assistant', content: text,
         ...(kept ? { reasoning: kept } : {}),
         ...(completion.gemini && text === wireReply ? { gemini: { ...completion.gemini, content: text } } : {}),
+        ...(historyCalls && text === wireReply ? { toolCalls: historyCalls } : {}),
+        ...(historyCalls && text === wireReply && completion.thinkingBlocks?.length ? { thinkingBlocks: completion.thinkingBlocks } : {}),
       })
       if (completion.reasoning?.trim()) {
         const thinkingEvent = this.options.sessionLog.append('assistant/thinking', { content: completion.reasoning })
@@ -1060,7 +1093,10 @@ export class Agent {
         this.options.sessionLog.append('turn/retry', { step, reason: 'pending-instruction', ...replay(messages, true) })
         continue
       }
-      this.options.sessionLog.append('assistant/message', { content, ...(kept ? { withReasoning: true } : {}) })
+      // Native call ids are logged so a resumed session replays the steps in
+      // the same structured form (`rebuildHistory`).
+      const loggedCallIds = calls && historyCalls && content === wireReply ? historyCalls.map((call) => call.id) : undefined
+      this.options.sessionLog.append('assistant/message', { content, ...(kept ? { withReasoning: true } : {}), ...(loggedCallIds ? { toolCallIds: loggedCallIds } : {}) })
       // Tool calls are rendered from the structured tool-start/tool events.
       // Sending the serialized call here as well lets a 4K truncation cut the
       // JSON in half, which the UI then shows as a broken tool call.
@@ -1172,11 +1208,14 @@ export class Agent {
         const waitingHint = (reminder || loopNote) && this.options.allowWaitingReply?.()
           ? '\n[waiting hint] Async workers are currently active. Stop calling tools to poll or fill time—reply briefly in plain text without tool calls to end this turn and wait for automatic wakeup.'
           : ''
+        // The step's native calls, matched one to one with its results.
+        const structuredCalls = historyCalls?.length === outcomes.length ? historyCalls : undefined
         const parts = outcomes.map((o, i) => {
           const tail = i === outcomes.length - 1 ? reminder + loopNote + waitingHint : ''
           const output = o.output + tail
           this.options.sessionLog.append('tool/result', {
             callId: o.callId,
+            ...(structuredCalls ? { toolCallId: structuredCalls[i]!.id } : {}),
             name: o.call.tool,
             output,
             isError: !o.ok,
@@ -1188,13 +1227,12 @@ export class Agent {
         })
         const imageNote = images.length > 0 ? `\n\n[image attached: ${images.map((image) => image.label).join(', ')}]` : ''
         const toolResultText = `${parts.join('\n\n')}${imageNote}`
-        const nativeCalls = completion.toolCalls
         messages.push({
           role: 'user',
           content: toolResultText,
-          ...(completion.gemini && nativeCalls?.length === parts.length && nativeCalls.every((call) => call.id) ? {
+          ...(structuredCalls ? {
             toolResults: {
-              entries: nativeCalls.map((call, i) => ({ id: call.id!, name: call.name, text: parts[i]! })),
+              entries: structuredCalls.map((call, i) => ({ id: call.id, name: call.name, text: parts[i]! })),
               rendered: toolResultText,
             },
           } : {}),
