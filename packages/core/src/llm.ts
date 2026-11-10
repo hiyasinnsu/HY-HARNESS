@@ -4,10 +4,12 @@ import { createHash } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { roleApiKey, type RoleConfig } from './config.js'
 import { isSteerMessage, steerText } from './steering.js'
-import { catalogForRole, effortWithToolsFor, reasoningEchoFor, tokenFieldFor } from './model-catalog.js'
+import { catalogForRole, effortWithToolsFor, reasoningEchoFor, temperatureAllowedFor, tokenFieldFor } from './model-catalog.js'
 import {
+  learnFromError,
+  negotiatedEffort,
+  negotiatedMaxTokens,
   normalizeUsage,
-  rejectedFields,
   requestHeaders,
   requestSignal,
   sharedProviderState,
@@ -279,7 +281,8 @@ export interface NativeToolDef {
 
 export interface CompleteOptions {
   maxTokens: number
-  temperature: number
+  /** Omitted: the provider's (model author's) default. */
+  temperature?: number
   /** Provider-specific reasoning effort (`none` / `minimal` / `low` … `max`). */
   effort?: string
   signal?: AbortSignal
@@ -540,7 +543,7 @@ export class OllamaProvider implements LlmProvider {
           // Constrained JSON and native tool calls exclude each other.
           ...(options.tools ? { tools: toolsField(options.tools) } : options.json === false ? {} : { format: 'json' }),
           options: {
-            temperature: options.temperature,
+            ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
             num_predict: options.maxTokens,
             // Without num_ctx Ollama uses its small server default, not the
             // context window recorded in the role.
@@ -632,29 +635,27 @@ export class OpenAiProvider implements LlmProvider {
     // the model registry says otherwise. A server that rejects the field makes
     // the request fail once; `learnFrom` drops it from then on.
     const echo = this.role.reasoningEcho ?? this.echoReasoning
+    const effort = negotiatedEffort(this.state, options.effort)
     return JSON.stringify({
       model: this.role.model,
       // Tool steps go back as `tool_calls` / `role: tool` while tools are offered.
       messages: openAiMessages(messages, echo && !drop.has('reasoning_content'), Boolean(options.tools?.length) && !drop.has('tools')),
       ...(streaming ? { stream: true, ...(drop.has('stream_options') ? {} : { stream_options: { include_usage: true } }) } : {}),
-      [tokenField]: options.maxTokens,
-      ...(drop.has('temperature') ? {} : { temperature: options.temperature }),
-      // A learned "effort is rejected" applies to every request, not only tool calls.
-      ...(options.effort && !drop.has('effort') && !(options.tools && this.omitEffortWithTools) ? { reasoning_effort: options.effort } : {}),
+      [tokenField]: negotiatedMaxTokens(this.state, options.maxTokens),
+      // Temperature only when the role sets one: a model's own default is its
+      // author's recommendation, and reasoning models reject or degrade on 0.
+      ...(options.temperature === undefined || drop.has('temperature') || !temperatureAllowedFor(this.role.provider, this.role.model) ? {} : { temperature: options.temperature }),
+      // A learned "effort is rejected" applies to every request, not only tool
+      // calls; a learned list of valid values maps the effort onto the nearest.
+      ...(effort && !(options.tools && this.omitEffortWithTools) ? { reasoning_effort: effort } : {}),
       ...(options.tools && !drop.has('tools') ? { tools: toolsField(options.tools) } : json ? { response_format: { type: 'json_object' } } : {}),
       ...(this.role.extraBody ?? {}),
     })
   }
 
-  /** Records the fields a 400 rejected; true when anything new was learned. */
+  /** Records what a 400 taught (fields, output limit, effort values); true when anything new was learned. */
   private learnFrom(error: unknown): boolean {
-    let learned = false
-    for (const field of rejectedFields(error)) {
-      if (this.state.drop.has(field)) continue
-      this.state.drop.add(field)
-      learned = true
-    }
-    return learned
+    return learnFromError(this.state, error)
   }
 
   /**
@@ -1185,6 +1186,8 @@ function geminiThinkingLevel(effort: string | undefined): 'low' | 'medium' | 'hi
  */
 export class GeminiProvider implements LlmProvider {
   readonly name: string
+  /** What 400s from this endpoint taught (shared with every provider for it). */
+  private readonly state: ProviderNegotiationState
   private readonly baseUrl: string
   private readonly apiKey: string
 
@@ -1194,6 +1197,7 @@ export class GeminiProvider implements LlmProvider {
   ) {
     this.name = `gemini:${role.model}`
     this.baseUrl = (role.baseUrl ?? 'https://generativelanguage.googleapis.com/v1beta').replace(/\/+$/, '')
+    this.state = sharedProviderState(`${role.provider}|${this.baseUrl}|${role.model}`)
     const key = roleApiKey(role)
     if (!key) throw new LlmError(`missing API key: set ${role.apiKeyEnv ?? 'GEMINI_API_KEY'}`)
     this.apiKey = key
@@ -1256,8 +1260,9 @@ export class GeminiProvider implements LlmProvider {
           // Caps thinking and output together; thinking_level selects the
           // official low/medium/high effort for Gemini 3.8 Flash.
           generation_config: {
-            max_output_tokens: options.maxTokens,
-            ...(geminiThinkingLevel(options.effort) ? { thinking_level: geminiThinkingLevel(options.effort) } : {}),
+            max_output_tokens: negotiatedMaxTokens(this.state, options.maxTokens),
+            ...(geminiThinkingLevel(negotiatedEffort(this.state, options.effort)) ? { thinking_level: geminiThinkingLevel(negotiatedEffort(this.state, options.effort)) } : {}),
+            ...(options.temperature !== undefined && !this.state.drop.has('temperature') && temperatureAllowedFor(this.role.provider, this.role.model) ? { temperature: options.temperature } : {}),
           },
           ...(this.role.extraBody ?? {}),
         }),
@@ -1269,9 +1274,14 @@ export class GeminiProvider implements LlmProvider {
     try {
       text = await send(continuing ? checkpoint.id : undefined)
     } catch (error) {
-      if (!continuing || !(error instanceof LlmError) ||
-          !(error.status === 404 || error.status === 400 && /previous.interaction|call.id|function.result/i.test(error.message))) throw error
-      text = await send()
+      if (learnFromError(this.state, error)) {
+        // A field or value the endpoint refuses: learn it and retry once.
+        text = await send(continuing ? checkpoint.id : undefined)
+      } else {
+        if (!continuing || !(error instanceof LlmError) ||
+            !(error.status === 404 || error.status === 400 && /previous.interaction|call.id|function.result/i.test(error.message))) throw error
+        text = await send()
+      }
     }
     const body = JSON.parse(text) as {
       id?: string
@@ -1453,19 +1463,52 @@ export class AnthropicProvider implements LlmProvider {
   ) {
     this.name = `${role.provider}:${role.model}`
     this.baseUrl = (role.baseUrl ?? 'https://api.anthropic.com').replace(/\/+$/, '')
+    this.state = sharedProviderState(`${role.provider}|${this.baseUrl}|${role.model}`)
     const key = roleApiKey(role)
     if (!key) throw new LlmError(`missing API key: set ${role.apiKeyEnv ?? 'ANTHROPIC_API_KEY'}`)
     this.apiKey = key
   }
 
+  /** What 400s from this endpoint taught (shared with every provider for it). */
+  private readonly state: ProviderNegotiationState
+
   async complete(messages: ChatMessage[], options: CompleteOptions): Promise<Completion> {
+    const send = () => postWithRetry(
+      this.name,
+      `${this.baseUrl}${this.role.apiPath ?? '/v1/messages'}`,
+      {
+        headers: requestHeaders(this.role, this.apiKey, {
+          'Content-Type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': ANTHROPIC_VERSION,
+        }),
+        body: JSON.stringify(this.body(messages, options)),
+        signal: requestSignal(options.signal, this.role.requestTimeoutMs),
+      },
+      this.retry,
+    )
+    let text: string
+    try {
+      text = await send()
+    } catch (error) {
+      // A field or value this endpoint refuses: learn it and retry once.
+      if (!learnFromError(this.state, error)) throw error
+      text = await send()
+    }
+    return parseAnthropicResponse(text)
+  }
+
+  private body(messages: ChatMessage[], options: CompleteOptions) {
     const system = messages.find((message) => message.role === 'system')?.content ?? ''
+    const maxTokens = negotiatedMaxTokens(this.state, options.maxTokens)
     // Extended thinking needs the default temperature and a budget below max_tokens.
-    const thinking = anthropicThinkingBudget(options.effort, options.maxTokens)
-    const body = {
+    const thinking = anthropicThinkingBudget(negotiatedEffort(this.state, options.effort), maxTokens)
+    const temperature = options.temperature !== undefined && !this.state.drop.has('temperature') && temperatureAllowedFor(this.role.provider, this.role.model)
+      ? { temperature: options.temperature } : {}
+    return {
       model: this.role.model,
-      max_tokens: options.maxTokens,
-      ...(thinking === undefined ? { temperature: options.temperature } : { thinking: { type: 'enabled', budget_tokens: thinking } }),
+      max_tokens: maxTokens,
+      ...(thinking === undefined ? temperature : { thinking: { type: 'enabled', budget_tokens: thinking } }),
       // Prompt caching: explicit breakpoints (see withAnthropicCacheBreakpoints).
       ...(system ? { system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] } : {}),
       messages: withAnthropicCacheBreakpoints(anthropicMessages(
@@ -1477,21 +1520,6 @@ export class AnthropicProvider implements LlmProvider {
         : {}),
       ...(this.role.extraBody ?? {}),
     }
-    const text = await postWithRetry(
-      this.name,
-      `${this.baseUrl}${this.role.apiPath ?? '/v1/messages'}`,
-      {
-        headers: requestHeaders(this.role, this.apiKey, {
-          'Content-Type': 'application/json',
-          'x-api-key': this.apiKey,
-          'anthropic-version': ANTHROPIC_VERSION,
-        }),
-        body: JSON.stringify(body),
-        signal: requestSignal(options.signal, this.role.requestTimeoutMs),
-      },
-      this.retry,
-    )
-    return parseAnthropicResponse(text)
   }
 }
 
@@ -1559,10 +1587,14 @@ export class OpenAiResponsesProvider implements LlmProvider {
   ) {
     this.name = `${role.provider}:${role.model}`
     this.baseUrl = (role.baseUrl ?? 'https://api.openai.com/v1').replace(/\/+$/, '')
+    this.state = sharedProviderState(`${role.provider}|${this.baseUrl}|${role.model}`)
     const key = roleApiKey(role)
     if (!key) throw new LlmError(`missing API key: set ${role.apiKeyEnv ?? 'OPENAI_API_KEY'}`)
     this.apiKey = key
   }
+
+  /** What 400s from this endpoint taught (shared with every provider for it). */
+  private readonly state: ProviderNegotiationState
 
   async complete(messages: ChatMessage[], options: CompleteOptions): Promise<Completion> {
     const instructions = messages.find((message) => message.role === 'system')?.content
@@ -1589,23 +1621,26 @@ export class OpenAiResponsesProvider implements LlmProvider {
         ...(extra || images?.length ? [turn('user', extra, images)] : []),
       ]
     })
-    const body = {
+    const body = () => {
+      const effort = negotiatedEffort(this.state, options.effort)
+      return {
       model: this.role.model,
       input,
-      max_output_tokens: options.maxTokens,
+      max_output_tokens: negotiatedMaxTokens(this.state, options.maxTokens),
       ...(instructions ? { instructions } : {}),
-      ...(options.effort || this.role.reasoningSummary
+      ...(effort || this.role.reasoningSummary
         ? {
             reasoning: {
-              ...(options.effort ? { effort: options.effort } : {}),
+              ...(effort ? { effort } : {}),
               ...(this.role.reasoningSummary ? { summary: this.role.reasoningSummary } : {}),
             },
           }
         : {}),
       ...(this.role.verbosity ? { text: { verbosity: this.role.verbosity } } : {}),
       ...(this.role.serviceTier ? { service_tier: this.role.serviceTier } : {}),
-      // Reasoning models take the default temperature only.
-      ...(options.effort ? {} : { temperature: options.temperature }),
+      // Reasoning models take the default temperature only; none is sent unless the role sets one.
+      ...(effort || options.temperature === undefined || this.state.drop.has('temperature') || !temperatureAllowedFor(this.role.provider, this.role.model)
+        ? {} : { temperature: options.temperature }),
       ...(this.role.extraBody ?? {}),
       // CP-23: a stable cache key lets the provider reuse the prompt prefix.
       ...(this.sessionId ? { prompt_cache_key: `hy-${this.sessionId}` } : {}),
@@ -1619,17 +1654,26 @@ export class OpenAiResponsesProvider implements LlmProvider {
             })),
           }
         : {}),
+      }
     }
-    const text = await postWithRetry(
+    const send = () => postWithRetry(
       this.name,
       `${this.baseUrl}${this.role.apiPath ?? '/responses'}`,
       {
         headers: requestHeaders(this.role, this.apiKey, { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` }),
-        body: JSON.stringify(body),
+        body: JSON.stringify(body()),
         signal: requestSignal(options.signal, this.role.requestTimeoutMs),
       },
       this.retry,
     )
+    let text: string
+    try {
+      text = await send()
+    } catch (error) {
+      // A field or value this endpoint refuses: learn it and retry once.
+      if (!learnFromError(this.state, error)) throw error
+      text = await send()
+    }
     return parseOpenAiResponses(text)
   }
 }

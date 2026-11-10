@@ -1053,7 +1053,7 @@ async function runSubagent(
     announcePatterns: config.announcePatterns,
     workMode: () => o.workMode,
     interactionMode: () => o.interactionMode,
-    temperature: subagentRole.temperature ?? 0,
+    ...(subagentRole.temperature !== undefined ? { temperature: subagentRole.temperature } : {}),
     ...(subagentRole.effort ? { effort: subagentRole.effort } : {}),
     nativeTools: usesNativeTools(subagentRole),
     ptc: config.ptc,
@@ -1616,7 +1616,7 @@ export class Conversation {
         interactionMode: () => workModeState.interaction,
         goal: () => goals.view(),
         maxOutputTokens: role.maxOutputTokens,
-        temperature: role.temperature ?? 0,
+        ...(role.temperature !== undefined ? { temperature: role.temperature } : {}),
         ...(role.effort ? { effort: role.effort } : {}),
         nativeTools: usesNativeTools(role),
         ptc: config.ptc,
@@ -2126,7 +2126,7 @@ export class Conversation {
           ].join('\n\n'),
         },
       ],
-      { maxTokens: role.maxOutputTokens, temperature: role.temperature ?? 0 },
+      { maxTokens: role.maxOutputTokens, ...(role.temperature !== undefined ? { temperature: role.temperature } : {}) },
     )
     this.log.append('goal/grade/usage', { usage: completion.usage })
     const text = completion.content.trim().replace(/^```[a-zA-Z]*\s*/, '').replace(/```$/, '').trim()

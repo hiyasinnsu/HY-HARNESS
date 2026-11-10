@@ -92,7 +92,11 @@ export class SpillCompaction implements ContextManager {
   private readonly summaries = new Map<string, string>()
   private readonly inflight = new Map<string, Promise<void>>()
 
+  /** The window compaction aims under; lowered when the provider states a smaller one. */
+  private contextWindowTokens: number
+
   constructor(private readonly options: SpillCompactionOptions) {
+    this.contextWindowTokens = options.contextWindowTokens
     this.thresholdBytes = options.thresholdBytes ?? 32 * 1024
     this.triggerRatio = options.triggerRatio ?? 0.75
     this.keepRecentTurns = options.keepRecentTurns ?? 2
@@ -205,8 +209,16 @@ export class SpillCompaction implements ContextManager {
     this.inflight.set(key, promise)
   }
 
+  /** The provider stated the model's real window: compact for that one from now on. */
+  learnContextWindow(tokens: number): void {
+    if (Number.isFinite(tokens) && tokens > 0 && tokens < this.contextWindowTokens) {
+      this.options.log?.append('context/window-learned', { from: this.contextWindowTokens, to: tokens })
+      this.contextWindowTokens = tokens
+    }
+  }
+
   private overTrigger(tokens: number): boolean {
-    return tokens >= this.triggerRatio * this.options.contextWindowTokens
+    return tokens >= this.triggerRatio * this.contextWindowTokens
   }
 
   private report(outcome: 'shortened' | 'summarized' | 'partial' | 'failed'): void {
@@ -302,7 +314,7 @@ export class SpillCompaction implements ContextManager {
       return [{ index, header, sourceSha256, occurrence }]
     })
     // Drop below the trigger in one pass so small additions do not prune on every step.
-    const target = this.options.contextWindowTokens * this.triggerRatio * 0.8
+    const target = this.contextWindowTokens * this.triggerRatio * 0.8
     let remaining = estimateTokens(media.map((message) => message.content).join('\n'))
     for (const { index, header, sourceSha256, occurrence } of candidates.reverse()) {
       if (remaining * ratio <= target) break
@@ -349,7 +361,7 @@ export class SpillCompaction implements ContextManager {
           const prompt = this.summaryMessages(media, this.keepRecentTurns)
           const limits = { maxTokens: 800, temperature: 0 }
           let replayed: string | undefined
-          if (replayTools && lastInputTokens > 0 && effectiveTokens < this.options.contextWindowTokens * 0.95 && imageMessages(messages) === 0) {
+          if (replayTools && lastInputTokens > 0 && effectiveTokens < this.contextWindowTokens * 0.95 && imageMessages(messages) === 0) {
             const prefix = messages.slice(0, messages.length - recent.flat().length)
             try {
               const result = await this.options.compactor.complete([...prefix, { role: 'user', content:

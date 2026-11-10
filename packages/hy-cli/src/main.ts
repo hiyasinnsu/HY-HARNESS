@@ -1055,7 +1055,7 @@ async function ralph(p: Parsed): Promise<number> {
               promptVariant: config.promptVariant,
               richToolDocs: config.richToolDocs,
               announcePatterns: config.announcePatterns,
-              temperature: config.role.temperature ?? 0,
+              ...(config.role.temperature !== undefined ? { temperature: config.role.temperature } : {}),
               nativeTools: usesNativeTools(config.role),
               ptc: config.ptc,
               objective: true,

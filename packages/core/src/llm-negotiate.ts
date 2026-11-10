@@ -1,4 +1,5 @@
-// Request-shape negotiation for OpenAI-compatible endpoints.
+// Request-shape negotiation for every adapter (OpenAI-compatible, Responses,
+// Anthropic, Gemini).
 //
 // The harness cannot know which optional fields a given endpoint accepts. It
 // sends the fields it needs (a token limit, temperature, stream usage, JSON
@@ -26,6 +27,10 @@ export interface ProviderNegotiationState {
    * Undefined until a response carried reasoning (or a role/registry says).
    */
   echoReasoning?: boolean
+  /** The output-token limit a 400 named (requests are capped to it). */
+  maxOutputTokens?: number
+  /** The effort values a 400 listed as valid (requests use the nearest). */
+  effortValues?: string[]
 }
 
 const states = new Map<string, ProviderNegotiationState>()
@@ -50,27 +55,168 @@ export function resetProviderStates(): void {
   states.clear()
 }
 
-/**
- * The fields a 400 body names as unsupported (or invalid). Empty when the
- * error is not about the request shape, so unrelated 400s still fail.
- */
-export function rejectedFields(error: unknown): Set<DropField> {
-  const out = new Set<DropField>()
+/** The harness's effort scale, lowest first. */
+export const EFFORT_SCALE = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** What one 400 teaches about the request shape. */
+export interface Negotiation {
+  /** Optional fields to leave out from now on. */
+  drop: Set<DropField>
+  /** The endpoint named a smaller output-token limit than the one sent. */
+  maxOutputTokens?: number
+  /** The endpoint listed the effort values it takes. */
+  effortValues?: string[]
+}
+
+function errorBody(error: unknown): string | undefined {
   const status = (error as { status?: unknown }).status
-  if (status !== 400) return out
+  // 422 is how several validating gateways answer a bad request body.
+  if (status !== 400 && status !== 422) return undefined
   const body = String((error as { body?: unknown }).body ?? (error as { message?: unknown }).message ?? '').toLowerCase()
+  return body || undefined
+}
+
+/**
+ * An output-token limit stated in a 400 body: a value that is too large is a
+ * value problem, not an unsupported field. Covers "max_tokens must be less than
+ * or equal to 8192", "…32768 > 8192, which is the maximum allowed", and the
+ * context form "maximum context length is 32768 tokens … 30000 in the messages,
+ * 8000 in the completion", where the room left for output is what counts.
+ */
+function statedOutputLimit(body: string): number | undefined {
+  const context = /maximum context length is (\d+)/.exec(body)
+  const inMessages = /(\d+) (?:tokens )?in the messages/.exec(body)
+  if (context && inMessages && /in the completion/.test(body)) {
+    const room = Number(context[1]) - Number(inMessages[1]) - 64
+    return room > 0 ? room : undefined
+  }
+  if (!/max_(?:completion_|output_|new_)?tokens|max_output_tokens|output tokens/.test(body)) return undefined
+  const patterns = [
+    /(?:less than or equal to|at most|<=|≤|not exceed|no (?:more|greater) than|maximum(?: value)?(?: allowed)?(?: is| of)?|up to|must be below)\s*:?\s*\[?(\d{3,})/,
+    /between \d+ and (\d{3,})/,
+    /range[^0-9]{0,20}\d+\s*(?:-|to|,)\s*(\d{3,})/,
+    /(\d{3,})\s*,?\s*(?:which is|is) the maximum/,
+  ]
+  for (const pattern of patterns) {
+    const match = pattern.exec(body)
+    if (match) return Number(match[1])
+  }
+  return undefined
+}
+
+/**
+ * The model's context window as an overflow error states it ("maximum context
+ * length is 32768 tokens", "prompt is too long: 250000 tokens > 200000
+ * maximum", "exceeds the context window of 131072 tokens"). Undefined when the
+ * error names no window.
+ */
+export function statedContextLimit(error: unknown): number | undefined {
+  const body = String((error as { body?: unknown }).body ?? (error as { message?: unknown }).message ?? '').toLowerCase()
+  const patterns = [
+    /maximum context length is (\d{3,})/,
+    /prompt is too long:\s*\d+ tokens?\s*>\s*(\d{3,})/,
+    /context (?:window|length|size|limit)(?: of| is)?\s*:?\s*\(?(\d{3,})/,
+    /exceeds? (?:the )?(?:model'?s? )?(?:maximum |max )?(?:context|input)[^0-9]{0,40}(\d{3,})/,
+    /(\d{3,}) (?:token )?(?:context window|context length)/,
+    // llama.cpp server: "exceeds the available context size … (n_ctx 8192)".
+    /n_ctx(?:_slot)?\s*[:=]?\s*(\d{3,})/,
+  ]
+  for (const pattern of patterns) {
+    const match = pattern.exec(body)
+    if (match) return Number(match[1])
+  }
+  return undefined
+}
+
+/** Effort values a 400 lists as valid ("must be one of 'low', 'medium', 'high'"). */
+function statedEffortValues(body: string): string[] | undefined {
+  // `\b` keeps "invalid value for reasoning_effort: 'xhigh'" from reading as a list.
+  const list = /\b(?:one of|supported values?(?: are| is)?|allowed values?(?: are| is)?|expected|valid values?(?: are| is)?|must be)\s*:?\s*([^\n.]{0,200})/.exec(body)
+  if (!list) return undefined
+  const values = EFFORT_SCALE.filter((value) => new RegExp(`(^|[^a-z])${value}([^a-z]|$)`).test(list[1]!))
+  return values.length > 0 ? [...values] : undefined
+}
+
+/**
+ * What a 400 (or 422) body teaches: the optional fields it names as
+ * unsupported, a smaller output-token limit, or the effort values it takes.
+ * Empty when the error is not about the request shape, so unrelated 400s
+ * still fail.
+ */
+export function negotiate(error: unknown): Negotiation {
+  const out: Negotiation = { drop: new Set<DropField>() }
+  const body = errorBody(error)
   if (!body) return out
-  if (!/unsupported|not supported|does not support|unrecognized|unknown|unexpected|invalid/.test(body)) return out
-  if (body.includes('max_completion_tokens') || body.includes('max_tokens')) out.add('tokenField')
-  if (body.includes('reasoning_effort')) out.add('effort')
-  if (body.includes('stream_options') || body.includes('include_usage')) out.add('stream_options')
-  if (body.includes('response_format') || body.includes('json_object') || body.includes('json mode')) out.add('response_format')
-  if (/(^|[^a-z_])temperature([^a-z_]|$)/.test(body)) out.add('temperature')
-  if (body.includes('reasoning_content') || body.includes('reasoning block')) out.add('reasoning_content')
+  const limit = statedOutputLimit(body)
+  if (limit !== undefined) out.maxOutputTokens = limit
+  if (!/unsupported|not supported|does not support|unrecognized|unknown|unexpected|invalid|not allowed|must be|should be|extra inputs/.test(body)) return out
+  // The token field is dropped only when its name is refused, not its value.
+  if (limit === undefined && (body.includes('max_completion_tokens') || body.includes('max_tokens')) &&
+    /unsupported|not supported|unrecognized|unknown|unexpected|not allowed|extra inputs|use '?max_(?:completion_)?tokens'? instead/.test(body)) out.drop.add('tokenField')
+  // The thinking *field* (Anthropic `thinking`, Gemini `thinking_level`), not
+  // prose about thinking mode ("reasoning_content in the thinking mode must…").
+  if (/reasoning_effort|reasoning\.effort|thinking_level|budget_tokens|thinking\.type|[`'"]thinking[`'"]|(^|[^a-z_])effort([^a-z_]|$)/.test(body)) {
+    const values = /reasoning_effort|effort|thinking_level/.test(body) ? statedEffortValues(body) : undefined
+    if (values) out.effortValues = values
+    else out.drop.add('effort')
+  }
+  if (body.includes('stream_options') || body.includes('include_usage')) out.drop.add('stream_options')
+  if (body.includes('response_format') || body.includes('json_object') || body.includes('json mode')) out.drop.add('response_format')
+  if (/(^|[^a-z_])temperature([^a-z_]|$)/.test(body)) out.drop.add('temperature')
+  if (body.includes('reasoning_content') || body.includes('reasoning block')) out.drop.add('reasoning_content')
   // "reasoning_effort with function tools" is about the combination: drop the
   // effort, not the tools.
-  if (!body.includes('reasoning_effort') && /(^|[^a-z])tools?([^a-z]|$)/.test(body) && /unsupported|not supported|does not support/.test(body)) out.add('tools')
+  if (!/reasoning_effort|effort|thinking_level/.test(body) && /(^|[^a-z])tools?([^a-z]|$)/.test(body) && /unsupported|not supported|does not support/.test(body)) out.drop.add('tools')
   return out
+}
+
+/** The optional fields a 400 names (see `negotiate`). */
+export function rejectedFields(error: unknown): Set<DropField> {
+  return negotiate(error).drop
+}
+
+/**
+ * Records what `error` teaches in `state`; true when something new was
+ * learned (so one retry is worth it).
+ */
+export function learnFromError(state: ProviderNegotiationState, error: unknown): boolean {
+  const lesson = negotiate(error)
+  let learned = false
+  for (const field of lesson.drop) {
+    if (state.drop.has(field)) continue
+    state.drop.add(field)
+    learned = true
+  }
+  if (lesson.maxOutputTokens !== undefined && lesson.maxOutputTokens > 0 && (state.maxOutputTokens === undefined || lesson.maxOutputTokens < state.maxOutputTokens)) {
+    state.maxOutputTokens = lesson.maxOutputTokens
+    learned = true
+  }
+  if (lesson.effortValues && JSON.stringify(lesson.effortValues) !== JSON.stringify(state.effortValues)) {
+    state.effortValues = lesson.effortValues
+    learned = true
+  }
+  return learned
+}
+
+/**
+ * The effort to send: the requested value, or the nearest one the endpoint
+ * listed as valid (ties go up: the caller asked for reasoning). `none` that
+ * the endpoint does not list means "send no effort"; so does a dropped field.
+ */
+export function negotiatedEffort(state: ProviderNegotiationState, effort: string | undefined): string | undefined {
+  if (effort === undefined || state.drop.has('effort')) return undefined
+  const allowed = state.effortValues
+  if (!allowed || allowed.includes(effort)) return effort
+  if (effort === 'none') return undefined
+  const rank = (value: string) => EFFORT_SCALE.indexOf(value as (typeof EFFORT_SCALE)[number])
+  const wanted = rank(effort)
+  if (wanted < 0) return allowed.at(-1)
+  return [...allowed].sort((a, b) => Math.abs(rank(a) - wanted) - Math.abs(rank(b) - wanted) || rank(b) - rank(a))[0]
+}
+
+/** The output-token value to send: the requested one, capped by what the endpoint said it takes. */
+export function negotiatedMaxTokens(state: ProviderNegotiationState, requested: number): number {
+  return state.maxOutputTokens !== undefined ? Math.min(requested, state.maxOutputTokens) : requested
 }
 
 /** Text from `content` whether the endpoint sends a string or content parts. */

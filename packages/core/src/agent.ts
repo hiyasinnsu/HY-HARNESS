@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { statedContextLimit } from './llm-negotiate.js'
 import { LlmError, parseLooseJsonObject, type ChatMessage, type CompleteOptions, type Completion, type ImageInput, type LlmProvider, type Usage } from './llm.js'
 import type { SessionEvent, SessionLog } from './session-log.js'
 import { buildSystemPrompt, lastSessionContext, nativeToolDefs, sessionContextBlock, type InteractionMode, type PromptExtras, type WorkMode } from './prompt.js'
@@ -65,6 +66,8 @@ export interface ContextManager {
    * shorter history instead of failing the turn.
    */
   forceCompact?(messages: ChatMessage[], replayTools?: CompleteOptions['tools']): Promise<ChatMessage[]>
+  /** The provider stated the model's context window (smaller than configured). */
+  learnContextWindow?(tokens: number): void
   /**
    * Called after each completion; a manager may prepare work in the background
    * (CP-22: warm the summary for the next request). Must not throw.
@@ -591,12 +594,13 @@ function ordinal(n: number): string {
 
 export class Agent {
   private readonly maxOutputTokens: number
-  private readonly temperature: number
+  /** Undefined: the provider's (model author's) default temperature. */
+  private readonly temperature: number | undefined
   private readonly effort: string | undefined
 
   constructor(private readonly options: AgentOptions) {
     this.maxOutputTokens = options.maxOutputTokens ?? 4_096
-    this.temperature = options.temperature ?? 0
+    this.temperature = options.temperature
     this.effort = options.effort
   }
 
@@ -664,9 +668,10 @@ export class Agent {
     let brokenRetried = false
     let protocolFallback = false
     let limitedRetried = false
-    // Set once the provider rejected a request for the context length and the
-    // history was force-compacted.
-    let contextCompacted = false
+    // Forced compactions this turn after the provider rejected a request for the
+    // context length. Each must shorten the request; a few are allowed because
+    // one pass under a wrongly configured window may not be enough.
+    let forcedCompactions = 0
     let invalidTextRetried = false
     let degenerateRetried = false
     // Set once a reply that announced its next step without acting was nudged.
@@ -803,7 +808,7 @@ export class Agent {
               }
             : {}),
           maxTokens: this.maxOutputTokens,
-          temperature: this.temperature,
+          ...(this.temperature !== undefined ? { temperature: this.temperature } : {}),
           ...(this.effort ? { effort: this.effort } : {}),
           ...(this.options.signal ? { signal: this.options.signal } : {}),
           ...(requestTools ? { tools: requestTools } : {}),
@@ -812,10 +817,16 @@ export class Agent {
         if (this.options.signal?.aborted) throw new AbortRunError('turn cancelled')
         // The endpoint refused the request because of the context length: compact
         // now (once) and retry, instead of losing the turn.
-        if (isContextOverflow(error) && this.options.context?.forceCompact && !contextCompacted) {
-          contextCompacted = true
-          this.options.sessionLog.append('context/forced-compaction', { step, reason: error instanceof Error ? error.message.slice(0, 300) : 'context overflow' })
+        if (isContextOverflow(error) && this.options.context?.forceCompact && forcedCompactions < 3) {
+          forcedCompactions += 1
+          // The error may state the real window (an unregistered model): compact for that one.
+          const window = statedContextLimit(error)
+          if (window !== undefined) this.options.context.learnContextWindow?.(window)
+          this.options.sessionLog.append('context/forced-compaction', { step, reason: error instanceof Error ? error.message.slice(0, 300) : 'context overflow', ...(window !== undefined ? { window } : {}) })
+          const before = estimateTokens(messages.map((message) => message.content).join('\n'))
           messages = await this.options.context.forceCompact(messages, requestTools)
+          // Nothing left to shorten: another identical request would fail the same way.
+          if (estimateTokens(messages.map((message) => message.content).join('\n')) >= before) forcedCompactions = 3
           step -= 1
           continue
         }

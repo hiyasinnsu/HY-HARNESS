@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { catalogVision, setModelRegistry } from './model-catalog.js'
+import { catalogVision, findModel, setModelRegistry } from './model-catalog.js'
 import { resolveBundles, type ResolvedBundles } from './bundles.js'
 import type { SandboxMode } from './protocol.js'
 import type { McpServerConfig } from './mcp.js'
@@ -611,6 +611,36 @@ function normalizeOpenCodeRole(role: RoleConfig): void {
   role.model = OPENCODE_MODEL_ALIASES[role.model] ?? role.model
 }
 
+/**
+ * Limits assumed for a model that neither the user nor the registry
+ * describes. A provider default (1M tokens for the OpenAI-compatible default
+ * model) applied to an arbitrary model kept compaction from ever starting on a
+ * 32K–128K local server and sent a max_tokens larger than its whole window.
+ * Too small only compacts early (the provider's 400 and the agent's forced
+ * compaction recover from too large, but late).
+ */
+export const UNKNOWN_MODEL_CONTEXT_TOKENS = 131_072
+export const UNKNOWN_MODEL_OUTPUT_TOKENS = 16_384
+
+/**
+ * Fills the limits the user did not set: the registry entry for the model,
+ * else the provider default when it is the provider's default model, else the
+ * conservative values above.
+ */
+export function applyModelLimits(role: RoleConfig, explicit: { contextWindowTokens?: unknown; maxOutputTokens?: unknown } | undefined): void {
+  const listed = findModel(role.provider, role.model)
+  const providerDefault = defaultRole(role.provider)
+  const unknown = role.model !== providerDefault.model
+  if (explicit?.contextWindowTokens === undefined) {
+    if (listed?.contextWindowTokens !== undefined) role.contextWindowTokens = listed.contextWindowTokens
+    else if (unknown) role.contextWindowTokens = Math.min(role.contextWindowTokens, UNKNOWN_MODEL_CONTEXT_TOKENS)
+  }
+  if (explicit?.maxOutputTokens === undefined) {
+    if (listed?.maxOutputTokens !== undefined) role.maxOutputTokens = listed.maxOutputTokens
+    else if (unknown) role.maxOutputTokens = Math.min(role.maxOutputTokens, UNKNOWN_MODEL_OUTPUT_TOKENS)
+  }
+}
+
 function defaultRole(provider: ProviderKind): RoleConfig {
   switch (provider) {
     case 'ollama':
@@ -620,7 +650,6 @@ function defaultRole(provider: ProviderKind): RoleConfig {
         baseUrl: 'http://127.0.0.1:11434',
         contextWindowTokens: 32_768,
         maxOutputTokens: 8_192,
-        temperature: 0,
         pricing: { inputPerMTokUsd: 0, outputPerMTokUsd: 0 },
       }
     case 'deepseek':
@@ -634,7 +663,6 @@ function defaultRole(provider: ProviderKind): RoleConfig {
         // cannot exceed the context window.
         contextWindowTokens: 1_048_576,
         maxOutputTokens: 262_144,
-        temperature: 0,
       }
     case 'openai-compatible':
       return {
@@ -645,7 +673,6 @@ function defaultRole(provider: ProviderKind): RoleConfig {
         // GPT-4.1 mini: 1,047,576 context, 32,768 max output.
         contextWindowTokens: 1_047_576,
         maxOutputTokens: 32_768,
-        temperature: 0,
       }
     case 'openai-responses':
       return {
@@ -655,7 +682,6 @@ function defaultRole(provider: ProviderKind): RoleConfig {
         apiKeyEnv: 'OPENAI_API_KEY',
         contextWindowTokens: 1_047_576,
         maxOutputTokens: 32_768,
-        temperature: 0,
       }
     case 'anthropic':
       // The Messages API; `extra` reasoning effort maps to `thinking` budgets.
@@ -666,7 +692,6 @@ function defaultRole(provider: ProviderKind): RoleConfig {
         apiKeyEnv: 'ANTHROPIC_API_KEY',
         contextWindowTokens: 200_000,
         maxOutputTokens: 32_768,
-        temperature: 0,
       }
     case 'opencode':
       return {
@@ -679,7 +704,6 @@ function defaultRole(provider: ProviderKind): RoleConfig {
         // 131,072. Thinking mode can spend most of a small budget on
         // reasoning, which truncated tool calls at the old 8K default.
         maxOutputTokens: 131_072,
-        temperature: 0,
       }
     case 'gemini':
       // The Interactions API (verification/sources/gemini_thinking.txt).
@@ -690,7 +714,6 @@ function defaultRole(provider: ProviderKind): RoleConfig {
         apiKeyEnv: 'GEMINI_API_KEY',
         contextWindowTokens: 1_048_576,
         maxOutputTokens: 65_536,
-        temperature: 0,
       }
     case 'mock':
       return {
@@ -698,7 +721,6 @@ function defaultRole(provider: ProviderKind): RoleConfig {
         model: 'mock',
         contextWindowTokens: 32_768,
         maxOutputTokens: 4_096,
-        temperature: 0,
         pricing: { inputPerMTokUsd: 0, outputPerMTokUsd: 0 },
       }
   }
@@ -893,6 +915,18 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
   for (const roleConfig of [role, graderRole, orchestratorRole, subagentRole, guardianRole, compactorRole, summarizerRole, advisorRole]) {
     if (roleConfig) normalizeOpenCodeRole(roleConfig)
   }
+  // Limits the user did not set come from the model registry, else stay
+  // conservative for a model the harness knows nothing about (see applyModelLimits).
+  const roles = user?.roles
+  const explicitWorker = { ...bundles.roleDefaults, ...(roles?.worker ?? {}) }
+  applyModelLimits(role, explicitWorker)
+  applyModelLimits(graderRole, overrides.mock === true ? {} : roles?.grader)
+  if (orchestratorRole !== role) applyModelLimits(orchestratorRole, { ...(orchestratorProvider === provider ? explicitWorker : {}), ...roles?.orchestrator })
+  if (subagentRole !== role) applyModelLimits(subagentRole, { ...(subagentProvider === provider ? explicitWorker : {}), ...roles?.subagent })
+  if (guardianRole) applyModelLimits(guardianRole, overrides.mock === true ? {} : roles?.guardian)
+  applyModelLimits(compactorRole, { ...(compactorProvider === provider ? explicitWorker : {}), ...(overrides.mock === true ? {} : roles?.compactor) })
+  applyModelLimits(summarizerRole, { ...(summarizerProvider === provider ? explicitWorker : {}), ...(overrides.mock === true ? {} : roles?.summarizer) })
+  if (advisorRole !== role) applyModelLimits(advisorRole, { ...(advisorProvider === provider ? explicitWorker : {}), ...roles?.advisor })
 
   // CP-08: resolve `apiKeySecret` (and `dpapi:` apiKey values) through the
   // DPAPI helper. The plaintext exists only in memory; `hy config dump`

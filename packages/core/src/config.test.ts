@@ -669,3 +669,31 @@ test('budget: maxCostUsd defaults to undefined (off) unless explicitly set', () 
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('limits: an unregistered model gets conservative limits; set or registered ones win', async () => {
+  const { applyModelLimits, UNKNOWN_MODEL_CONTEXT_TOKENS, UNKNOWN_MODEL_OUTPUT_TOKENS } = await import('./config.js')
+  const { setModelRegistry } = await import('./model-catalog.js')
+  const base = { provider: 'openai-compatible' as const, contextWindowTokens: 1_047_576, maxOutputTokens: 32_768 }
+  try {
+    setModelRegistry([])
+    const unknown = { ...base, model: 'my-local-32k' }
+    applyModelLimits(unknown, {})
+    assert.equal(unknown.contextWindowTokens, UNKNOWN_MODEL_CONTEXT_TOKENS)
+    assert.equal(unknown.maxOutputTokens, UNKNOWN_MODEL_OUTPUT_TOKENS)
+    // The provider's own default model keeps the provider default.
+    const known = { ...base, model: 'gpt-4.1-mini' }
+    applyModelLimits(known, {})
+    assert.equal(known.contextWindowTokens, 1_047_576)
+    // An explicit setting is never touched.
+    const explicit = { ...base, model: 'my-local-32k', contextWindowTokens: 500_000 }
+    applyModelLimits(explicit, { contextWindowTokens: 500_000 })
+    assert.equal(explicit.contextWindowTokens, 500_000)
+    // A registry entry describes the model.
+    setModelRegistry([{ id: 'openai-compatible:big', provider: 'openai-compatible', model: 'big', label: 'big', contextWindowTokens: 400_000, maxOutputTokens: 64_000 }])
+    const listed = { ...base, model: 'big' }
+    applyModelLimits(listed, {})
+    assert.deepEqual([listed.contextWindowTokens, listed.maxOutputTokens], [400_000, 64_000])
+  } finally {
+    setModelRegistry([])
+  }
+})

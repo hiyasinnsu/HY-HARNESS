@@ -366,7 +366,8 @@ test('Gemini: Interactions API shape; thinking counts as output; key never in th
     assert.equal(first.url, '/interactions')
     assert.equal(first.headers['x-goog-api-key'], 'g-test')
     assert.ok(!first.url.includes('key='))
-    assert.deepEqual(first.body, { model: 'm', input: 'do it', system_instruction: 'SYS', generation_config: { max_output_tokens: 77 } })
+    // A temperature the caller sets is sent; none is sent when it is omitted.
+    assert.deepEqual(first.body, { model: 'm', input: 'do it', system_instruction: 'SYS', generation_config: { max_output_tokens: 77, temperature: 0 } })
     await p.complete(
       [...messages, { role: 'assistant', content: '{"tool":"x"}' }, { role: 'user', content: 'TOOL RESULT (x): 1' }],
       { maxTokens: 10, temperature: 0 },
@@ -980,6 +981,26 @@ test('under a USD budget a 503 is retried, not failed (a 5xx is assumed unbilled
     assert.equal(settled.length, 1, 'the successful attempt was settled once')
   } finally {
     delete process.env.HY_TEST_API_KEY
+    await s.close()
+  }
+})
+
+test('OpenAI-compatible: a too-large max_tokens is capped and retried; no temperature unless set', async () => {
+  resetProviderStates()
+  const ok = JSON.stringify({ choices: [{ message: { content: 'fine' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } })
+  const s = await serve([
+    { status: 400, body: JSON.stringify({ error: { message: 'max_tokens must be less than or equal to 8192 (invalid_request_error)' } }) },
+    { status: 200, body: ok },
+  ])
+  try {
+    const p = new OpenAiProvider({ ...role('openai-compatible', s.base), model: 'cap-test', apiKey: 'k' }, fast)
+    const done = await p.complete(messages, { maxTokens: 32768 })
+    assert.equal(done.content, 'fine')
+    assert.equal(s.seen[0]!.body.max_tokens, 32768)
+    assert.equal(s.seen[1]!.body.max_tokens, 8192, 'same field, smaller value')
+    assert.equal('max_completion_tokens' in s.seen[1]!.body, false)
+    assert.equal('temperature' in s.seen[1]!.body, false)
+  } finally {
     await s.close()
   }
 })
