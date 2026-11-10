@@ -5,23 +5,25 @@
 //   `SpillRef` it can read back with `read_file({ path: "spill://…" })`.
 // * Trigger: the last provider-reported input tokens reach
 //   `triggerRatio × contextWindowTokens`.
-// * Tier 1 (tool-result pruner): tool outputs older than the last
-//   `keepRecentTurns` assistant/user pairs become locators (spilled first if
-//   they were not, so nothing is lost).
+// * Tier 1 (tool-result pruner): leave recent outputs intact and replace older
+//   ones from newest to oldest until there is headroom. The unchanged front
+//   of the conversation stays eligible for the provider's cache.
 // * Tier 2 (shadowed-range summary): when the calibrated estimate is still
 //   over the trigger, the `compactor` role summarizes the older pairs. Cuts are
 //   made only between pairs, so a tool call is never separated from its
 //   result. The summary is appended to the objective message; the Ledger is
 //   re-rendered verbatim by the agent on every request, so constraints and
 //   notes never depend on the summary.
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
   estimateTokens,
   type ChatMessage,
+  type CompleteOptions,
   type ContextManager,
   type LlmProvider,
+  type SessionEvent,
   type SessionLog,
   type SpillRef,
 } from '../../core/dist/index.js'
@@ -39,6 +41,7 @@ export interface SpillCompactionOptions {
   /** Keys of the agent notes, so the summary does not paraphrase them. */
   ledgerKeys?: () => string[]
   log?: SessionLog
+  onResult?: (event: SessionEvent) => void
   /** CP-19: lifecycle notifications around tier-2 compaction. */
   hooks?: {
     preCompact?: (info: { pairs: number; tokens: number }) => Promise<void> | void
@@ -85,7 +88,6 @@ export class SpillCompaction implements ContextManager {
   private readonly thresholdBytes: number
   private readonly triggerRatio: number
   private readonly keepRecentTurns: number
-  private pruneSeq = 0
   /** CP-22: warm summaries keyed by the segment prefix they cover. */
   private readonly summaries = new Map<string, string>()
   private readonly inflight = new Map<string, Promise<void>>()
@@ -100,7 +102,14 @@ export class SpillCompaction implements ContextManager {
     const dir = path.join(this.options.spillDir, this.options.sessionId)
     fs.mkdirSync(dir, { recursive: true })
     const safe = callId.replace(/[^\w.-]/g, '_')
-    fs.writeFileSync(path.join(dir, `${safe}.txt`), text, 'utf8')
+    const target = path.join(dir, `${safe}.txt`)
+    const temporary = `${target}.${randomUUID()}.tmp`
+    try {
+      fs.writeFileSync(temporary, text, 'utf8')
+      fs.renameSync(temporary, target)
+    } finally {
+      fs.rmSync(temporary, { force: true })
+    }
     const spillId = `${this.options.sessionId}/${safe}`
     return { spillId, path: `spill://${spillId}`, byteLength: Buffer.byteLength(text), totalLines: lineCount(text) }
   }
@@ -169,8 +178,9 @@ export class SpillCompaction implements ContextManager {
   }
 
   /** CP-22: starts (or reuses) a background summary for the next request. */
-  afterResponse(messages: ChatMessage[], completion: { usage: { inputTokens: number } }): void {
-    if (!this.options.compactor || this.keepRecentTurns <= 1) return
+  afterResponse(messages: ChatMessage[], completion: { usage: { inputTokens: number } }, replayTools?: CompleteOptions['tools']): void {
+    // Decide whether a summary is needed after pruning. Replaying a warm prefix can be large.
+    if (replayTools || !this.options.compactor || this.keepRecentTurns <= 1) return
     if (!this.overTrigger(completion.usage.inputTokens)) return
     const key = this.segmentKey(messages, this.keepRecentTurns - 1)
     if (this.summaries.has(key) || this.inflight.has(key)) return
@@ -199,15 +209,63 @@ export class SpillCompaction implements ContextManager {
     return tokens >= this.triggerRatio * this.options.contextWindowTokens
   }
 
-  async beforeRequest(messages: ChatMessage[], lastInputTokens: number): Promise<ChatMessage[]> {
+  private report(outcome: 'shortened' | 'summarized' | 'partial' | 'failed'): void {
+    const event = this.options.log?.append('compaction/result', { outcome })
+    if (event) this.options.onResult?.(event)
+  }
+
+  /** Compacts when the last request was over the trigger (see `compactRequest`). */
+  async beforeRequest(messages: ChatMessage[], lastInputTokens: number, replayTools?: CompleteOptions['tools']): Promise<ChatMessage[]> {
+    return this.compactRequest(messages, lastInputTokens, replayTools, false)
+  }
+
+  /**
+   * Compacts now, whatever the last request reported: tier 1 (pruning) and,
+   * when a compactor is configured, tier 2 (summary). The agent calls this
+   * after the provider rejected a request for exceeding the context window;
+   * the reported usage is then either the rejected request's or missing, so
+   * the local estimate (`lastInputTokens = 0` and the 1.35 safety factor)
+   * decides how far to prune. A failure here must not fail the turn a second
+   * time: the input comes back unchanged.
+   */
+  async forceCompact(messages: ChatMessage[], replayTools?: CompleteOptions['tools']): Promise<ChatMessage[]> {
+    try {
+      return await this.compactRequest(messages, 0, replayTools, true)
+    } catch (error) {
+      try {
+        const reason = error instanceof Error ? error.message : String(error)
+        this.options.log?.append('compaction/failed', { reason: reason.slice(0, 300), forced: true })
+        this.report('failed')
+      } catch {
+        // Reporting must not turn a compaction failure into a failed turn.
+      }
+      return messages
+    }
+  }
+
+  /** `force` ignores the trigger: the caller already knows the context is too large. */
+  private async compactRequest(
+    messages: ChatMessage[],
+    lastInputTokens: number,
+    replayTools: CompleteOptions['tools'] | undefined,
+    force: boolean,
+  ): Promise<ChatMessage[]> {
     // CP-17: older images are dropped (the model can re-read them), but only
     // when it pays: dropping one rewrites an earlier message, so the provider's
     // prefix cache misses from there on. Below the trigger images stay (they
     // are cached like any other prefix) unless more than MAX_IMAGES pile up;
     // then they are cut back to the recent ones in one go, not one per request.
-    const over = this.overTrigger(lastInputTokens)
+    // When lastInputTokens is 0 (Step 1 of a turn, or before any provider response),
+    // estimate the tokens from the message content with a safety factor (1.35) to
+    // account for multilingual and code tokenization density.
+    const estimatedRaw = estimateTokens(messages.map((m) => m.content).join('\n'))
+    const effectiveTokens = lastInputTokens > 0 ? lastInputTokens : Math.ceil(estimatedRaw * 1.35)
+    const over = force || this.overTrigger(effectiveTokens)
     const media = over || imageMessages(messages) > MAX_IMAGE_MESSAGES ? pruneImages(messages, this.keepRecentTurns) : messages
-    if (!over || media.length < 2) return media
+    if (!over || media.length < 2) {
+      if (media !== messages) this.report('shortened')
+      return media
+    }
     const [system, objective, ...rest] = media
     // One step is an assistant message plus the user message(s) that answer it.
     // A steering message (WP-21) adds a second user message to a step, so the
@@ -222,29 +280,50 @@ export class SpillCompaction implements ContextManager {
     const keep = Math.max(0, segments.length - this.keepRecentTurns)
     const older = segments.slice(0, keep)
     const recent = segments.slice(keep)
-    if (older.length === 0) return media
+    if (older.length === 0) {
+      if (media !== messages) this.report('shortened')
+      return media
+    }
 
-    // Calibrate the estimator against what the provider just reported.
-    const ratio = lastInputTokens / Math.max(1, estimateTokens(media.map((m) => m.content).join('\n')))
+    // Calibrate the estimator against what the provider just reported, or fallback.
+    const ratio = lastInputTokens > 0 ? lastInputTokens / Math.max(1, estimatedRaw) : 1.35
 
     // Tier 1: older tool outputs → locators. Other user messages (a steering
     // message, a retry nudge) are left alone.
-    let pruned = 0
-    const tier1 = older.map((segment) =>
-      segment.map((message): ChatMessage => {
-        if (message.role !== 'user') return message
-        const m = /^TOOL (RESULT|ERROR) \(([^)]*)\):\n?/.exec(message.content)
-        if (!m || message.content.includes(PRUNED_MARK) || message.content.length < 300) return message
-        const existing = /SpillRef: (\{.*\})\s*$/.exec(message.content)
-        const ref: SpillRef = existing ? (JSON.parse(existing[1]!) as SpillRef) : this.spill(`pruned-${++this.pruneSeq}`, message.content.slice(m[0].length))
-        pruned += 1
-        return { role: 'user', content: `${m[0]}${PRUNED_MARK}; read_file({ "path": "${ref.path}" }) returns the full output]` }
-      }),
-    )
-    let compacted: ChatMessage[] = [system!, objective!, ...tier1.flat(), ...recent.flat()]
-    if (pruned > 0) this.options.log?.append('compaction/prune', { pruned })
+    const replacements: Array<{ sourceSha256: string; occurrence: number; content: string }> = []
+    const seen = new Map<string, number>()
+    const tier1 = older.flat()
+    const candidates = tier1.flatMap((message, index) => {
+      const header = message.role === 'user' ? /^TOOL (RESULT|ERROR) \(([^)]*)\):\n?/.exec(message.content)?.[0] : undefined
+      if (!header || message.content.includes(PRUNED_MARK) || message.content.length < 300) return []
+      const sourceSha256 = createHash('sha256').update(message.content).digest('hex')
+      const occurrence = (seen.get(sourceSha256) ?? 0) + 1
+      seen.set(sourceSha256, occurrence)
+      return [{ index, header, sourceSha256, occurrence }]
+    })
+    // Drop below the trigger in one pass so small additions do not prune on every step.
+    const target = this.options.contextWindowTokens * this.triggerRatio * 0.8
+    let remaining = estimateTokens(media.map((message) => message.content).join('\n'))
+    for (const { index, header, sourceSha256, occurrence } of candidates.reverse()) {
+      if (remaining * ratio <= target) break
+      const original = tier1[index]!.content
+      const ref = this.spill(`pruned-${sourceSha256}`, original.slice(header.length))
+      const content = `${header}${PRUNED_MARK}; read_file({ "path": "${ref.path}" }) returns the previous tool-result text and any spill links]`
+      replacements.push({ sourceSha256, occurrence, content })
+      tier1[index] = { role: 'user', content }
+      remaining -= estimateTokens(original) - estimateTokens(content)
+    }
+    let compacted: ChatMessage[] = [system!, objective!, ...tier1, ...recent.flat()]
+    if (replacements.length > 0) this.options.log?.append('compaction/prune', { pruned: replacements.length, replacements })
     const estimate = Math.ceil(estimateTokens(compacted.map((m) => m.content).join('\n')) * ratio)
-    if (!this.overTrigger(estimate) || !this.options.compactor) return compacted
+    const shortened = media !== messages || replacements.length > 0
+    // A forced compaction has no trustworthy trigger left (the provider
+    // rejected the request), so it goes on to the summary whenever one is
+    // configured; without a compactor, tier 1 is all there is.
+    if (!(force || this.overTrigger(estimate)) || !this.options.compactor) {
+      if (shortened) this.report('shortened')
+      return compacted
+    }
 
     // Tier 2: summarize the older steps (cut between steps only).
     const previous = objective!.content.includes(SUMMARY_OPEN)
@@ -267,18 +346,32 @@ export class SpillCompaction implements ContextManager {
           completionText = JSON.stringify({ summary: warm })
           this.summaries.delete(cacheKey)
         } else {
-          const completion = await this.options.compactor.complete(this.summaryMessages(media, this.keepRecentTurns), {
-            maxTokens: 800,
-            temperature: 0,
-          })
-          completionText = completion.content
+          const prompt = this.summaryMessages(media, this.keepRecentTurns)
+          const limits = { maxTokens: 800, temperature: 0 }
+          let replayed: string | undefined
+          if (replayTools && lastInputTokens > 0 && effectiveTokens < this.options.contextWindowTokens * 0.95 && imageMessages(messages) === 0) {
+            const prefix = messages.slice(0, messages.length - recent.flat().length)
+            try {
+              const result = await this.options.compactor.complete([...prefix, { role: 'user', content:
+                'Summarize the conversation above so work can resume. Preserve decisions, user constraints, files, command results and open work. ' +
+                'Do not call tools. Return only a JSON object with a "summary" field containing concise Markdown.',
+              }], { ...limits, tools: replayTools })
+              this.options.log?.append('compaction/replay', { usage: result.usage })
+              if (!result.toolCalls?.length && result.content.trim()) replayed = result.content
+            } catch {
+              // The configured compactor can still use the smaller transcript.
+            }
+          }
+          completionText = replayed ?? (await this.options.compactor.complete(prompt, limits)).content
         }
       }
+      if (!completionText.trim()) throw new Error('compactor returned an empty summary')
     } catch (error) {
       // CP-22: a failed summary keeps the tier-1 result instead of failing the turn.
       const reason = error instanceof Error ? error.message : String(error)
       this.options.log?.append('compaction/failed', { reason: reason.slice(0, 300), pairs: older.length })
       await this.options.hooks?.postCompact?.({ pairs: older.length, summarized: false })
+      this.report(shortened ? 'partial' : 'failed')
       return compacted
     }
     const raw = completionText.trim()
@@ -300,6 +393,7 @@ export class SpillCompaction implements ContextManager {
     await this.options.hooks?.postCompact?.({ pairs: older.length, summarized: true })
     const lastSeq = this.options.log?.events().at(-1)?.seq ?? 0
     this.options.log?.append('compaction/summary', { shadowedThroughSeq: lastSeq, summaryMarkdown: summary, pairs: older.length })
+    this.report('summarized')
     return compacted
   }
 }

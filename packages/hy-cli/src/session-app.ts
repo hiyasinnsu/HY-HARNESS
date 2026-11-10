@@ -20,6 +20,7 @@ import {
   SessionLog,
   SessionIndex,
   ToolRuntime,
+  TOOL_SPECS,
   createHarnessContext,
   createProvider,
   createSteerInbox,
@@ -33,10 +34,13 @@ import {
   rebuildHistory,
   resolveSandboxMode,
   resolveServerPath,
+  resolveGitHubToken,
   sessionLogPath,
   steerMessage,
   usesNativeTools,
   roleSupportsImages,
+  FILE_TOOL_ALIASES,
+  roleApiKey,
   type AgentEvent,
   type ApprovalCallback,
   type ApprovalRequest,
@@ -125,7 +129,7 @@ function goalToolMap(host: () => Conversation | undefined): LoadedPlugins['tools
   )
   add(
     'update_goal',
-    'Update the current goal. Copy goal_id and revision from get_goal. Actions: edit, pause, resume, complete, blocked. The host grader verifies complete; blocked needs the same condition for three consecutive goal rounds.',
+    'Update the current goal. Copy goal_id and revision from get_goal. If the goal is paused, resume it when the user has asked to continue. Read its new revision before trying complete. The host grader verifies complete against observed evidence; blocked needs the same condition for three consecutive goal rounds.',
     {
       type: 'object',
       properties: {
@@ -412,7 +416,7 @@ function editToolMap(
         if (!runtime) throw new Error(`${name} is not available in this session`)
         return run(args)
       },
-      spec: { name, sdk: `plugins.${name}`, wire: true, readOnly, description, input, output: {} },
+      spec: { name, sdk: `plugins.${name}`, wire: true, readOnly, description, input, output: {}, ...(FILE_TOOL_ALIASES[name] ? { aliases: FILE_TOOL_ALIASES[name] } : {}) },
       plugin: 'edit',
     })
   }
@@ -462,6 +466,64 @@ function editToolMap(
     },
   )
   return tools
+}
+
+export interface ConsultAdvisorArgs {
+  query: string
+  context?: string | undefined
+}
+
+function advisorToolMap(
+  advisorEnabled: () => boolean,
+  consult: (args: ConsultAdvisorArgs) => Promise<{ advice: string; model: string }>,
+): LoadedPlugins['tools'] {
+  const tools: LoadedPlugins['tools'] = new Map()
+  const name = 'consult_advisor'
+  const description =
+    'Consult an independent advisor model for high-level guidance, architecture review, debugging advice, or a second opinion on tricky problems. The advisor is stateless and provides fresh perspective without accumulated bias. Provide clear context and specific questions or dilemmas.'
+  const input: Schema = {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description: 'The specific question, architectural decision, bug hypothesis, or dilemma to consult the advisor on.',
+      },
+      context: {
+        type: 'string',
+        description: 'Optional relevant background context, constraints, what you have tried, or code snippets.',
+      },
+    },
+    required: ['query'],
+  }
+  tools.set(name, {
+    name,
+    description,
+    input,
+    readOnly: true,
+    run: async (args: Record<string, unknown>) => {
+      if (!advisorEnabled()) {
+        throw new Error('Advisor mode is currently disabled in this session. Enable it via the advisor button.')
+      }
+      const query = String(args.query ?? '').trim()
+      if (!query) throw new Error('consult_advisor requires a non-empty query')
+      const context = args.context !== undefined && args.context !== null ? String(args.context).trim() : undefined
+      return await consult({ query, context })
+    },
+    spec: { name, sdk: `plugins.${name}`, wire: true, readOnly: true, description, input, output: {} },
+    plugin: 'advisor',
+  })
+  return tools
+}
+
+/** Whether advisor mode was turned on in a resumed run. */
+function restoredAdvisorMode(events: readonly SessionEvent[], runId: string): boolean {
+  let on = false
+  for (const event of events) {
+    if (event.runId !== runId || event.type !== 'advisor-mode') continue
+    const value = (event.payload as { enabled?: unknown } | undefined)?.enabled
+    if (typeof value === 'boolean') on = value
+  }
+  return on
 }
 
 /** The working directory a resumed run last set (WP-30). */
@@ -527,6 +589,16 @@ function agentToolMap(agents: SubagentRegistry): LoadedPlugins['tools'] {
   return tools
 }
 
+/**
+ * 6-4: a read-only subagent must not inherit the parent's role prompt. The
+ * worker prompt (`worker.md`) tells the model to edit inside an assigned scope
+ * and to end with a STATUS report; an orchestrator prompt tells it to dispatch
+ * workers it cannot spawn. Either one is a false instruction for a child that
+ * can only read, so a read-only child gets this contract instead.
+ */
+const READ_ONLY_SUBAGENT_INSTRUCTION =
+  'You are a read-only subagent. Inspect the workspace and report your findings as the final answer. Do not modify, create or delete files, do not run commands that change state, do not delegate, and do not ask the user questions.'
+
 /** A subagent conversation for one agent id (`<parent>.subN`). */
 function childRunner(
   config: HarnessConfig,
@@ -543,6 +615,8 @@ function childRunner(
     roleInstruction?: string
   },
 ): SubagentRunner {
+  // 6-4: see READ_ONLY_SUBAGENT_INSTRUCTION.
+  const roleInstruction = readOnly ? READ_ONLY_SUBAGENT_INSTRUCTION : o.roleInstruction
   const conv = Conversation.create(
     config,
     client,
@@ -557,7 +631,7 @@ function childRunner(
       delegate: false,
       checkpoints: false,
       sandboxMode: o.sandboxMode,
-      ...(o.roleInstruction ? { roleInstruction: o.roleInstruction } : {}),
+      ...(roleInstruction ? { roleInstruction } : {}),
     },
   )
   conv.setWorkMode(o.workMode())
@@ -597,6 +671,7 @@ export function sessionContext(
   runId: string,
   budget?: Budget4D,
   hooks?: Hooks,
+  onResult?: (event: SessionEvent) => void,
 ) {
   const ledger = Ledger.forRun(log, runId, discoverPinned(config.workspaceRoot, config.rules), {
     maxEntries: config.limits.rationaleMaxEntries,
@@ -621,6 +696,7 @@ export function sessionContext(
     ),
     ledgerKeys: () => ledger.list().map((n) => n.key),
     log,
+    ...(onResult ? { onResult } : {}),
     ...(hooks
       ? {
           hooks: {
@@ -869,10 +945,12 @@ let subagents = 0
  */
 interface ConversationSafety {
   writeScope?: readonly string[]
+  writeGuard?: (path: string) => void
+  verifyGuard?: (path: string) => void
+  beforeTool?: () => void
   shellGuard?: (command: string) => void
   shellLock?: { acquire(): Promise<() => void> }
   noBackgroundShell?: boolean
-  minForegroundWaitMs?: number
   shellTimeoutMs?: number
   /** Live sandbox mode shared with the parent conversation (WP-12). */
   sandboxMode?: () => SandboxMode
@@ -886,11 +964,15 @@ export interface ConversationTooling {
 
 export interface ConversationOptions extends ConversationSafety {
   tooling?: ConversationTooling
+  gitReadOnly?: boolean
+  excludedTools?: ReadonlySet<string>
   roleInstruction?: string
   /** Per-session model (orchestrator/subagent); defaults to the worker role. */
   role?: RoleConfig
-  /** Orchestrator sessions never leave plan mode. */
+  /** Fixed planning-only sessions; orchestration uses ordinary tools with ownership guards. */
   planOnly?: boolean
+  parallelPlan?: boolean
+  sessionContext?: () => string
   initialPlanMode?: boolean
   checkpoints?: boolean
   /** Top-level sessions have this; orchestration workers keep it for their subagents. */
@@ -901,6 +983,8 @@ export interface ConversationOptions extends ConversationSafety {
   backgroundAgents?: boolean
   /** Told about every background subagent state change, for the GUI. */
   onAgentChange?: (view: SubagentView, event: 'spawn' | 'running' | 'idle' | 'interrupt' | 'close') => void
+  /** Exempts a turn from goalMode / announce nudges when yielding to wait for async workers. */
+  allowWaitingReply?: () => boolean
 }
 
 async function runSubagent(
@@ -927,7 +1011,9 @@ async function runSubagent(
   const allowTools = o.readOnly ? withReadOnlyPlugins(READ_ONLY_TOOLS) : undefined
   const mcp = o.readOnly ? undefined : sessionMcp
   const hooks = sessionHooks(config)
+  const ghToken = resolveGitHubToken(config)
   const tools = new ToolRuntime(client, config.workspaceRoot, o.approve, false, {
+    gitReadOnly: true,
     toolSearch: config.features['tool-search'] === true,
     spillDir: o.spillDir,
     // Jobs are tagged with the parent run, so its rollback kills them.
@@ -942,14 +1028,18 @@ async function runSubagent(
     ...(sessionPlugins?.tools.size ? { plugins: sessionPlugins.tools } : {}),
     ...(config.memory ? { memory: MemoryStore.forStateDir(config.stateDir) } : {}),
     ...(o.writeScope ? { writeScope: o.writeScope } : {}),
+    ...(o.writeGuard ? { writeGuard: o.writeGuard } : {}),
+    ...(o.beforeTool ? { beforeTool: o.beforeTool } : {}),
     ...(o.shellGuard ? { shellGuard: o.shellGuard } : {}),
     ...(o.shellLock ? { shellLock: o.shellLock } : {}),
     ...(o.noBackgroundShell ? { noBackgroundShell: true } : {}),
-    ...(o.minForegroundWaitMs !== undefined ? { minForegroundWaitMs: o.minForegroundWaitMs } : {}),
     ...(o.shellTimeoutMs !== undefined ? { shellTimeoutMs: o.shellTimeoutMs } : {}),
     ...(o.sandboxMode ? { sandboxMode: o.sandboxMode } : {}),
+    ...(ghToken ? { githubToken: ghToken } : {}),
   })
   const subagentRole = config.subagentRole
+  // 6-4: see READ_ONLY_SUBAGENT_INSTRUCTION.
+  const roleInstruction = o.readOnly ? READ_ONLY_SUBAGENT_INSTRUCTION : o.roleInstruction
   const agent = new Agent({
     ...(hooks ? { hooks } : {}),
     provider: createProvider(subagentRole, config.workspaceRoot, runId),
@@ -959,6 +1049,8 @@ async function runSubagent(
     maxOutputTokens: subagentRole.maxOutputTokens,
     reasoningHistory: config.reasoningHistory,
     promptVariant: config.promptVariant,
+    richToolDocs: config.richToolDocs,
+    announcePatterns: config.announcePatterns,
     workMode: () => o.workMode,
     interactionMode: () => o.interactionMode,
     temperature: subagentRole.temperature ?? 0,
@@ -971,7 +1063,7 @@ async function runSubagent(
     lsp: lspFor(config) !== undefined,
     extraTools: pluginSpecs(),
     ...(config.memory ? { memory: MemoryStore.forStateDir(config.stateDir) } : {}),
-    ...(o.roleInstruction ? { roleInstruction: o.roleInstruction } : {}),
+    ...(roleInstruction ? { roleInstruction } : {}),
     ...(allowTools ? { allowTools } : {}),
     ...(mcp ? { mcpCatalog: mcp.renderCatalog() || 'MCP servers are configured, but none is running; mcp_call has no tools to call.' } : {}),
     onEvent: (event) => o.print({ ...event, subagent: runId }),
@@ -992,8 +1084,12 @@ export async function summarizeThinking(
   if (config.summarizerRole.provider === 'mock') return 'モックの思考要約です。'
   const provider = createProvider(config.summarizerRole, config.workspaceRoot, sessionId)
   // The UI shows a provisional summary immediately; this refinement must not
-  // spend time on a reasoning phase.
-  const effort = config.summarizerRole.effort ?? (config.summarizerRole.provider === 'opencode' ? 'none' : undefined)
+  // spend time on a reasoning phase. Helper roles (summarizer, title,
+  // compactor) are reasoning-free by default, whatever the provider: a
+  // reasoning phase spends their small output budget (160 tokens here) before
+  // the answer, which is a property of the call, not of one vendor. An
+  // explicit `role.effort` still wins.
+  const effort = config.summarizerRole.effort ?? 'none'
   const options = { maxTokens: 160, temperature: 0, json: false, ...(effort ? { effort } : {}), ...(signal ? { signal } : {}) }
   const completion = await provider.complete(
     [
@@ -1050,8 +1146,12 @@ export class Conversation {
 
   private agent: Agent
   private planMode = false
+  private advisorEnabled = false
   private planTools: ReadonlySet<string> = PLAN_MODE_TOOLS
   private planOnly = false
+  private lastOutcome: 'final' | 'claimed' | 'stalled' = 'final'
+
+  turnOutcome(): 'final' | 'claimed' | 'stalled' { return this.lastOutcome }
   private workModeState: ModeState
   private readonly goals: GoalStore
   private turnSource: 'user' | 'orchestrator' | 'worker' | 'system' | 'goal' = 'user'
@@ -1069,7 +1169,6 @@ export class Conversation {
       signal?: AbortSignal,
       callIdPrefix?: string,
       goalMode?: boolean,
-      goal?: GoalView,
     ) => Agent,
     private readonly context: ContextManager,
     private readonly ledger: Ledger,
@@ -1137,11 +1236,11 @@ export class Conversation {
    * order the model saw. Without a running turn there is nothing to steer, so
    * the caller sends a normal turn instead.
    */
-  steer(message: string, images: ImageInput[] = []): { queued: number } {
+  steer(message: string, images: ImageInput[] = [], meta: Pick<SteerMessage, 'id' | 'source' | 'interrupt'> = {}): { queued: number } {
     if (!this.turnActive) throw new Error('no turn is running; send a normal message instead')
     const text = message.trim()
     if (!text) throw new Error('message is required')
-    const queued = this.inbox.push({ text, ...(images.length > 0 ? { images } : {}) })
+    const queued = this.inbox.push({ text, ...meta, ...(images.length > 0 ? { images } : {}) })
     return { queued }
   }
 
@@ -1199,7 +1298,9 @@ export class Conversation {
     let goalHost: Conversation | undefined
     const goalTools = options.readOnly === true ? new Map() : goalToolMap(() => goalHost)
     const hookRunner = sessionHooks(config)
-    const { ledger, spillDir, context } = sessionContext(config, log, runId, undefined, hookRunner)
+    const { ledger, spillDir, context } = sessionContext(config, log, runId, undefined, hookRunner, (event) =>
+      print({ type: 'compaction', seq: event.seq, ts: event.ts, outcome: (event.payload as { outcome: string }).outcome }),
+    )
     const { approve: rawApprove, guardian } = approvals(config, '(interactive session)', undefined, askUser, runId, hookRunner)
     // CP-44: every approval decision is logged with Guardian's evidence, so a
     // trace explains what was blocked and why.
@@ -1258,10 +1359,11 @@ export class Conversation {
         spillDir,
         print,
         ...(options.writeScope ? { writeScope: options.writeScope } : {}),
+        ...(options.writeGuard ? { writeGuard: options.writeGuard } : {}),
+        ...(options.beforeTool ? { beforeTool: options.beforeTool } : {}),
         ...(options.shellGuard ? { shellGuard: options.shellGuard } : {}),
         ...(options.shellLock ? { shellLock: options.shellLock } : {}),
         ...(options.noBackgroundShell ? { noBackgroundShell: true } : {}),
-        ...(options.minForegroundWaitMs !== undefined ? { minForegroundWaitMs: options.minForegroundWaitMs } : {}),
         ...(options.shellTimeoutMs !== undefined ? { shellTimeoutMs: options.shellTimeoutMs } : {}),
         ...(options.roleInstruction ? { roleInstruction: options.roleInstruction } : {}),
         sandboxMode: () => sandboxState.mode,
@@ -1282,6 +1384,57 @@ export class Conversation {
     // WP-32: `session_query` is opt-in (config.sessionQuery).
     const queryTools = config.sessionQuery ? sessionQueryToolMap({ stateDir: config.stateDir, workspaceRoot: config.workspaceRoot, logFile: log.file, runId }) : new Map()
     const documentTools = documentToolMap({ stateDir: config.stateDir, workspaceRoot: config.workspaceRoot, roots: config.workspaceRoots })
+
+    const consultAdvisor = async (args: ConsultAdvisorArgs): Promise<{ advice: string; model: string }> => {
+      const role = config.advisorRole ?? config.role
+      const advisorId = `${runId}.advisor-${Date.now()}`
+      const provider = createProvider(role, config.workspaceRoot, advisorId)
+
+      const advisorSystem = [
+        'You are an expert technical advisor consulted for high-level guidance, architecture review, and debugging insights.',
+        'You are independent from the main agent and observe the problem with completely fresh, unbiased eyes.',
+        'Be direct, concise, pragmatic, and objective. Point out blind spots, unconsidered edge cases, simpler alternatives (YAGNI), or architectural flaws.',
+        'Do not output tool calls or JSON formatting. Provide your guidance directly in clear, structured Markdown.',
+      ].join('\n')
+
+      const userParts: string[] = []
+      const recentEvents = log.events().filter((e) => e.runId === runId)
+      const summaries = recentEvents
+        .filter((e) => e.type === 'compaction/summary')
+        .map((e) => (e.payload as { summary?: string })?.summary)
+        .filter(Boolean)
+      if (summaries.length > 0) {
+        userParts.push(`## Prior Session Summary\n${summaries[summaries.length - 1]}`)
+      }
+      if (args.context) {
+        userParts.push(`## Context & Background\n${args.context}`)
+      }
+      userParts.push(`## Consultation Request\n${args.query}`)
+
+      const messages: ChatMessage[] = [
+        { role: 'system', content: advisorSystem },
+        { role: 'user', content: userParts.join('\n\n') },
+      ]
+
+      const completion = await provider.complete(messages, {
+        temperature: 0.2,
+        maxTokens: Math.min(role.maxOutputTokens, 8_192),
+      })
+
+      const advice = completion.content.trim()
+      const modelName = `${role.provider}/${role.model}`
+
+      log.append('advisor/consultation', {
+        query: args.query,
+        context: args.context,
+        advice,
+        model: modelName,
+      })
+
+      return { advice, model: modelName }
+    }
+    const advisorTools = advisorToolMap(() => convHost?.isAdvisorEnabled() ?? false, consultAdvisor)
+
     const pluginMap = new Map([
       ...(sessionPlugins?.tools ?? new Map()),
       ...(options.tooling?.plugins ?? new Map()),
@@ -1292,6 +1445,7 @@ export class Conversation {
       ...editTools,
       ...queryTools,
       ...documentTools,
+      ...advisorTools,
     ])
     const extraSpecs = [
       ...pluginSpecs(),
@@ -1303,6 +1457,7 @@ export class Conversation {
       ...[...editTools.values()].map((tool) => tool.spec),
       ...[...queryTools.values()].map((tool) => tool.spec),
       ...[...documentTools.values()].map((tool) => tool.spec),
+      ...[...advisorTools.values()].map((tool) => tool.spec),
     ]
     // The read-only allow-list covers the built-in reading tools plus every
     // session plugin that declares itself read-only (`present`, `read_image`).
@@ -1323,14 +1478,19 @@ export class Conversation {
     // WP-42: a bundle can only narrow the tool set. The session's allow-list is
     // the bundle's tools intersected with whatever the host already allowed.
     const bundleTools = config.bundles.tools
-    const sessionAllow = bundleTools
-      ? readOnlyTools
-        ? new Set([...readOnlyTools].filter((tool) => bundleTools.has(tool)))
-        : bundleTools
-      : readOnlyTools
+    const allowedTools = (requested: ReadonlySet<string> | undefined): ReadonlySet<string> | undefined => {
+      const allowed = bundleTools && requested ? new Set([...requested].filter((name) => bundleTools.has(name))) : bundleTools ?? requested
+      if (!options.excludedTools) return allowed
+      return new Set([...(allowed ?? [...TOOL_SPECS, ...extraSpecs].map((tool) => tool.name))]
+        .filter((name) => !options.excludedTools!.has(name)))
+    }
+    const sessionAllow = allowedTools(readOnlyTools)
+    const ghToken = resolveGitHubToken(config)
     const tools = new ToolRuntime(client, config.workspaceRoot, approve, false, {
+      ...(options.gitReadOnly ? { gitReadOnly: true } : {}),
+      gitDenyRead: config.denyRead,
       // An orchestrator's workers run at the same time; its plan shows that.
-      ...(options.planOnly === true ? { parallelPlan: true } : {}),
+      ...((options.planOnly === true || options.parallelPlan) ? { parallelPlan: true } : {}),
       toolSearch: config.features['tool-search'] === true,
       contextWindowTokens: config.role.contextWindowTokens,
       ledger,
@@ -1339,8 +1499,9 @@ export class Conversation {
       skills,
       onSkillLoad: (name: string) => skillUsage.bump(name),
       roots: config.workspaceRoots,
-      delegate,
+      ...(delegateEnabled ? { delegate } : {}),
       ...(sessionAllow ? { allowTools: sessionAllow } : {}),
+      ...(ghToken ? { githubToken: ghToken } : {}),
       ...(bundleTools ? { bundleLabel: config.bundles.names.join(', ') } : {}),
       ...(agents
         ? {
@@ -1386,10 +1547,15 @@ export class Conversation {
       ...(config.memory ? { memory: MemoryStore.forStateDir(config.stateDir) } : {}),
       ...(answer ? { askUser: answer } : {}),
       ...(options.writeScope ? { writeScope: options.writeScope } : {}),
+      ...(options.writeGuard ? { writeGuard: options.writeGuard } : {}),
+      ...(options.verifyGuard ? { verifyGuard: options.verifyGuard } : {}),
+      beforeTool: () => {
+        if (inbox.hasInterrupt()) throw new Error('A newer instruction is pending. This call did not run. Read it at the next step before continuing.')
+        options.beforeTool?.()
+      },
       ...(options.shellGuard ? { shellGuard: options.shellGuard } : {}),
       ...(options.shellLock ? { shellLock: options.shellLock } : {}),
       ...(options.noBackgroundShell ? { noBackgroundShell: true } : {}),
-      ...(options.minForegroundWaitMs !== undefined ? { minForegroundWaitMs: options.minForegroundWaitMs } : {}),
       ...(options.shellTimeoutMs !== undefined ? { shellTimeoutMs: options.shellTimeoutMs } : {}),
       sandboxMode: () => sandboxState.mode,
       // WP-31: `--persistent-shell` (or the user config) keeps one shell alive.
@@ -1415,7 +1581,7 @@ export class Conversation {
       .filter(Boolean)
       .join('\n\n')
     // Rebuilt by /model and /plan-mode; the conversation and tools stay.
-    const build = (role: RoleConfig, allowTools?: ReadonlySet<string>, signal?: AbortSignal, callIdPrefix?: string, goalMode = false, goal?: GoalView) => {
+    const build = (role: RoleConfig, allowTools?: ReadonlySet<string>, signal?: AbortSignal, callIdPrefix?: string, goalMode = false) => {
       // A subagent conversation only ever offers the reading tools, whatever the
       // caller passes, and a bundle can only narrow further. Plan mode
       // (`allowTools`) does not narrow the offered set: the tool list is part
@@ -1424,11 +1590,7 @@ export class Conversation {
       // (`setAllowTools`), and the turn message says plan mode is on.
       void allowTools
       const requested = options.planOnly ? planTools : readOnlyTools
-      const allow = bundleTools
-        ? requested
-          ? new Set([...requested].filter((tool) => bundleTools.has(tool)))
-          : bundleTools
-        : requested
+      const allow = allowedTools(requested)
       return new Agent({
         ...(hooks ? { hooks } : {}),
         provider: createProvider(role, config.workspaceRoot, runId),
@@ -1436,11 +1598,23 @@ export class Conversation {
         sessionLog: log,
         workspaceRoot: config.workspaceRoot,
         goalMode,
+        ...(options.allowWaitingReply ? { allowWaitingReply: options.allowWaitingReply } : {}),
         reasoningHistory: config.reasoningHistory,
+        richToolDocs: config.richToolDocs,
+        announcePatterns: config.announcePatterns,
+        // The compactor may replay this request's native prefix only when it
+        // goes to the same route with the same credentials; which providers
+        // keep a prefix cache is their business (the structural match is what
+        // decides a replay hit), so no provider names belong here.
+        cacheCompaction:
+          role.provider === config.compactorRole.provider &&
+          role.model === config.compactorRole.model &&
+          role.baseUrl === config.compactorRole.baseUrl &&
+          roleApiKey(role) === roleApiKey(config.compactorRole),
         promptVariant: config.promptVariant,
         workMode: () => workModeState.value,
         interactionMode: () => workModeState.interaction,
-        ...(goal ? { goal: { objective: goal.objective, phase: goal.phase, ...(goal.blockerReason ? { blockerReason: goal.blockerReason } : {}) } } : {}),
+        goal: () => goals.view(),
         maxOutputTokens: role.maxOutputTokens,
         temperature: role.temperature ?? 0,
         ...(role.effort ? { effort: role.effort } : {}),
@@ -1463,6 +1637,7 @@ export class Conversation {
         ...(signal ? { signal } : {}),
         ...(callIdPrefix ? { callIdPrefix } : {}),
         steer: inbox,
+        ...(options.sessionContext ? { sessionContext: options.sessionContext } : {}),
         onEvent: print,
       })
     }
@@ -1476,6 +1651,7 @@ export class Conversation {
     const conv = new Conversation(ctx, config, client, log, runId, options.role ?? config.role, build, context, ledger, tools, skills, hooks, delegate, goals, sandboxState, inbox, workModeState, agents)
     goalHost = conv
     convHost = conv
+    conv.advisorEnabled = restoredAdvisorMode(events, runId)
     // Continue an earlier run (`hy resume`): its history and turn count.
     conv.history = rebuildHistory(events, runId)
     const mine = events.filter((e) => e.runId === runId)
@@ -1527,11 +1703,13 @@ export class Conversation {
         this.log.append('user/steer', {
           content: left.text,
           late: true,
+          ...(left.id ? { id: left.id } : {}),
+          ...(left.source ? { source: left.source } : {}),
           ...(left.images?.length ? { images: left.images.length } : {}),
         })
         this.history.push({
           role: 'user',
-          content: steerMessage(left.text),
+          content: steerMessage(left.text, left.source),
           ...(left.images?.length ? { images: left.images } : {}),
         })
         this.undelivered.push(left)
@@ -1583,11 +1761,11 @@ export class Conversation {
       signal,
       `t${this.turns}-`,
       this.goals.isActive() && (!this.planMode || this.planOnly),
-      this.goals.view(),
     )
     try {
       const result = await this.agent.run(text, this.history, images, meta?.source)
       this.history = result.history
+      this.lastOutcome = result.outcome
             await this.hooks?.turnEnd({ runId: this.runId, turn: this.turns, final: result.final, cwd: this.config.workspaceRoot })
       // CP-20: durable workspace memories, extracted after the turn (best effort).
       if (this.config.memory && this.config.memoryAuto) {
@@ -1604,6 +1782,7 @@ export class Conversation {
       this.usage.cacheMissTokens += result.usage.cacheMissTokens ?? 0
       return result.final
         } catch (error) {
+      this.history = rebuildHistory(readEvents(this.log.file), this.runId)
       // CP-19: an exception interrupted the turn.
       void this.hooks?.interrupt({
         runId: this.runId,
@@ -1622,7 +1801,6 @@ export class Conversation {
         undefined,
         undefined,
         this.goals.isActive(),
-        this.goals.view(),
       )
     }
   }
@@ -1781,14 +1959,16 @@ export class Conversation {
   async compact(): Promise<string> {
     const before = this.history.length
     const compacted = await this.context.beforeRequest([{ role: 'system', content: '' }, ...this.history], Number.MAX_SAFE_INTEGER)
-    this.history = compacted.slice(1)
-    this.log.append('compaction/manual', { before, after: this.history.length })
-    return `compacted: ${before} → ${this.history.length} messages`
+    const history = compacted.slice(1)
+    const changed = before !== history.length || history.some((message, index) => message !== this.history[index])
+    this.history = history
+    this.log.append('compaction/manual', { before, after: history.length, noticeHandled: true })
+    return changed ? `compacted ${before} → ${history.length} messages` : 'Context unchanged.'
   }
 
   /** Plan mode (DSH plan): reading tools only until the user turns it off. */
   setPlanMode(on: boolean): string {
-    if (this.planOnly && !on) return 'plan mode stays on for the orchestrator'
+    if (this.planOnly && !on) return 'plan mode stays on for this planning-only session'
     this.planMode = on
     const allow = on ? this.planTools : undefined
     this.tools.setAllowTools(allow)
@@ -1799,6 +1979,19 @@ export class Conversation {
 
   isPlanMode(): boolean {
     return this.planMode
+  }
+
+  /** Advisor mode: whether the agent can consult an external advisor model. */
+  setAdvisor(enabled: boolean): string {
+    this.advisorEnabled = enabled
+    this.log.append('advisor-mode', { enabled })
+    return enabled
+      ? 'advisor mode on: the agent may consult an external advisor model'
+      : 'advisor mode off'
+  }
+
+  isAdvisorEnabled(): boolean {
+    return this.advisorEnabled
   }
 
   currentGoal(): string | undefined {
@@ -1976,12 +2169,12 @@ export class Conversation {
     ].join('\n')
   }
 
-  /** Switches the worker model for the following turns (`/model <name>`). */
-  setModel(model: string, limits?: Partial<Pick<RoleConfig, 'contextWindowTokens' | 'maxOutputTokens'>>): string {
+  /** Switches the session model for the following turns (`/model <name>`). */
+  setModel(model: string, limits?: Partial<Pick<RoleConfig, 'contextWindowTokens' | 'maxOutputTokens'>>, updateWorkerDefault = true): string {
     const role = { ...this.sessionRole, model, ...(limits ?? {}) }
     const wasConfigRole = this.sessionRole === this.config.role
     this.sessionRole = role
-    if (wasConfigRole) this.config.role = role
+    if (updateWorkerDefault && wasConfigRole) this.config.role = role
     this.agent = this.build(role, this.planMode ? this.planTools : undefined)
     this.log.append('model/switch', { model })
     return `model: ${role.provider}/${model}`
@@ -1997,7 +2190,7 @@ export function listRuns(events: readonly SessionEvent[]) {
   const runs = new Map<string, { runId: string; started: number; last: number; turns: number; first: string; ralph: boolean; forkedFrom?: string }>()
   for (const e of events) {
     // Subagent runs (`<run>.subN`) belong to their parent.
-    if (!e.runId || e.runId.includes('.sub')) continue
+    if (!e.runId || e.runId.includes('.sub') || e.runId.endsWith('.dialogue')) continue
     let r = runs.get(e.runId)
     if (!r) {
       r = { runId: e.runId, started: e.ts, last: e.ts, turns: 0, first: '', ralph: false }

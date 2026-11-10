@@ -17,8 +17,10 @@ import { runRounds } from './schedule.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repo = path.resolve(here, '..', '..')
-const MODEL = 'deepseek-v4.1-flash'
-const EFFORT = 'max'
+// The default comparison pair; `HY_BENCH_MODEL` / `HY_BENCH_EFFORT` switch it
+// (e.g. a local model or a different provider) without editing the file.
+const MODEL = process.env.HY_BENCH_MODEL ?? 'deepseek-v4.1-flash'
+const EFFORT = process.env.HY_BENCH_EFFORT ?? 'max'
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`)
@@ -109,15 +111,17 @@ function benchHyConfigDir(variant, extra = {}) {
 const HY_VARIANTS = {
   hy: {},
   // The default before 2026-11-09, to compare against the new default lean4.
-  'hy-lean': { promptVariant: 'lean' },
+  // Rich tool docs became a separate setting (default on), so the older prompt
+  // versions pin it off to keep the conditions of earlier runs.
+  'hy-lean': { promptVariant: 'lean', richToolDocs: false },
   'hy-fast': {},
   'hy-thorough': {},
   'hy-reflective': {},
   'hy-full': { reasoningHistory: 'full' },
   'hy-none': { reasoningHistory: 'none' },
-  'hy-legacy': { promptVariant: 'legacy' },
-  'hy-lean2': { promptVariant: 'lean2' },
-  'hy-lean3': { promptVariant: 'lean3' },
+  'hy-legacy': { promptVariant: 'legacy', richToolDocs: false },
+  'hy-lean2': { promptVariant: 'lean2', richToolDocs: false },
+  'hy-lean3': { promptVariant: 'lean3', richToolDocs: false },
   'hy-lean4': { promptVariant: 'lean4' },
 }
 if (harnesses.some((h) => h !== 'dsh' && !Object.hasOwn(HY_VARIANTS, h))) throw new Error('unknown harness')

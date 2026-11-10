@@ -134,6 +134,7 @@ interface State {
   busy: boolean
   orchestrationBusy: boolean
   planMode: boolean
+  advisorEnabled: boolean
   blankWorkMode: WorkMode
   blankInteractionMode: InteractionMode
   goal: string
@@ -295,6 +296,7 @@ const state: State = {
   busy: false,
   orchestrationBusy: false,
   planMode: false,
+  advisorEnabled: false,
   blankWorkMode: 'fast',
   blankInteractionMode: 'autonomous',
   goal: '',
@@ -839,6 +841,11 @@ function localizeNotice(text: string): string {
   if (text === 'plan mode on') return tr('planModeOn')
   if (text === 'plan mode off') return tr('planModeOff')
   if (text.startsWith('goal: ')) return `${tr('goal')}: ${text.slice(6)}`
+  if (text === 'Context compacted. Older material was shortened.') return tr('contextShortened')
+  if (text === 'Context compacted. Earlier messages were summarized.') return tr('contextSummarized')
+  if (text === 'Context partially compacted. Summarization failed.') return tr('contextPartiallyCompacted')
+  if (text === 'Context compaction failed.') return tr('contextCompactionFailed')
+  if (text === 'Context unchanged.') return tr('contextUnchanged')
   if (text.startsWith('compacted ')) return `${tr('compacted')} ${text.slice(10)}`
   const effort = /^reasoning effort: (.+)$/.exec(text)
   if (effort) return tr('effortSet', { effort: effort[1] === 'provider default' ? tr('effortDefault') : tr(`effort_${effort[1]}`) })
@@ -1087,8 +1094,19 @@ function patchTranscript(inner: HTMLElement, before: RenderedTranscript, next: {
   }
 }
 
+/**
+ * Set when a render was requested while the window was hidden. A hidden window
+ * cannot paint, so the work is deferred to one render on activation instead of
+ * replaying every queued update at once.
+ */
+let renderWhileHidden = false
+
 /** Coalesces live events into one transcript render per animation frame. */
 function renderTranscript(): void {
+  if (document.hidden) {
+    renderWhileHidden = true
+    return
+  }
   if (transcriptRenderFrame !== undefined) return
   transcriptRenderFrame = window.requestAnimationFrame(() => {
     transcriptRenderFrame = undefined
@@ -1156,6 +1174,7 @@ function renderTranscriptNow(): void {
     if (card && !typing) card.focus({ preventScroll: false })
     if (card || !state.entries.some((e) => e.kind === 'approval' && e.requestId === focusCard && !e.decision)) approvalToFocus = undefined
   }
+  renderQuestionDock()
 }
 
 /** CP-34: the approval card to focus after the next transcript render. */
@@ -1315,6 +1334,33 @@ function loadComposerDraft(): void {
   state.draft = readComposerDraft(state.composerDrafts, composerKey())
 }
 
+function renderQuestionDock(): void {
+  const dock = document.getElementById('composer-question-dock')
+  if (!dock) return
+  const pending = [...state.entries].reverse().find(
+    (e): e is Extract<ChatEntry, { kind: 'question' }> => e.kind === 'question' && e.answer === undefined,
+  )
+  if (!pending) {
+    dock.innerHTML = ''
+    dock.hidden = true
+    delete dock.dataset.questionId
+    return
+  }
+  dock.hidden = false
+  if (dock.dataset.questionId === pending.requestId) return
+  dock.dataset.questionId = pending.requestId
+  dock.innerHTML = `<div class="composer-question-popup" data-question-id="${escapeHtml(pending.requestId)}">
+    <div class="question-head">
+      <span>${icon('question', 16)} <strong>${tr('theAgentAsks')}</strong></span>
+    </div>
+    <p>${escapeHtml(pending.question)}</p>
+    <form class="question-form" data-action="answer-question" data-request-id="${escapeHtml(pending.requestId)}">
+      <input name="answer" placeholder="${tr('answer')}…" autocomplete="off" autofocus>
+      <button class="btn primary" type="submit">${icon('send', 14)} ${tr('answer')}</button>
+    </form>
+  </div>`
+}
+
 /**
  * Rebuilds the composer. `force` is set on a chat switch, where the textarea
  * itself must be replaced even if it currently has the focus.
@@ -1330,6 +1376,7 @@ function renderComposer(force = false): void {
   const inputFocused = focused instanceof HTMLTextAreaElement && document.activeElement === focused
   if (!force && !shouldRebuildComposer(inputFocused)) {
     updateComposerState()
+    renderQuestionDock()
     return
   }
   const config = state.boot?.config
@@ -1368,7 +1415,7 @@ function renderComposer(force = false): void {
         `<span class="attachment-chip"><img src="data:${escapeHtml(a.mimeType)};base64,${a.data}" alt=""><span>${escapeHtml(a.name)}</span><button type="button" data-action="remove-attachment" data-index="${i}" title="Remove">${icon('close', 14)}</button></span>`,
     )
     .join('')
-  wrap.innerHTML = `<form class="composer" id="composer-form">
+  wrap.innerHTML = `<div id="composer-question-dock" class="composer-question-dock" hidden></div><form class="composer" id="composer-form">
     <div id="turn-queue-host"></div>
     <div class="composer-box">
       ${state.goal ? `<div class="goal-banner"><span>${icon('target', 16)} ${tr('goal')}: ${escapeHtml(oneLine(state.goal, 160))}${state.goalState ? ` <span class="tag subtle">${escapeHtml(state.goalState.phase)} ${state.goalState.roundsStarted}/${state.goalState.maxGoalRounds}</span>` : ''}</span><button type="button" class="link-btn" data-action="open-goal">${tr('editGoal')}</button></div>` : ''}
@@ -1378,6 +1425,7 @@ function renderComposer(force = false): void {
       <div class="composer-toolbar">
         <button type="button" class="icon-btn" data-action="attach-image" title="Attach an image">${icon('paperclip', 16)}</button>
         <button type="button" class="chip ${state.planMode ? 'active' : ''}" data-action="toggle-plan" ${kind === 'orchestrator' ? 'disabled' : ''} title="${kind === 'orchestrator' ? tr('orchestratorPlanOnly') : tr('plan')}">${icon('plan', 16)} ${tr('plan')}</button>
+        <button type="button" class="chip ${state.advisorEnabled ? 'active' : ''}" data-action="toggle-advisor" title="${tr('advisorTitle')}">${icon('advisor', 16)} ${tr('advisor')}</button>
         <button type="button" class="chip ${isActiveOrchestrator ? 'active' : ''}" data-action="toggle-orchestration" title="${isActiveOrchestrator ? tr('stopOrchestration') : orchestrationLabel}">${icon('bot', 16)} ${orchestrationLabel}</button>
         <button type="button" class="chip" data-action="open-goal" title="${tr('setGoal')}">${icon('target', 16)} ${tr('goal')}</button>
         <button type="button" class="chip" data-action="open-model" title="Change model">${icon('cpu', 16)} ${escapeHtml(modelName)}</button>
@@ -1398,6 +1446,7 @@ function renderComposer(force = false): void {
     <div class="composer-meta"><span>${tr('enterHint')}</span><span>${state.connection === 'online' ? tr('connected') : state.connection}</span></div>
   </form>`
   updateComposerState()
+  renderQuestionDock()
   const input = document.getElementById('composer-input') as HTMLTextAreaElement | null
   if (input) {
     // The textarea is a new node, so an in-flight composition is gone and the
@@ -2542,6 +2591,7 @@ function statsRows(): string {
 function roleRows(config: ConfigSummary): string {
   const rows: Array<[string, { provider: string; model: string } | null]> = [
     ['worker', config.worker],
+    ['advisor', config.advisor ?? null],
     ['guardian', config.guardian],
     ['grader', config.grader],
     ['compactor', config.compactor],
@@ -3382,9 +3432,10 @@ function renderModal(): void {
   }
   if (state.modal === 'model') {
     // CP-35: the catalog with capabilities; the session's provider is pickable.
-    const worker = state.current?.state.model ?? state.boot?.config.worker
-    const role = state.boot?.config.worker
-    const current = { provider: worker?.provider ?? role?.provider ?? '', model: worker?.model ?? role?.model ?? '' }
+    const roleName = state.current?.state.kind === 'orchestrator' ? 'orchestrator' : 'worker'
+    const role = state.boot?.config[roleName]
+    const model = state.current?.state.model ?? role
+    const current = { provider: model?.provider ?? '', model: model?.model ?? '' }
     const rows = renderModelRows(pickerModels(state.modelCatalog, current.provider, state.modelQuery), current, {
       tools: tr('capTools'),
       vision: tr('capVision'),
@@ -3494,7 +3545,7 @@ function renderModal(): void {
   const roles = settings?.user.roles ?? {}
   const approvalMode = settings?.user.autoApprove ? 'all' : settings?.user.fullAuto ? 'confined' : 'manual'
   const fields = (role: string, label: string, required = false): string => {
-    const active = role === 'worker' ? settings?.active.worker : role === 'orchestrator' ? settings?.active.orchestrator : role === 'subagent' ? settings?.active.subagent : role === 'guardian' ? settings?.active.guardian : role === 'grader' ? settings?.active.grader : role === 'summarizer' ? settings?.active.summarizer : settings?.active.compactor
+    const active = role === 'worker' ? settings?.active.worker : role === 'orchestrator' ? settings?.active.orchestrator : role === 'subagent' ? settings?.active.subagent : role === 'advisor' ? settings?.active.advisor : role === 'guardian' ? settings?.active.guardian : role === 'grader' ? settings?.active.grader : role === 'summarizer' ? settings?.active.summarizer : settings?.active.compactor
     const value = (roles[role] ?? {}) as Record<string, unknown>
     const provider = String(value.provider ?? active?.provider ?? 'ollama')
     const defaults = providerDefaults(provider)
@@ -3575,7 +3626,7 @@ function renderModal(): void {
           </div>
         </div>
         <h4 class="settings-subhead">${tr('roleAssignment')}</h4>
-        ${fields('worker', tr('workerRequired'), true)}${fields('orchestrator', tr('orchestratorRole'))}${fields('subagent', tr('subagentRole'))}${fields('guardian', tr('guardianRole'))}${fields('grader', tr('graderRole'))}${fields('compactor', tr('compactorRole'))}${fields('summarizer', tr('summarizerRole'))}
+        ${fields('worker', tr('workerRequired'), true)}${fields('orchestrator', tr('orchestratorRole'))}${fields('subagent', tr('subagentRole'))}${fields('advisor', tr('advisorRole'))}${fields('guardian', tr('guardianRole'))}${fields('grader', tr('graderRole'))}${fields('compactor', tr('compactorRole'))}${fields('summarizer', tr('summarizerRole'))}
       </section>
       <section class="settings-section" data-settings-section="capabilities">
         <h3>${tr('capabilities')}</h3>
@@ -3593,6 +3644,15 @@ function renderModal(): void {
         <div class="settings-row"><span>${tr('browser')}</span><select id="settings-browser-name">${['chrome', 'msedge', 'chromium', 'firefox', 'webkit'].map((b) => `<option value="${b}" ${(settings?.user.automation?.browser?.browser ?? 'chrome') === b ? 'selected' : ''}>${b}</option>`).join('')}</select></div>
         <div class="settings-row"><span>${tr('mode')}</span><label class="toggle"><input id="settings-browser-headless" type="checkbox" ${settings?.user.automation?.browser?.headless !== false ? 'checked' : ''}> ${tr('headless')}</label><label class="toggle"><input id="settings-browser-isolated" type="checkbox" ${settings?.user.automation?.browser?.isolated ? 'checked' : ''}> ${tr('isolated')}</label></div>
         <div class="settings-row"><span>${tr('desktopAutomation')}</span><label class="toggle"><input id="settings-desktop" type="checkbox" ${settings?.user.automation?.desktop?.enabled ? 'checked' : ''}> ${tr('enabled')}</label></div>
+        <div class="settings-row"><span>${tr('searchAutomation')}</span><label class="toggle"><input id="settings-search" type="checkbox" ${settings?.user.automation?.search?.enabled !== false ? 'checked' : ''}> ${tr('enabled')}</label></div>
+        <div class="settings-row"><span>${tr('githubAutomation')}</span><label class="toggle"><input id="settings-github" type="checkbox" ${settings?.user.automation?.github?.enabled ? 'checked' : ''}> ${tr('enabled')}</label></div>
+        <div class="settings-row" id="settings-github-row" ${settings?.user.automation?.github?.enabled ? '' : 'style="display:none;"'}>
+          <span>${tr('githubToken')}</span>
+          <div style="display:flex;gap:6px;align-items:center;flex:1;max-width:320px;">
+            <input id="settings-github-token" type="password" style="flex:1;" placeholder="${settings?.user.automation?.github?.tokenSet ? '(stored token)' : 'ghp_... or gho_...'}" autocomplete="off">
+            <button class="btn ghost btn-sm" id="btn-detect-git-token" type="button" title="${tr('detectFromGit')}">${icon('search', 14)}</button>
+          </div>
+        </div>
         <div class="settings-note" id="automation-restart-note" hidden>${icon('alert', 14)} ${tr('automationChangedNote')}</div>
       </section>
       <section class="settings-section" data-settings-section="phone">
@@ -3683,11 +3743,40 @@ function renderModal(): void {
     })
   }
   const automationRestartNote = document.getElementById('automation-restart-note')
-  for (const id of ['settings-browser', 'settings-browser-name', 'settings-browser-headless', 'settings-browser-isolated', 'settings-desktop']) {
+  for (const id of ['settings-browser', 'settings-browser-name', 'settings-browser-headless', 'settings-browser-isolated', 'settings-desktop', 'settings-search', 'settings-github']) {
     document.getElementById(id)?.addEventListener('change', () => {
       if (automationRestartNote) automationRestartNote.hidden = false
     })
   }
+  const githubToggle = document.getElementById('settings-github') as HTMLInputElement | null
+  const githubRow = document.getElementById('settings-github-row')
+  if (githubToggle && githubRow) {
+    githubToggle.addEventListener('change', () => {
+      githubRow.style.display = githubToggle.checked ? '' : 'none'
+    })
+  }
+  document.getElementById('settings-github-token')?.addEventListener('input', () => {
+    if (automationRestartNote) automationRestartNote.hidden = false
+  })
+  document.getElementById('btn-detect-git-token')?.addEventListener('click', async () => {
+    try {
+      const res = await post<{ detected: boolean; token?: string; masked?: string }>('/api/github/detect-token', {})
+      if (res.detected && res.token) {
+        const tokenInput = document.getElementById('settings-github-token') as HTMLInputElement | null
+        if (tokenInput) tokenInput.value = res.token
+        if (githubToggle) {
+          githubToggle.checked = true
+          if (githubRow) githubRow.style.display = ''
+        }
+        if (automationRestartNote) automationRestartNote.hidden = false
+        toast(tr('githubTokenDetected'), 'success')
+      } else {
+        toast(tr('githubTokenNotFound'), 'error')
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error')
+    }
+  })
   for (const model of document.querySelectorAll<HTMLInputElement>('input[data-role][data-field="model"]')) {
     model.addEventListener('input', () => {
       const role = model.dataset.role
@@ -3730,6 +3819,7 @@ async function selectSession(runId: string): Promise<void> {
     state.entries = snapshot.entries
     state.busy = snapshot.state.busy
     state.planMode = snapshot.state.planMode
+    state.advisorEnabled = snapshot.state.advisorEnabled === true
     state.goal = snapshot.state.goal ?? ''
     state.goalState = snapshot.state.goalState ?? null
     state.selectedEntry = undefined
@@ -3763,6 +3853,7 @@ function connectSession(runId: string): void {
     state.entries = data.entries
     state.busy = data.state.busy
     state.planMode = data.state.planMode
+    state.advisorEnabled = data.state.advisorEnabled === true
     state.goal = data.state.goal ?? ''
     state.goalState = data.state.goalState ?? null
     state.connection = 'online'
@@ -3829,12 +3920,14 @@ function handleSessionEvent(data: Record<string, unknown>): void {
       if (state.current) state.current.state = next
       state.busy = next.busy
       state.planMode = next.planMode
+      state.advisorEnabled = next.advisorEnabled === true
       state.goal = next.goal ?? ''
       state.goalState = next.goalState ?? null
       renderHeader()
       const composerChanged =
         !previous ||
         previous.planMode !== next.planMode ||
+        previous.advisorEnabled !== next.advisorEnabled ||
         (previous.goal ?? null) !== (next.goal ?? null) ||
         (previous.goalState?.phase ?? null) !== (next.goalState?.phase ?? null) ||
         (previous.goalState?.roundsStarted ?? null) !== (next.goalState?.roundsStarted ?? null) ||
@@ -3907,12 +4000,23 @@ function handleSessionEvent(data: Record<string, unknown>): void {
     case 'question/request': {
       const entry: ChatEntry = { id: `question-${String(data.requestId)}`, kind: 'question', runId: currentRunId() ?? '', requestId: String(data.requestId), question: String(data.question ?? ''), ts: Date.now() }
       if (!state.entries.some((e) => e.id === entry.id)) state.entries.push(entry)
+      renderQuestionDock()
       renderTranscript()
       break
     }
     case 'question/answer': {
       const entry = state.entries.find((e) => e.kind === 'question' && e.requestId === data.requestId)
       if (entry?.kind === 'question') entry.answer = String(data.answer ?? '')
+      renderQuestionDock()
+      renderTranscript()
+      break
+    }
+    case 'question/timeout': {
+      const entry = state.entries.find((e) => e.kind === 'question' && e.requestId === data.requestId)
+      if (entry?.kind === 'question' && entry.answer === undefined) {
+        entry.answer = '(timed out)'
+      }
+      renderQuestionDock()
       renderTranscript()
       break
     }
@@ -4133,16 +4237,34 @@ function userMessageIds(): string[] {
   return state.entries.filter((e) => e.kind === 'user').map((e) => e.id)
 }
 
+/**
+ * What the rail currently shows. The transcript re-renders on every streamed
+ * delta; rebuilding the rail then replayed every mark's hover transition and
+ * made the active mark blink, so it is rebuilt only when the stops change.
+ */
+let jumpRailSignature = ''
+/** The marks currently in the rail, so the scroll-spy does no queries per frame. */
+let jumpMarkElements: Array<{ id: string; el: HTMLElement }> = []
+/** While a jump animates, the scroll-spy leaves the active mark alone. */
+let suppressActiveUntil = 0
+
 /** The rail beside the transcript: one mark per own message, plus previous / next. */
 function renderJumpRail(): void {
   const rail = document.getElementById('jump-rail')
   if (!rail) return
   const users = state.entries.filter((e): e is Extract<ChatEntry, { kind: 'user' }> => e.kind === 'user')
   if (users.length < 2) {
-    rail.hidden = true
-    rail.innerHTML = ''
+    if (!rail.hidden) rail.hidden = true
+    if (rail.innerHTML !== '') rail.innerHTML = ''
+    jumpRailSignature = ''
     return
   }
+  const signature = users.map((u) => `${u.id}\u0000${oneLine(u.text, 80)}`).join('\u0001')
+  if (signature === jumpRailSignature && !rail.hidden) {
+    // Same stops: only the active mark can have moved (handled on scroll).
+    return
+  }
+  jumpRailSignature = signature
   rail.hidden = false
   rail.innerHTML = `<button class="jump-step" data-action="jump-prev" title="${escapeHtml(tr('jumpPrev'))}" aria-label="${escapeHtml(tr('jumpPrev'))}">${icon('arrow-up', 12)}</button><div class="jump-marks" role="list" aria-label="${escapeHtml(tr('jumpToMessage'))}">${users
     .map(
@@ -4150,6 +4272,9 @@ function renderJumpRail(): void {
         `<button class="jump-mark" role="listitem" data-action="jump-to" data-entry-id="${escapeHtml(u.id)}" title="${escapeHtml(`${i + 1}. ${oneLine(u.text, 80)}`)}"><span></span></button>`,
     )
     .join('')}</div><button class="jump-step down" data-action="jump-next" title="${escapeHtml(tr('jumpNext'))}" aria-label="${escapeHtml(tr('jumpNext'))}">${icon('arrow-up', 12)}</button>`
+  jumpMarkElements = [...rail.querySelectorAll<HTMLElement>('.jump-mark')].flatMap((el) =>
+    el.dataset.entryId ? [{ id: el.dataset.entryId, el }] : [],
+  )
   markActiveJump()
 }
 
@@ -4159,11 +4284,20 @@ function markActiveJump(): void {
   const transcript = document.getElementById('transcript')
   if (!rail || rail.hidden || !transcript) return
   const top = transcript.getBoundingClientRect().top
+  // While a jump is animating, the scroll-spy would walk the active mark
+  // through every stop (visible as blinking); settle it once at the end.
+  if (Date.now() < suppressActiveUntil) return
+  // Measure the messages in the transcript, not the marks in the rail: the rail
+  // buttons sit in their own column, so their y says nothing about which message
+  // is at the top of the view.
+  const marks =
+    jumpMarkElements.length > 0 ? jumpMarkElements.map((mark) => mark.el) : [...rail.querySelectorAll<HTMLElement>('.jump-mark')]
   let active: string | undefined
-  for (const id of userMessageIds()) {
+  for (const mark of marks) {
+    const id = mark.dataset.entryId
+    if (!id) continue
     const el = transcript.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(id)}"]`)
-    if (!el) continue
-    if (el.getBoundingClientRect().top - top <= 80) active = id
+    if (el && el.getBoundingClientRect().top - top <= 80) active = id
   }
   active ??= userMessageIds()[0]
   for (const mark of rail.querySelectorAll<HTMLElement>('.jump-mark')) mark.classList.toggle('active', mark.dataset.entryId === active)
@@ -4177,6 +4311,12 @@ function jumpToEntry(entryId: string): void {
   transcript.scrollTo({ top: transcript.scrollTop + offset - 16, behavior: 'smooth' })
   el.classList.add('jump-flash')
   window.setTimeout(() => el.classList.remove('jump-flash'), 1200)
+  // Do not let the smooth scroll walk the active mark through every stop; the
+  // target mark is set now and the scroll-spy takes over again afterwards.
+  suppressActiveUntil = Date.now() + 700
+  for (const mark of document.querySelectorAll<HTMLElement>('#jump-rail .jump-mark')) {
+    mark.classList.toggle('active', mark.dataset.entryId === entryId)
+  }
 }
 
 /** Previous (-1) or next (+1) own message relative to the one at the top of the view. */
@@ -4352,6 +4492,7 @@ async function newSession(): Promise<void> {
   state.busy = false
   state.sending = false
   state.planMode = false
+  state.advisorEnabled = false
   state.blankWorkMode = 'fast'
   state.blankInteractionMode = 'autonomous'
   state.goal = ''
@@ -4412,6 +4553,7 @@ async function sendMessage(text: string): Promise<void> {
       state.entries = []
       state.busy = false
       state.planMode = data.state.planMode
+      state.advisorEnabled = data.state.advisorEnabled === true
       state.goal = data.state.goal ?? ''
       state.goalState = data.state.goalState ?? null
       state.selectedEntry = undefined
@@ -4585,6 +4727,9 @@ async function runCommand(id: string, args = ''): Promise<void> {
       return
     case 'plan-mode':
       await togglePlan(args === 'off' ? false : args === 'on' ? true : undefined)
+      return
+    case 'advisor':
+      await toggleAdvisor(args === 'off' ? false : args === 'on' ? true : undefined)
       return
     case 'interaction-mode':
       if (isInteractionMode(args)) await setInteractionMode(args)
@@ -4837,12 +4982,13 @@ async function runAction(action: 'undo' | 'compact' | 'review' | 'model', value?
   try {
     if (action === 'model') {
       const next = value?.trim() ?? ''
-      const result = await post<{ result: string }>(`/api/sessions/${encodeURIComponent(runId)}/model`, { model: next })
+      const result = await post<{ result: string; role: 'worker' | 'orchestrator' }>(
+        `/api/sessions/${encodeURIComponent(runId)}/model`,
+        { model: next, save: true },
+      )
       if (next) {
-        // Remember the worker model for new sessions as well as this one.
-        await put('/api/settings', { roles: { worker: { model: next } } })
-        if (state.boot) state.boot.config.worker.model = next
-        if (state.settings) state.settings.active.worker.model = next
+        if (state.boot) state.boot.config[result.role].model = next
+        if (state.settings) state.settings.active[result.role].model = next
         renderHeader()
         renderComposer()
         toast(`${result.result} ${tr('modelSaved')}`, 'success')
@@ -4854,7 +5000,7 @@ async function runAction(action: 'undo' | 'compact' | 'review' | 'model', value?
       toast(result.result, 'success')
     } else if (action === 'compact') {
       const result = await post<{ result: string }>(`/api/sessions/${encodeURIComponent(runId)}/compact`)
-      toast(result.result, 'success')
+      if (result.result === 'Context unchanged.') toast(localizeNotice(result.result))
     } else {
       toast('Reviewing the working tree…')
       const result = await post<{ final: string }>(`/api/sessions/${encodeURIComponent(runId)}/review`)
@@ -4929,6 +5075,19 @@ async function togglePlan(on?: boolean): Promise<void> {
     toast(result.result, 'success')
     renderComposer()
     renderHeader()
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 'error')
+  }
+}
+
+async function toggleAdvisor(on?: boolean): Promise<void> {
+  const runId = currentRunId()
+  if (!runId) return
+  try {
+    const result = await post<{ result: string; advisorEnabled: boolean }>(`/api/sessions/${encodeURIComponent(runId)}/advisor`, { enabled: on ?? !state.advisorEnabled })
+    state.advisorEnabled = result.advisorEnabled
+    toast(result.result, 'success')
+    renderComposer()
   } catch (error) {
     toast(error instanceof Error ? error.message : String(error), 'error')
   }
@@ -5744,6 +5903,9 @@ async function saveSettings(): Promise<void> {
   const browserHeadless = (document.getElementById('settings-browser-headless') as HTMLInputElement | null)?.checked
   const browserIsolated = (document.getElementById('settings-browser-isolated') as HTMLInputElement | null)?.checked
   const desktopEnabled = (document.getElementById('settings-desktop') as HTMLInputElement | null)?.checked
+  const searchEnabled = (document.getElementById('settings-search') as HTMLInputElement | null)?.checked
+  const githubEnabled = (document.getElementById('settings-github') as HTMLInputElement | null)?.checked
+  const githubTokenInput = (document.getElementById('settings-github-token') as HTMLInputElement | null)?.value.trim()
   // WP-61: appearance is device-local, so it is applied even if the server
   // rejects the rest of the form.
   const themeValue = (document.getElementById('settings-theme') as HTMLSelectElement | null)?.value
@@ -5774,6 +5936,11 @@ async function saveSettings(): Promise<void> {
       automation: {
         browser: { enabled: browserEnabled === true, browser: browserName, headless: browserHeadless === true, isolated: browserIsolated === true },
         desktop: { enabled: desktopEnabled === true },
+        search: { enabled: searchEnabled !== false },
+        github: {
+          enabled: githubEnabled === true,
+          ...(githubTokenInput ? { token: githubTokenInput } : state.settings?.user.automation?.github?.tokenSet ? { tokenSet: true } : {}),
+        },
       },
     })
     state.modal = undefined
@@ -5993,11 +6160,27 @@ async function approve(requestId: string, approved: boolean, scope: 'once' | 'se
 }
 
 async function answerQuestion(requestId: string, answer: string): Promise<void> {
-  const runId = currentRunId()
+  const entry = state.entries.find((e) => e.kind === 'question' && e.requestId === requestId)
+  const runId = entry?.runId ?? currentRunId()
   if (!runId) return
+  const prevAnswer = entry?.kind === 'question' ? entry.answer : undefined
+  if (entry && entry.kind === 'question') {
+    entry.answer = answer
+  }
+  renderQuestionDock()
+  renderTranscript()
   try {
     await post(`/api/sessions/${encodeURIComponent(runId)}/answer`, { requestId, answer })
   } catch (error) {
+    if (entry && entry.kind === 'question') {
+      if (prevAnswer !== undefined) {
+        entry.answer = prevAnswer
+      } else {
+        delete entry.answer
+      }
+      renderQuestionDock()
+      renderTranscript()
+    }
     toast(error instanceof Error ? error.message : String(error), 'error')
   }
 }
@@ -6404,6 +6587,9 @@ function onDocumentClick(event: MouseEvent): void {
       break
     case 'toggle-plan':
       void togglePlan()
+      break
+    case 'toggle-advisor':
+      void toggleAdvisor()
       break
     case 'open-settings':
       void openSettings()
@@ -6983,6 +7169,12 @@ async function init(): Promise<void> {
   // A staged build announces itself: checked now and when the window regains focus.
   void checkForUpdate(true)
   window.addEventListener('focus', () => void checkForUpdate())
+  // Catch up once when the window becomes visible again (see renderTranscript).
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || !renderWhileHidden) return
+    renderWhileHidden = false
+    renderTranscript()
+  })
   // WP-61: `system` follows the OS while the app is open.
   try {
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {

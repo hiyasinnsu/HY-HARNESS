@@ -4,7 +4,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { spawn, spawnSync } from 'node:child_process'
+import { execFile, spawn, spawnSync } from 'node:child_process'
+import { promisify } from 'node:util'
 import type { AddressInfo } from 'node:net'
 import {
   MemoryStore,
@@ -12,6 +13,8 @@ import {
   buildInfo,
   canonicalWorkspace,
   loadConfig,
+  withModelBudget,
+  isUnavailableOpenCodeGoModel,
   parseSandboxMode,
   readEvents,
   metricsSnapshot,
@@ -27,12 +30,13 @@ import {
   resolveSandboxMode,
   SessionLog,
   BUNDLES,
-  MODEL_CATALOG,
+  modelCatalog,
   SessionIndex,
   sessionLogPath,
   spillFile,
   switchableSandboxModes,
   userConfigDir,
+  detectWindowsGitToken,
   workspaceRootsFor,
   configuredExtraRoots,
   workspaceRootsKey,
@@ -68,7 +72,7 @@ import {
   startServices,
   summarizeThinking,
 } from './session-app.js'
-import { applyAgentEvent, projectChat, stripPlanPrefix, type ChatEntry } from './chat-projection.js'
+import { applyAgentEvent, compactionNotice, projectChat, stripPlanPrefix, type ChatEntry } from './chat-projection.js'
 import { API_VERSION } from './api-schema.js'
 import { matchContract, validateRequest } from './api-contract.js'
 import { DocumentError, previewDocument } from './documents.js'
@@ -105,7 +109,7 @@ import {
   type SessionStats,
   type StatsClock,
 } from './session-stats.js'
-import { usageOf, type UsageView } from './usage.js'
+import { combineUsage, usageOf, type UsageView } from './usage.js'
 import { instantThinkingSummary } from './summary-text.js'
 import { cronMatches, nextCronTime, parseCron } from './cron.js'
 import { PersistentPty } from './pty.js'
@@ -115,11 +119,14 @@ import { loadVapidKeys, sendPush, type VapidKeys } from './web-push.js'
 import { ensureTailscaleCert, tailscaleNode, type Runner } from './tailscale.js'
 import {
   DEFAULT_MAX_WORKERS,
+  assertScopeAvailable,
   canSpawnWorker,
   loadOrchestrationState,
   markStaleWorkersInterrupted,
   normalizeScopes,
   parseWorkerReport,
+  WORKER_REPORT_MISSING,
+  renderProjectBrief,
   saveOrchestrationState,
   scopeOwners,
   scopesOverlap,
@@ -425,6 +432,16 @@ interface WebSession {
   /** User-assigned name for this chat, when one was set. */
   title?: string | undefined
   conv?: Conversation
+  dialogue?: Conversation
+  dialogueBusy?: boolean
+  dialogueController?: AbortController
+  dialogueUsage?: UsageView
+  startingInstructionIds?: string[]
+  requestedBriefRevision?: number
+  directFiles?: Set<string>
+  directExceptionScope?: readonly string[]
+  lastWorkerSnapshot?: string
+  workerPollUnchangedCount?: number
   busy: boolean
   controller?: AbortController | undefined
   entries: ChatEntry[]
@@ -432,6 +449,7 @@ interface WebSession {
   pendingApprovals: Map<string, Pending<boolean | { approved: boolean; reason?: string }>>
   pendingQuestions: Map<string, Pending<string>>
   planMode: boolean
+  advisorEnabled?: boolean
   workMode?: WorkMode
   interactionMode?: InteractionMode
   /** WP-12: the session's live sandbox mode (persisted in the session log). */
@@ -512,6 +530,17 @@ function redactUserConfig(raw: unknown): unknown {
       }
     }
   }
+  if (copy.automation && typeof copy.automation === 'object' && !Array.isArray(copy.automation)) {
+    const auto = copy.automation as Record<string, unknown>
+    if (auto.github && typeof auto.github === 'object' && !Array.isArray(auto.github)) {
+      const gh = { ...(auto.github as Record<string, unknown>) }
+      if (typeof gh.token === 'string' && gh.token.length > 0) {
+        delete gh.token
+        gh.tokenSet = true
+      }
+      auto.github = gh
+    }
+  }
   return copy
 }
 
@@ -521,13 +550,14 @@ interface ModelLimits {
 }
 
 /** The user's settings file, or an empty object when it does not exist yet. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
 function readUserConfigFile(): { path: string; user: Record<string, unknown> } {
   const settingsPath = path.join(userConfigDir(), 'config.json')
   try {
-    const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as unknown
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return { path: settingsPath, user: parsed as Record<string, unknown> }
-    }
+    return { path: settingsPath, user: asRecord(JSON.parse(fs.readFileSync(settingsPath, 'utf8'))) ?? {} }
   } catch {
     // Missing or malformed: the caller treats it as an empty settings file.
   }
@@ -852,6 +882,7 @@ function configSummary(config: HarnessConfig) {
     worker: roleSummary(config.role),
     orchestrator: roleSummary(config.orchestratorRole),
     subagent: roleSummary(config.subagentRole),
+    advisor: config.advisorRole ? roleSummary(config.advisorRole) : null,
     guardian: config.guardianRole ? roleSummary(config.guardianRole) : null,
     grader: roleSummary(config.graderRole),
     compactor: roleSummary(config.compactorRole),
@@ -895,6 +926,7 @@ function sessionSummary(
         ...r,
         busy: live?.busy === true,
         planMode: live?.planMode === true,
+        advisorEnabled: live?.advisorEnabled ?? advisorEnabledOf(events, r.runId),
         sandboxMode: live?.sandboxMode ?? resolveSandboxMode(events, r.runId, config.sandbox),
         kind,
         ...(live?.parentRunId ?? worker ? { parentRunId: live?.parentRunId ?? active?.orchestratorRunId } : {}),
@@ -924,6 +956,15 @@ function planModeOf(events: readonly SessionEvent[], runId: string): boolean {
   for (const e of events) {
     if (e.runId !== runId || e.type !== 'plan-mode') continue
     on = (e.payload as { on?: unknown }).on === true
+  }
+  return on
+}
+
+function advisorEnabledOf(events: readonly SessionEvent[], runId: string): boolean {
+  let on = false
+  for (const e of events) {
+    if (e.runId !== runId || e.type !== 'advisor-mode') continue
+    on = (e.payload as { enabled?: unknown }).enabled === true
   }
   return on
 }
@@ -983,15 +1024,16 @@ function sessionState(session: WebSession) {
     ...(session.orchestrationId !== undefined ? { orchestrationId: session.orchestrationId } : {}),
     ...(session.workerStatus !== undefined ? { workerStatus: session.workerStatus } : {}),
     ...(session.workerTitle !== undefined ? { workerTitle: session.workerTitle } : {}),
-    busy: session.busy,
+    busy: session.busy || session.dialogueBusy === true,
     turns: session.conv?.turns ?? session.turns,
     planMode: session.conv?.isPlanMode() ?? session.planMode,
+    advisorEnabled: session.conv?.isAdvisorEnabled() ?? session.advisorEnabled ?? false,
     workMode: session.conv?.currentWorkMode() ?? session.workMode ?? 'fast',
     interactionMode: session.conv?.currentInteractionMode() ?? session.interactionMode ?? 'autonomous',
     sandboxMode: session.conv?.sandboxMode() ?? session.sandboxMode,
     goal: session.conv?.currentGoal() ?? session.goal ?? null,
     goalState: session.conv?.goalView() ?? null,
-    usage: session.conv?.usageSnapshot() ?? session.usage,
+    usage: combineUsage(session.conv?.usageSnapshot() ?? session.usage, session.dialogue?.usageSnapshot() ?? session.dialogueUsage),
     stats: statsView(session.stats),
     effort: session.conv?.currentEffort() ?? session.effort ?? '',
     model: session.model,
@@ -1186,7 +1228,10 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   }
   const orchestrationPath = path.join(config.stateDir, 'orchestration.json')
   let orchestration = loadOrchestrationState(orchestrationPath)
-  let orchestratorInbox: string[] = []
+  let orchestratorInbox: NonNullable<OrchestrationRecord['inbox']> = orchestration.active?.inbox ?? []
+  const deliveredNotices = new Set<string>()
+  const appliedNotices = new Set<string>()
+  let directShellRunning = false
   let orchestratorStarting = false
   let orchestratorTimer: NodeJS.Timeout | undefined
   /** Pending automatic goal rounds, one timer per session. */
@@ -1442,7 +1487,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     broadcastOrchestration()
   }
   const dropRunFromLog = (runId: string): void => {
-    const kept = readEvents(logFile).filter((event) => event.runId !== runId && !event.runId?.startsWith(`${runId}.sub`))
+    const kept = readEvents(logFile).filter((event) => event.runId !== runId && event.runId !== `${runId}.dialogue` && !event.runId?.startsWith(`${runId}.sub`))
     fs.mkdirSync(path.dirname(logFile), { recursive: true })
     fs.writeFileSync(logFile, kept.length > 0 ? `${kept.map((event) => JSON.stringify(event)).join('\n')}\n` : '', 'utf8')
   }
@@ -1517,7 +1562,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       subscribers: new Set(),
       pendingApprovals: new Map(),
       pendingQuestions: new Map(),
-      planMode: kind === 'orchestrator' ? true : planModeOf(events, runId),
+      planMode: kind === 'orchestrator' ? false : planModeOf(events, runId),
+      advisorEnabled: advisorEnabledOf(events, runId),
       workMode: ((mode: unknown): WorkMode => (isWorkMode(mode) ? mode : 'fast'))(
         (events.filter((e) => e.runId === runId && e.type === 'session/work-mode').at(-1)?.payload as { mode?: unknown } | undefined)?.mode,
       ),
@@ -1533,6 +1579,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         events.filter((e) => e.runId === runId && (e.type === 'turn/start' || e.type === 'round/start')).length -
         events.filter((e) => e.runId === runId && e.type === 'turn/undo').length,
       usage: usageOf(events, runId),
+      dialogueUsage: usageOf(events, `${runId}.dialogue`),
       jobs: jobsOf(entries),
       pinned: uiState.pinned.includes(runId),
       archived: uiState.archived.includes(runId),
@@ -1555,7 +1602,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       subscribers: new Set(),
       pendingApprovals: new Map(),
       pendingQuestions: new Map(),
-      planMode: kind === 'orchestrator',
+      planMode: false,
+      advisorEnabled: false,
       sandboxMode: config.sandbox,
       turns: 0,
       model: modelForKind(kind),
@@ -1624,23 +1672,10 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   const orchestratorPrompt = (): string =>
     promptText(
       'orchestrator.md',
-      'You are the orchestrator. Stay in plan mode, never edit files, and manage worker sessions with the orchestrator tools.',
+      'You own the project outcome. Keep its purpose clear, delegate substantial work, review results and make small direct changes when useful.',
     )
-  // Role guidance appended after orchestrator.md. Keep additions here additive
-  // so the authored prompt file stays the base and the two never disagree.
-  const orchestratorGuidance = [
-    'Think about the project as a whole, not only the task in front of you. Before you hand out each task, work out how the change lands in the wider ' +
-      'codebase: which modules, contracts and other running tasks it can affect, and what it makes obsolete. Read the existing documents when they bear on ' +
-      'the decision, such as `docs/designs/`, `project.md` and `docs/implementation_status.md`, instead of inferring the design from one file. When several ' +
-      'workers report, reconcile their changes against each other and against the plan, and say so when two of them pull in different directions. Prefer ' +
-      'whole-project consistency - types, API contracts, naming, no duplicated tests - over a locally tidy answer. Keep in mind what the user actually wanted ' +
-      'from the finished change, and cut the tasks so that answer stays true; when it is unclear, ask only as the interaction setting allows.',
-    'Reuse workers before you create new ones. Check `orchestrator_workers` before every `orchestrator_spawn`; it lists only open workers by default, with the exact status and scope. When an existing worker already owns the same scope or an overlapping one, continue with `orchestrator_send`: it has already read those files and its prompt cache is warm, so a follow-up is cheaper and less error-prone than a fresh briefing. Spawn a new worker only when the scope does not overlap an active one, when the existing worker is stopped on a blocker it cannot clear, or when its conversation is so tangled that correcting it costs more than restarting. Closing a worker releases its scope and lets that cache go cold. A worker that finished with `STATUS: done` is `waiting for review` but still holds its scope: review its diff and close it, or send the next concrete step in the same turn. Do not leave a waiting worker open across turns unless you are reusing it immediately; that is how scopes get stranded.',
-  ].join('\n\n')
-  const workerPrompt = (record: WorkerRecord | undefined): string => {
-    const base = promptText('worker.md', 'You are a worker managed by an orchestrator. Work only inside your assigned scope.')
-    return `${base}\n\nAssigned title: ${record?.title ?? '(unknown)'}\nAssigned scope: ${record?.scope.join(', ') ?? '(unknown)'}\nThis is a shared workspace. The host refuses git and creates/owns checkpoints; do not try to work around those restrictions.`
-  }
+  const workerPrompt = (): string =>
+    promptText('worker.md', 'You are a worker managed by an orchestrator. Work only inside your assigned scope.')
 
   function pluginTool(
     name: string,
@@ -1668,7 +1703,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     required,
   })
 
-  function orchestrationTooling(): {
+  function orchestrationTooling(dialogue = false, conversation?: WebSession): {
     plugins: LoadedPlugins['tools']
     specs: ToolSpec[]
     allowed: Set<string>
@@ -1678,13 +1713,75 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       const [key, tool] = pluginTool(name, description, input, readOnly, run)
       plugins.set(key, tool)
     }
+    add('orchestrator_brief',
+      dialogue
+        ? 'Read the shared project purpose, success criteria, constraints, accepted decisions and evidence. Read-only in concurrent conversation; use orchestrator_request to propose updates to the execution owner.'
+        : 'Read the shared project purpose, success criteria, constraints, accepted decisions and evidence. To update, pass expectedRevision (0 before the first brief) and only the fields that changed. Preserve the user objective through small talk; proposals are not accepted decisions. Updates notify running workers at their next safe step. Keep this compact and cite source files instead of copying their contents.',
+      dialogue
+        ? object({})
+        : object({ expectedRevision: { type: 'integer', minimum: 0 }, objective: { type: 'string' }, successCriteria: { type: 'string' }, constraints: { type: 'string' }, decisions: { type: 'string' }, evidence: { type: 'string' } }),
+      dialogue,
+      async (args) => {
+        const active = activeOrchestration()
+        if (!active) throw new Error('orchestration is not active')
+        const fields = ['objective', 'successCriteria', 'constraints', 'decisions', 'evidence'] as const
+        for (const field of fields) if (typeof args[field] === 'string' && (args[field] as string).length > (field === 'decisions' ? 4000 : 2000)) throw new Error(`Keep ${field} compact and reference source files instead of copying them.`)
+        if (!fields.some((field) => args[field] !== undefined)) return { brief: active.brief ?? null, revision: active.brief?.revision ?? 0 }
+        if (dialogue) throw new Error('Conversation only proposes decisions; use orchestrator_request for the execution owner to apply them.')
+        const revision = active.brief?.revision ?? 0
+        if (args.expectedRevision !== revision) throw new Error(`brief changed; read revision ${revision} before updating`)
+        active.brief = { objective: '', successCriteria: '', constraints: '', decisions: '', evidence: '', ...active.brief, ...Object.fromEntries(fields.filter((field) => typeof args[field] === 'string').map((field) => [field, args[field]])), revision: revision + 1 }
+        persistOrchestration()
+        for (const worker of scopeOwners(active)) {
+          if (worker.status === 'running' || worker.status === 'queued') await sendWorker(worker.runId, `${renderProjectBrief(active)}\nReconcile the changed decisions with your task before further edits. Report any conflict rather than guessing.`)
+        }
+        return { brief: active.brief }
+      })
+    if (dialogue) {
+      add('orchestrator_workers', 'Read the current worker progress without changing execution.', object({}), true, async () => workerList(false, false))
+      add('orchestrator_request',
+        'Submit an actionable user request, correction, or proposed decision to the single execution owner. Include the request and its implications, not implementation instructions. Do not call for small talk or status questions. Acceptance means queued, not implemented; only the execution owner changes accepted decisions or files.',
+        object({ message: { type: 'string' } }, ['message']), true,
+        async (args) => {
+          const message = String(args.message).trim()
+          if (!message || message.length > 8000) throw new Error('message must contain 1 to 8000 characters')
+          const original = conversation?.entries.filter((item) => item.kind === 'user').at(-1)?.text ?? ''
+          queueOrchestratorNotice(`[user request from concurrent conversation]\nUser: ${original}\nProposed handling: ${message}`, true)
+          return { accepted: true, applied: false, message: 'The execution owner will process this at its next safe step. Existing independent work continues.' }
+        })
+      return { plugins, specs: [...plugins.values()].map((tool) => tool.spec), allowed: new Set(plugins.keys()) }
+    }
+    add('orchestrator_scope',
+      'Reserve disjoint editing scopes, or release them with scope:[]. Direct file edits automatically acquire a free single-file scope. If no worker has been dispatched, use orchestrator_spawn before expanding direct edits beyond two files in a turn. When work cannot be split safely or the user requested direct execution, reserve only the necessary scope and explain why in directReason. Direct scopes release when the turn ends. Use verify_file on disjoint files while workers run. Shell verification requires idle workers. Release overlapping direct scopes before delegating.',
+      object({
+        scope: { type: 'array', items: { type: 'string' } },
+        directReason: { type: 'string', description: 'Why a worker cannot take a separate part of this scope, or why the user requested direct execution.' },
+      }, ['scope']), false,
+      async (args) => {
+        const active = activeOrchestration()
+        if (!active) throw new Error('orchestration is not active')
+        const scope = (args.scope as string[]).length ? normalizeScopes(args.scope as string[]) : []
+        const directReason = typeof args.directReason === 'string' ? args.directReason.trim() : ''
+        if (directReason && !scope.length) throw new Error('directReason requires a nonempty scope')
+        const previous = active.directScope
+        delete active.directScope
+        try { assertScopeAvailable(active, scope) } catch (error) { if (previous) active.directScope = previous; throw error }
+        active.directScope = scope
+        if (conversation) {
+          if (directReason) conversation.directExceptionScope = scope
+          else delete conversation.directExceptionScope
+        }
+        persistOrchestration()
+        return { scope, scopeHeld: scope.length > 0 }
+      })
     add(
       'orchestrator_spawn',
-      'Create an ordinary worker session for a runnable task. Start work as soon as the task is clear; do not wait for plan approval. Scope is one or more disjoint repository-relative directories, or `file:` scopes for single files. The worker may write only below those directories or exactly at those files. The host rejects overlapping scopes and too many workers.',
+      'Start a worker for the first clearly separable part of substantial work as soon as its task and scope are clear. Dispatch before beginning broad direct implementation. Declare required capabilities, including shell for command-based verification. Use a disjoint repository-relative directory or a `file:` scope for one file. Worker reports automatically wake this session.',
       object(
         {
           title: { type: 'string', description: 'Short task title.' },
           task: { type: 'string', description: 'Self-contained task, including acceptance checks and verification.' },
+          requires: { type: 'array', items: { type: 'string', enum: ['read', 'edit', 'shell'] } },
           scope: {
             type: 'array',
             items: { type: 'string' },
@@ -1694,11 +1791,11 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         ['title', 'task', 'scope'],
       ),
       false,
-      async (args) => spawnWorker(String(args.title ?? ''), String(args.task ?? ''), Array.isArray(args.scope) ? args.scope.map(String) : []),
+      async (args) => spawnWorker(String(args.title ?? ''), String(args.task ?? ''), args.scope as string[], args.requires as string[] | undefined),
     )
     add(
       'orchestrator_send',
-      'Send a correction or follow-up to an existing open worker. The worker keeps its scope. A waiting worker starts a new turn immediately; a running worker queues the message for after its current turn. The result reports delivered, queued, status and scope, so never treat queued:false as "closed".',
+      'Send a correction or follow-up using the existing conversation. Running workers see it at their next safe step, before further tool calls; an in-flight operation finishes first. The response distinguishes receipt from application. A reviewed/closed worker reacquires its old scope if available and resumes with its cached context. Follow delivery in orchestrator_workers.',
       object(
         {
           workerId: { type: 'string' },
@@ -1711,17 +1808,40 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     )
     add(
       'orchestrator_workers',
-      'List workers in a compact form. By default only open workers (everything except closed) are returned, one line each with the exact status, report status, held scope and a report preview. Set includeClosed to see recently closed workers, or full to include the original task and the full report. A waiting worker is finished but not reviewed and still holds its scope.',
+      'Read worker state when a decision needs it. Reports wake execution automatically. If nothing changed and only workers can advance the project, end this exchange while workers continue. Set includeClosed to see recently released scopes, or full to include the original task and report.',
       object({
         includeClosed: { type: 'boolean', description: 'Include recently closed workers.' },
         full: { type: 'boolean', description: 'Include each task and the full report preview.' },
       }),
       true,
-      async (args) => workerList(args.includeClosed === true, args.full === true),
+      async (args) => {
+        const snapshot = workerList(args.includeClosed === true, args.full === true)
+        const key = JSON.stringify(snapshot, (key, value) => key === 'updatedAt' ? undefined : value)
+        if (conversation?.lastWorkerSnapshot === key) {
+          const count = (conversation.workerPollUnchangedCount ?? 0) + 1
+          conversation.workerPollUnchangedCount = count
+          if (count >= 2) {
+            throw new Error(
+              'Polling rejected: worker state has not changed since your earlier check. ' +
+                'Stop calling tools to poll or inspect progress. Reply briefly in plain text without any tool calls to end this turn until a worker wakes this session.',
+            )
+          }
+          return {
+            unchanged: true,
+            action: 'yield_turn',
+            hint: 'Worker state has not changed. Reports wake execution automatically. Do NOT call orchestrator_workers again; if you have no immediate independent work left, stop calling tools and reply in plain text to end this turn.',
+          }
+        }
+        if (conversation) {
+          conversation.lastWorkerSnapshot = key
+          conversation.workerPollUnchangedCount = 0
+        }
+        return snapshot
+      },
     )
     add(
       'orchestrator_diff',
-      'Read the current git status and diff for one worker scope, plus changes outside every active scope.',
+      'Read the Git changes for one worker scope and report changes outside active scopes. If Git is unavailable, returns diffAvailable: false. Inspect the scoped files directly and verify the reported checks before accepting.',
       object(
         {
           workerId: { type: 'string' },
@@ -1762,7 +1882,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     )
     add(
       'orchestrator_close',
-      'Close a reviewed worker and release its scope. A running worker must be stopped first so its in-flight edits cannot race a new owner. A blocked/partial/failed/interrupted worker needs a summary explaining how the blocker was handled; otherwise closing is refused.',
+      'Release a reviewed worker scope and slot, retaining its conversation for later reuse with orchestrator_send. Running work must actually stop first. A blocked/partial/failed/interrupted worker needs a summary of how the blocker was handled. Closing is not proof that the project is complete.',
       object({ workerId: { type: 'string' }, summary: { type: 'string' } }, ['workerId']),
       false,
       async (args) => closeWorker(String(args.workerId ?? ''), typeof args.summary === 'string' ? args.summary : undefined),
@@ -1774,25 +1894,94 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   function conversationOptions(session: WebSession): Parameters<typeof Conversation.create>[7] {
     if (session.kind === 'orchestrator') {
       return {
-        roleInstruction: orchestratorPrompt() + orchestratorGuidance,
+        roleInstruction: orchestratorPrompt(),
         role: config.orchestratorRole,
-        planOnly: true,
-        initialPlanMode: true,
+        parallelPlan: true,
         checkpoints: false,
         delegate: false,
-        tooling: orchestrationTooling(),
+        excludedTools: new Set(['sleep']),
+        allowWaitingReply: () => workersAreWriting(),
+        tooling: orchestrationTooling(false, session),
+        beforeTool: () => {
+          if (activeOrchestration()?.orchestratorRunId !== session.runId) throw new Error('This orchestration is no longer active.')
+        },
+        verifyGuard: (rel) => {
+          const active = activeOrchestration()
+          if (!active || active.orchestratorRunId !== session.runId) throw new Error('This orchestration is no longer active.')
+          if (active.workers.some((worker) => workerIsWriting(worker) && workerOwnsScope(worker, rel))) {
+            throw new Error('An active worker may edit this file. Verify a disjoint file or wait for the worker report.')
+          }
+        },
+        sessionContext: () => [projectContext(), ...session.entries.filter((entry) => entry.id.startsWith('dialogue-')).slice(-6).map((entry) => `${entry.kind === 'user' ? '[concurrent conversation] user' : '[concurrent conversation; proposals are not accepted decisions] assistant'}: ${('text' in entry ? entry.text.slice(0, 2000) : '')}`)].filter(Boolean).join('\n\n'),
+        writeGuard: (rel) => {
+          const active = activeOrchestration()
+          if (!active || active.orchestratorRunId !== session.runId) throw new Error('This orchestration is no longer active.')
+          const fileScope = normalizeScopes([`file:${rel}`])[0]!
+          const files = session.directFiles ??= new Set()
+          if (active.workers.length === 0 && config.bundles.tools?.has('orchestrator_spawn') !== false &&
+              files.size >= 2 && !files.has(fileScope) && !session.directExceptionScope?.some((scope) => scopesOverlap(scope, fileScope))) {
+            throw new Error('Direct editing has reached two files this turn without a worker. Call orchestrator_spawn for a substantive independent task. If the work cannot safely be split or the user requested direct execution, call orchestrator_scope with a narrow scope and directReason.')
+          }
+          if (!active.directScope?.some((scope) => scopesOverlap(scope, fileScope))) {
+            const scope = [fileScope]
+            assertScopeAvailable(active, scope)
+            active.directScope = [...(active.directScope ?? []), ...scope]
+            persistOrchestration()
+          }
+          files.add(fileScope)
+        },
+        shellLock: {
+          async acquire() {
+            const release = await shellQueue.acquire()
+            if (workersAreWriting()) { release(); throw new Error('A worker is still active; run shell verification after it finishes or delegate the command.') }
+            directShellRunning = true
+            return () => {
+              directShellRunning = false
+              release()
+              for (const worker of activeOrchestration()?.workers ?? []) setTimeout(() => resumePendingWorker(worker.runId), 0)
+            }
+          },
+        },
+        shellGuard: () => {
+          if (!activeOrchestration() || workersAreWriting()) throw new Error('A worker is still active. Use verify_file for a disjoint file, delegate the command, or run shell after the worker finishes.')
+        },
+        noBackgroundShell: true,
       }
     }
     if (session.kind === 'worker') {
       const record = workerOfRun(session.runId) ?? orchestration.active?.workers.find((w) => w.runId === session.runId)
+      const [name, consult] = pluginTool('orchestrator_consult',
+        'Ask the execution owner about an uncertain design decision, missing scope, evidence or a proposed improvement. Include the question, options and your recommendation. The request is durable; a reply arrives as an instruction at a safe step. Continue independent work meanwhile; if only dependent work remains, report blocked with this question. Do not ask the user directly or wait/poll.',
+        object({ message: { type: 'string' } }, ['message']), true,
+        async (args) => {
+          if (!record || !workerHoldsScope(record) || activeOrchestration()?.workers.includes(record) !== true) throw new Error('worker is not active')
+          const message = String(args.message).trim()
+          if (!message || message.length > 8000) throw new Error('message must contain 1 to 8000 characters')
+          queueOrchestratorNotice(`[worker consultation]\nWorker: ${record.title} (${record.runId})\n${message}`)
+          return { received: true, answered: false, message: 'The execution owner will reply through orchestrator_send. Continue independent work.' }
+        })
       return {
-        roleInstruction: workerPrompt(record),
+        gitReadOnly: true,
+        // The worker session's own role prompt. A subagent it starts must not
+        // inherit it (6-4): a read-only child cannot edit, so session-app gives
+        // it READ_ONLY_SUBAGENT_INSTRUCTION instead of this text.
+        roleInstruction: workerPrompt(),
         checkpoints: false,
         delegate: true,
         ...(record ? { writeScope: record.scope } : {}),
+        tooling: { plugins: new Map([[name, consult]]), specs: [consult.spec], allowed: [name] },
+        sessionContext: () => {
+          session.requestedBriefRevision = activeOrchestration()?.brief?.revision ?? 0
+          const assignment = record ? `Assigned title: ${record.title}\nAssigned scope: ${record.scope.join(', ')}` : ''
+          return [assignment, renderProjectBrief(activeOrchestration())].filter(Boolean).join('\n\n')
+        },
+        writeGuard: (rel) => {
+          if (!record || !workerOwnsScope(record, rel)) throw new Error(`Worker no longer owns ${rel}; request a scope from the orchestrator.`)
+        },
         shellGuard: (command: string) => {
+          if (!record || !workerHoldsScope(record) || activeOrchestration()?.workers.includes(record) !== true) throw new Error('This worker no longer owns an active editing scope.')
           if (/(^|[\s;&|()])git(?:\s|$)/i.test(command)) {
-            throw new Error('workers must not run git; the orchestrator owns repository state and reviews the diff')
+            throw new Error('Workers must not run Git through shell. The orchestrator owns repository changes; use git_status for read-only inspection.')
           }
           if (/(^|[\s;&|()])hy\s+(?:undo|checkpoint|sandbox|ralph|run|resume|review)\b/i.test(command)) {
             throw new Error('workers must not run harness state-changing commands')
@@ -1800,8 +1989,6 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         },
         shellLock: shellQueue,
         noBackgroundShell: true,
-        minForegroundWaitMs: 10 * 60_000,
-        shellTimeoutMs: 10 * 60_000,
       }
     }
     return {
@@ -1857,6 +2044,15 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         session.pendingApprovals.delete(requestId)
         session.entries.push({ id: `approval-timeout-${requestId}`, kind: 'notice', runId: session.runId, text: `approval timed out: ${request.command}`, ts: Date.now(), level: 'warn' })
         broadcast(session, { type: 'approval/timeout', requestId })
+        // 6-3: the timeout denies the call, but the turn keeps running (the
+        // agent sees the denial and continues). A record left `blocked` would
+        // freeze the status the orchestrator reads; `updateWorker` also clears
+        // the `blocker` text. Another approval of this run may still be
+        // pending, so unblock only when this was the last one.
+        if (session.kind === 'worker' && session.pendingApprovals.size === 0) {
+          const record = workerOfRun(session.runId)
+          if (record?.status === 'blocked') updateWorker(record, { status: 'running' })
+        }
         resolve(false)
       }, 5 * 60_000)
       session.pendingApprovals.set(requestId, { resolve: (v) => { clearTimeout(timer); resolve(v) }, timer, request })
@@ -1872,20 +2068,74 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     session.entries.push({ id: `question-${requestId}`, kind: 'question', runId: session.runId, requestId, question, ts: Date.now() })
     broadcast(session, { type: 'question/request', requestId, question })
     notifyPhones({ kind: 'question', label: sessionLabel(session), body: question, runId: session.runId })
+    if (session.kind === 'orchestrator') {
+      const timer = setTimeout(() => {
+        session.pendingQuestions.delete(requestId)
+        broadcast(session, { type: 'question/timeout', requestId })
+      }, 30 * 60_000)
+      session.pendingQuestions.set(requestId, {
+        timer,
+        resolve: (answer) => {
+          clearTimeout(timer)
+          if (answer.trim() && activeOrchestration()?.orchestratorRunId === session.runId) queueOrchestratorNotice(`[user decision]\nQuestion: ${question}\nAnswer: ${answer}`, true)
+        },
+      })
+      return Promise.resolve('The question is pending; this is not a user answer. Continue independent work, and leave only tasks that need this decision pending. The answer will arrive as a new message.')
+    }
     return new Promise<string>((resolve) => {
       const timer = setTimeout(() => {
         session.pendingQuestions.delete(requestId)
         broadcast(session, { type: 'question/timeout', requestId })
         resolve('')
-      }, 10 * 60_000)
+      }, 30 * 60_000)
       session.pendingQuestions.set(requestId, { resolve: (v) => { clearTimeout(timer); resolve(v) }, timer })
     })
   }
 
+  function publishCompaction(session: WebSession, event: AgentEvent): void {
+    if (event.type !== 'compaction' || typeof event.seq !== 'number' || typeof event.ts !== 'number') return
+    const entry = compactionNotice(session.runId, event.seq, event.ts, event.outcome)
+    if (!entry) return
+    session.entries.push(entry)
+    broadcast(session, { type: 'entry', entry })
+  }
+
   const onAgentEvent = (session: WebSession, event: AgentEvent): void => {
+    if (event.type === 'compaction' && typeof event.subagent !== 'string') {
+      publishCompaction(session, event)
+      return
+    }
+    if (event.type === 'step-end' && session.startingInstructionIds?.length) {
+      const worker = workerOfRun(session.runId)
+      if (worker) {
+        const applied = new Set(session.startingInstructionIds)
+        worker.pendingMessages = worker.pendingMessages?.filter((message) => !applied.has(message.id)) ?? []
+        if (worker.lastInstruction && applied.has(worker.lastInstruction.id)) worker.lastInstruction.appliedAt = Date.now()
+        persistOrchestration()
+      }
+      delete session.startingInstructionIds
+    }
+    if (event.type === 'steer-applied' && typeof event.id === 'string') {
+      if (session.kind === 'worker') {
+        const worker = workerOfRun(session.runId)
+        if (worker) {
+          worker.pendingMessages = worker.pendingMessages?.filter((message) => message.id !== event.id) ?? []
+          if (worker.lastInstruction?.id === event.id) worker.lastInstruction.appliedAt = Date.now()
+          persistOrchestration()
+        }
+      } else if (session.kind === 'orchestrator') {
+        appliedNotices.add(event.id)
+      }
+    }
     if (session.kind === 'worker') {
       const record = workerOfRun(session.runId)
-      if (record) onWorkerEvent(record)
+      if (record) {
+        onWorkerEvent(record)
+        if (event.type === 'step-end' && session.requestedBriefRevision !== undefined && record.briefRevision !== session.requestedBriefRevision) {
+          record.briefRevision = session.requestedBriefRevision
+          persistOrchestration()
+        }
+      }
     }
     // A subagent's internal stream belongs to its own transcript, not the parent.
     if (typeof event.subagent === 'string') {
@@ -1975,13 +2225,14 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     if (event.type === 'step-end' || event.type === 'final') broadcast(session, { type: 'state', state: sessionState(session) })
   }
 
-  const resolvePending = (session: WebSession): void => {
+  const resolvePending = (session: WebSession, keepQuestions = false): void => {
     for (const [id, pending] of session.pendingApprovals) {
       clearTimeout(pending.timer)
       pending.resolve(false)
       session.pendingApprovals.delete(id)
       broadcast(session, { type: 'approval/decision', requestId: id, approved: false, reason: 'run cancelled' })
     }
+    if (keepQuestions) return
     for (const [id, pending] of session.pendingQuestions) {
       clearTimeout(pending.timer)
       pending.resolve('')
@@ -1990,10 +2241,95 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     }
   }
 
-  const workerInbox = new Map<string, string[]>()
-
   function activeOrchestration(): OrchestrationRecord | undefined {
     return orchestration.active?.status === 'active' ? orchestration.active : undefined
+  }
+
+  function runWithOrchestrationBudget<T>(session: WebSession, run: () => T): T {
+    const active = activeOrchestration()
+    const limit = config.budget.maxCostUsd
+    if (limit === undefined || !active || session.kind === 'chat') return run()
+    return withModelBudget((maximum) => {
+      if (!Number.isFinite(maximum) || maximum < 0) throw new Error('Cannot estimate the maximum cost of this model request.')
+      // Spend and live reservations are separate fields. The cap covers what
+      // finished turns spent, what other requests have reserved, and this
+      // request's worst case; a reservation alone would be released on settle
+      // and could not bound the whole orchestration, while spend alone would
+      // ignore requests that are still running.
+      const spent = active.spentCostUsd ?? 0
+      const reserved = active.reservedCostUsd ?? 0
+      if (spent + reserved + maximum > limit) throw new Error(`Orchestration cost limit ($${limit.toFixed(2)}) would be exceeded by this model request. Work is preserved.`)
+      if (maximum !== 0) {
+        active.reservedCostUsd = reserved + maximum
+        persistOrchestration()
+      }
+      let closed = false
+      return (settled) => {
+        // The provider settles once per request; the flag keeps a second call
+        // from releasing a reservation twice or double-counting the spend.
+        if (closed) return
+        closed = true
+        active.reservedCostUsd = Math.max(0, (active.reservedCostUsd ?? 0) - maximum)
+        if (Number.isFinite(settled) && settled > 0) active.spentCostUsd = (active.spentCostUsd ?? 0) + settled
+        if (activeOrchestration()?.id === active.id) persistOrchestration()
+      }
+    }, run)
+  }
+
+  /**
+   * Safety net for `runWithOrchestrationBudget`: a provider path that never
+   * reports usage skips the settle callback, so that request's reservation
+   * stays in `reservedCostUsd` and later requests fail the cost-limit check.
+   * No reservation is live once no turn of the orchestration is in flight, so
+   * the field can go back to 0; `spentCostUsd` is the settled total and is
+   * never cleared here. The in-flight check keeps a concurrent worker or
+   * dialogue request protected while it runs.
+   */
+  function releaseOrchestrationReservation(session: WebSession): void {
+    const active = activeOrchestration()
+    if (!active || !active.reservedCostUsd) return
+    const ids = new Set([active.orchestratorRunId, ...active.workers.map((worker) => worker.runId)])
+    if (!ids.has(session.runId)) return
+    for (const id of ids) {
+      const other = sessions.get(id)
+      if (other && other !== session && (other.busy || other.dialogueBusy === true)) return
+    }
+    active.reservedCostUsd = 0
+    persistOrchestration()
+  }
+
+  function projectContext(): string {
+    const active = activeOrchestration()
+    if (!active) return 'This orchestration is no longer active.'
+    return [renderProjectBrief(active),
+      withOrchestrationDigest(`Current open worker count: ${scopeOwners(active).length}. This snapshot supersedes earlier worker status.`),
+      `Current direct editing scope: ${active.directScope?.join(', ') || 'none'}. Direct scopes release at turn end; a free file scope is acquired automatically when editing.`,
+      ...(!active.workers.length && config.bundles.tools?.has('orchestrator_spawn') !== false
+        ? ['No worker has started. When an independent piece of substantial work is clear, dispatch it with orchestrator_spawn before broad direct implementation.']
+        : []),
+      ...(workersAreWriting()
+        ? [
+            '[Waiting protocol] Async workers are currently running. If you have no more independent workers to spawn or immediate local edits to perform right now, do NOT call tools to poll or wait—reply briefly in plain text without tool calls to yield this turn until a worker wakes you.',
+          ]
+        : []),
+    ].join('\n\n')
+  }
+
+  function workerIsWriting(worker: WorkerRecord): boolean {
+    return sessions.get(worker.runId)?.busy === true || worker.status === 'running' || worker.status === 'queued'
+  }
+
+  function workersAreWriting(): boolean {
+    return activeOrchestration()?.workers.some(workerIsWriting) ?? false
+  }
+
+  function resumePendingWorker(workerId: string): void {
+    const worker = workerOfRun(workerId)
+    const session = sessions.get(workerId)
+    if (directShellRunning || !worker || !session || session.busy || !worker.pendingMessages?.length || ['done', 'stopped', 'failed', 'interrupted'].includes(worker.status)) return
+    delete worker.lastSummary
+    updateWorker(worker, { status: 'running', lastReportStatus: undefined })
+    void runTurn(session, 'Continue using the pending corrections.', [], { synthetic: true, source: 'orchestrator', from: 'orchestrator' })
   }
 
   /**
@@ -2032,7 +2368,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       ...(awaiting.length > 0
         ? [
             `Awaiting review: ${awaiting.map((worker) => worker.runId).join(', ')}. ` +
-              'Run orchestrator_diff, then orchestrator_close; or send the next concrete step with orchestrator_send. ' +
+              'Review the result using orchestrator_diff or direct file inspection when Git is unavailable, then use orchestrator_close; or send the next concrete step with orchestrator_send. ' +
               'Their scope stays reserved until they are closed.',
           ]
         : []),
@@ -2142,6 +2478,11 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       reportStatus: record.lastReportStatus ?? null,
       blocker: record.blocker ?? null,
       closedAt: record.closedAt ?? null,
+      lastInstruction: record.lastInstruction ?? null,
+      pendingInstructions: record.pendingMessages?.length ?? 0,
+      reusable: record.status === 'done',
+      briefRevision: record.briefRevision ?? 0,
+      needsReconciliation: (record.briefRevision ?? 0) !== (activeOrchestration()?.brief?.revision ?? 0),
     }
   }
 
@@ -2160,6 +2501,10 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       statusLabel: workerStatusLabel(record.status),
       reportStatus: record.lastReportStatus ?? null,
       scopeHeld: workerHoldsScope(record),
+      lastInstruction: record.lastInstruction ?? null,
+      pendingInstructions: record.pendingMessages?.length ?? 0,
+      briefRevision: record.briefRevision ?? 0,
+      needsReconciliation: (record.briefRevision ?? 0) !== (activeOrchestration()?.brief?.revision ?? 0),
       awaitingReview: workerAwaitingReview(record),
       scope: record.scope,
       ...(record.blocker ? { blocker: record.blocker.slice(0, 1_000) } : {}),
@@ -2181,6 +2526,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     const shownClosed = includeClosed ? closed.slice(-10) : []
     return {
       workers: [...open, ...shownClosed].map((worker) => workerSummary(worker, full)),
+      reusableWorkers: closed.slice(-3).map((worker) => workerSummary(worker, false)),
       total: all.length,
       open: open.length,
       awaitingReview: open.filter(workerAwaitingReview).map((worker) => worker.runId),
@@ -2249,26 +2595,38 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     ]
     if (record.status === 'blocked' || record.status === 'partial') {
       lines.push(
-        'This task is not complete. Tell the user what is blocked and what is needed; do not present it as done.',
+        'This task is incomplete; do not present it as done. Use orchestrator_send to request missing work or verification when possible. Otherwise explain what is blocked and what is needed.',
       )
     } else {
       lines.push(
-        'Review with orchestrator_diff before accepting or closing this worker. ' +
+        'Review with orchestrator_diff or inspect the scoped files directly if Git is unavailable. ' +
           'It still owns its scope until you call orchestrator_close, so a new worker cannot take that scope.',
       )
     }
     return lines.join('\n')
   }
 
-  function queueOrchestratorNotice(text: string): void {
+  function queueOrchestratorNotice(text: string, interrupt = false): void {
     if (!activeOrchestration()) return
-    orchestratorInbox.push(text)
-    if (orchestratorInbox.length > 20) orchestratorInbox = orchestratorInbox.slice(-20)
+    const notice = { id: `notice-${randomBytes(6).toString('hex')}`, text, interrupt }
+    orchestratorInbox.push(notice)
+    orchestration.active!.inbox = orchestratorInbox
+    persistOrchestration()
+    const session = orchestratorSession()
+    if (session?.busy) {
+      const entry: ChatEntry = { id: notice.id, kind: 'notice', runId: session.runId, text, ts: Date.now() }
+      session.entries.push(entry)
+      broadcast(session, { type: 'entry', entry })
+    }
     flushOrchestratorInbox()
   }
 
+  function noticeInterrupts(notice: NonNullable<OrchestrationRecord['inbox']>[number]): boolean {
+    return notice.interrupt ?? /^\[user (?:decision|request from concurrent conversation)\]/.test(notice.text)
+  }
+
   function flushOrchestratorInbox(): void {
-    if (orchestratorStarting || orchestratorInbox.length === 0) return
+    if (orchestratorInbox.length === 0) return
     const active = activeOrchestration()
     if (!active) {
       orchestratorInbox = []
@@ -2279,16 +2637,38 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       orchestratorInbox = []
       return
     }
-    if (session.busy) return
-    const text = orchestratorInbox.splice(0).join('\n\n').slice(0, 16_000)
+    if (session.busy) {
+      for (const notice of orchestratorInbox) {
+        if (deliveredNotices.has(notice.id)) continue
+        try {
+          const interrupt = noticeInterrupts(notice)
+          ensureConversation(session).steer(notice.text, [], { id: notice.id, source: interrupt ? 'orchestrator' : 'worker', interrupt })
+          deliveredNotices.add(notice.id)
+        } catch { break }
+      }
+      return
+    }
+    if (orchestratorStarting) return
+    const notices = [...orchestratorInbox]
+    const ids = new Set(notices.map((notice) => notice.id))
+    for (const id of ids) deliveredNotices.add(id)
     orchestratorStarting = true
-    void runTurn(session, text, [], { synthetic: true, source: 'worker', from: 'orchestrator' })
+    let completed = false
+    void runTurn(session, notices.map((notice) => notice.text).join('\n\n'), [], { synthetic: true, source: 'worker', from: 'orchestrator' })
+      .then((ok) => {
+        completed = ok
+        if (!ok) return
+        orchestratorInbox = orchestratorInbox.filter((item) => !ids.has(item.id))
+        active.inbox = orchestratorInbox
+        persistOrchestration()
+      })
       .catch((error: unknown) => {
         session.lastError = errorMessage(error)
       })
       .finally(() => {
         orchestratorStarting = false
-        if (orchestratorInbox.length > 0) setTimeout(() => flushOrchestratorInbox(), 0)
+        for (const id of ids) deliveredNotices.delete(id)
+        if (completed && orchestratorInbox.length > 0) setTimeout(() => flushOrchestratorInbox(), 0)
       })
   }
 
@@ -2298,6 +2678,14 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       notifyPhones({ kind: outcome === 'completed' ? 'completed' : 'error', label: sessionLabel(session), body: text, runId: session.runId })
     }
     if (session.kind === 'orchestrator') {
+      orchestratorInbox = orchestratorInbox.filter((notice) =>
+        !appliedNotices.has(notice.id) || (outcome !== 'completed' && noticeInterrupts(notice)))
+      for (const id of appliedNotices) deliveredNotices.delete(id)
+      appliedNotices.clear()
+      if (orchestration.active?.orchestratorRunId === session.runId) {
+        orchestration.active.inbox = orchestratorInbox
+        persistOrchestration()
+      }
       if (outcome === 'completed') reportUnmentionedWorkers(session, text)
       return
     }
@@ -2308,16 +2696,20 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     const parsed = outcome === 'completed' ? parseWorkerReport(text) : undefined
     const status: WorkerStatus =
       outcome === 'completed'
-        ? parsed?.status === 'blocked'
+        ? !parsed
+          ? 'partial'
+          : parsed.status === 'blocked'
           ? 'blocked'
-          : parsed?.status === 'partial'
+          : parsed.status === 'partial'
             ? 'partial'
             : 'waiting'
         : outcome === 'aborted'
           ? 'stopped'
           : 'failed'
     const blocker =
-      parsed && parsed.status !== 'done'
+      outcome === 'completed' && !parsed
+        ? WORKER_REPORT_MISSING
+        : parsed && parsed.status !== 'done'
         ? parsed.reason ?? `worker reported ${parsed.status} without BLOCKED_BY`
         : undefined
     updateWorker(record, {
@@ -2328,17 +2720,13 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       ...(outcome === 'completed' ? { lastSummary: text.slice(0, 8_000) } : { lastError: text.slice(0, 4_000) }),
     })
     queueOrchestratorNotice(workerReportMessage(record, text))
-    if (outcome === 'completed') {
-      const queued = workerInbox.get(record.runId)?.shift()
-      if (queued) {
-        const worker = ensureSession(record.runId)
-        if (worker && !worker.busy) setTimeout(() => void runTurn(worker, queued, [], { synthetic: true, source: 'orchestrator', from: 'orchestrator' }), 0)
-      }
-    }
   }
 
   async function startOrchestration(): Promise<OrchestrationRecord> {
     if (orchestration.active?.status === 'active') return orchestration.active
+    orchestratorInbox = []
+    deliveredNotices.clear()
+    appliedNotices.clear()
     const previous = orchestration.active
     if (previous) {
       const previousIds = [previous.orchestratorRunId, ...previous.workers.map((worker) => worker.runId)]
@@ -2377,6 +2765,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     const stoppedIds = [active.orchestratorRunId, ...active.workers.map((worker) => worker.runId)]
     const orchestrator = sessions.get(active.orchestratorRunId)
     orchestrator?.controller?.abort()
+    orchestrator?.dialogueController?.abort()
     for (const worker of active.workers) {
       if (worker.status === 'running' || worker.status === 'queued' || worker.status === 'blocked') {
         const session = sessions.get(worker.runId)
@@ -2391,7 +2780,14 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     }
     active.status = 'stopped'
     active.updatedAt = Date.now()
+    // Every turn of this orchestration was aborted above, so no cost
+    // reservation can still be live; a leftover one must not survive the
+    // stopped record in the persisted state. `spentCostUsd` stays: it is what
+    // the orchestration actually cost.
     orchestratorInbox = []
+    active.inbox = []
+    deliveredNotices.clear()
+    appliedNotices.clear()
     lastWorkerNotice.clear()
     // Closing the orchestration also closes its chats: archive them and turn
     // the old orchestrator session back into an ordinary, non-plan-only chat.
@@ -2400,6 +2796,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     for (const id of stoppedIds) {
       const session = sessions.get(id)
       if (!session) continue
+      resolvePending(session)
       session.kind = 'chat'
       session.workerStatus = undefined
       session.workerTitle = undefined
@@ -2414,7 +2811,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     return active
   }
 
-  async function spawnWorker(title: string, task: string, rawScope: string[]) {
+  async function spawnWorker(title: string, task: string, rawScope: string[], required: string[] = []) {
     const active = activeOrchestration()
     if (!active) throw new Error('orchestration is not active')
     const cleanTitle = title.trim()
@@ -2422,24 +2819,18 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     if (!cleanTitle) throw new Error('title is required')
     if (!cleanTask) throw new Error('task is required')
     const scope = normalizeScopes(rawScope)
+    const allowed = config.bundles.tools
+    const capabilityTool = { read: 'read_file', edit: 'apply_patch', shell: 'shell' } as const
+    const capabilities = (Object.keys(capabilityTool) as Array<keyof typeof capabilityTool>).filter((capability) =>
+      (allowed?.has(capabilityTool[capability]) ?? true) &&
+      (capability !== 'edit' || config.sandbox !== 'read-only'))
+    const unavailable = required.filter((capability) => !capabilities.some((allowedCapability) => allowedCapability === capability))
+    if (unavailable.length) throw new Error(`Worker cannot satisfy required capabilities: ${unavailable.join(', ')}. Change the assignment to match its available tools.`)
+    if (directShellRunning) throw new Error('orchestrator shell is still running; delegate after it finishes')
     if (!canSpawnWorker(active)) {
       throw new Error(`worker limit reached (${active.maxWorkers}); close a finished worker first`)
     }
-    for (const owner of scopeOwners(active)) {
-      for (const next of scope) {
-        for (const current of owner.scope) {
-          if (scopesOverlap(next, current)) {
-            throw new Error(
-              `scope ${next} overlaps ${current} owned by ${owner.title} (${owner.runId}), ` +
-                `which is ${workerStatusLabel(owner.status)}. ` +
-                (workerHoldsScope(owner)
-                  ? 'Continue with orchestrator_send in that scope, or review and orchestrator_close it first.'
-                  : 'Close it first.'),
-            )
-          }
-        }
-      }
-    }
+    assertScopeAvailable(active, scope)
     const session = newSession('worker', { parentRunId: active.orchestratorRunId, orchestrationId: active.id })
     const now = Date.now()
     const record: WorkerRecord = {
@@ -2451,6 +2842,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       createdAt: now,
       updatedAt: now,
       lastEventAt: now,
+      briefRevision: active.brief?.revision ?? 0,
     }
     session.workerTitle = cleanTitle
     session.workerStatus = 'queued'
@@ -2459,42 +2851,63 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     const message = workerTaskMessage(record)
     setTimeout(() => {
       const worker = ensureSession(record.runId)
-      if (!worker) return
+      if (!worker || record.status !== 'queued' || activeOrchestration()?.id !== active.id) return
       updateWorker(record, { status: 'running' })
       void runTurn(worker, message, [], { synthetic: true, source: 'orchestrator', from: 'orchestrator' }).catch((error: unknown) => {
         updateWorker(record, { status: 'failed', lastError: errorMessage(error) })
         queueOrchestratorNotice(workerReportMessage(record, errorMessage(error)))
       })
     }, 0)
-    return workerCard(record)
+    return {
+      ...workerCard(record),
+      capabilities,
+      asyncExecution: true,
+      nextStep:
+        'Dispatched asynchronously. This session wakes automatically when the worker reports or finishes. ' +
+        'Do NOT poll with orchestrator_workers or inspect files to wait. If you have no more independent workers to spawn or direct edits to perform now, stop calling tools and reply briefly in plain text to end this turn.',
+    }
   }
 
   async function sendWorker(workerId: string, message: string) {
     const record = workerForId(workerId)
     const text = message.trim()
     if (!text) throw new Error('message is required')
-    if (record.status === 'done') throw new Error('worker is closed')
+    if (directShellRunning) throw new Error('Exclusive verification is still running; send this follow-up after it finishes.')
     const worker = ensureSession(workerId)
     if (!worker) throw new Error(`worker session not found: ${workerId}`)
+    if (record.status === 'done') {
+      const active = activeOrchestration()!
+      if (directShellRunning || !canSpawnWorker(active)) throw new Error('no worker slot available to resume this conversation')
+      assertScopeAvailable(active, record.scope, record.runId)
+      delete record.closedAt
+    }
+    const instruction = { id: `instruction-${randomBytes(6).toString('hex')}`, text, createdAt: Date.now() }
+    record.pendingMessages = [...(record.pendingMessages ?? []), instruction]
+    record.lastInstruction = { id: instruction.id, receivedAt: instruction.createdAt }
+    persistOrchestration()
     const scope = record.scope
-    if (worker.busy) {
-      const inbox = workerInbox.get(workerId) ?? []
-      inbox.push(text)
-      workerInbox.set(workerId, inbox)
+    if (worker.busy || record.status === 'queued') {
+      if (worker.busy) ensureConversation(worker).steer(text, [], { id: instruction.id, source: 'orchestrator' })
       updateWorker(record, { lastEventAt: Date.now() })
       return {
         workerId,
+        instructionId: instruction.id,
+        received: true,
+        applied: false,
         delivered: false,
         queued: true,
+        asyncExecution: true,
         status: record.status,
         scopeHeld: workerHoldsScope(record),
         scope,
-        message: 'The worker is running; the message is queued for after its current turn.',
+        message: 'Received durably. The worker will read this at its next safe step, before further tool calls; an in-flight operation finishes first. Check lastInstruction.appliedAt for acknowledgement.',
+        nextStep: 'Worker is running asynchronously and will wake you when ready. Do NOT poll; if no immediate local work remains, reply in plain text without tool calls to end this turn.',
       }
     }
     // Starting a new turn invalidates the previous report: keeping it made a
     // running worker look as if it had already reported done.
     delete record.lastReportStatus
+    delete record.lastSummary
     updateWorker(record, { status: 'running', lastEventAt: Date.now() })
     void runTurn(worker, text, [], { synthetic: true, source: 'orchestrator', from: 'orchestrator' }).catch((error: unknown) => {
       updateWorker(record, { status: 'failed', lastError: errorMessage(error) })
@@ -2502,12 +2915,17 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     })
     return {
       workerId,
+      instructionId: instruction.id,
+      received: true,
+      applied: record.lastInstruction.appliedAt !== undefined,
       delivered: true,
       queued: false,
+      asyncExecution: true,
       status: 'running' as const,
       scopeHeld: workerHoldsScope(record),
       scope,
       message: 'The worker started a new turn now. Its report will arrive as a new message.',
+      nextStep: 'Worker is running asynchronously and will wake you automatically when done. Do NOT poll; if no immediate local work remains, reply in plain text without tool calls to end this turn.',
     }
   }
 
@@ -2515,6 +2933,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     const record = workerForId(workerId)
     const worker = sessions.get(workerId)
     worker?.controller?.abort()
+    if (worker) resolvePending(worker)
     updateWorker(record, {
       status: 'stopped',
       blocker: undefined,
@@ -2525,10 +2944,12 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
 
   async function closeWorker(workerId: string, summary?: string) {
     const record = workerForId(workerId)
+    if ((record.briefRevision ?? 0) !== (activeOrchestration()?.brief?.revision ?? 0) && !summary?.trim()) throw new Error('Project decisions changed after this report. Reconcile it with the current brief, or provide a summary explaining why the result still satisfies the current decisions.')
+    if (record.pendingMessages?.length && !summary?.trim()) throw new Error('worker has unapplied instructions; resume it, or provide a summary explaining how they were resolved before releasing its scope')
     // Closing releases the scope immediately. Letting a still-running turn
     // write afterwards would race whoever takes the scope next, so the
     // orchestrator must stop it first.
-    if (record.status === 'running' || record.status === 'queued') {
+    if (sessions.get(workerId)?.busy || record.status === 'running' || record.status === 'queued') {
       throw new Error(
         `worker is still ${workerStatusLabel(record.status)}; stop it with orchestrator_stop before closing, ` +
           'so its in-flight edits cannot race a new owner of the scope',
@@ -2542,9 +2963,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       )
     }
     sessions.get(workerId)?.controller?.abort()
-    workerInbox.delete(workerId)
     updateWorker(record, {
       status: 'done',
+      pendingMessages: [],
       closedAt: Date.now(),
       blocker: undefined,
       ...(summary?.trim() ? { lastSummary: summary.trim().slice(0, 8_000) } : {}),
@@ -2595,38 +3016,89 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
 
   async function workerDiff(workerId: string, maxBytes = 64 * 1024) {
     const record = workerForId(workerId)
-    const status = spawnSync('git', ['status', '--porcelain'], { cwd: config.workspaceRoot, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 30_000 })
-    const diff = spawnSync('git', ['diff', '--no-ext-diff', '--', ...record.scope], { cwd: config.workspaceRoot, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 30_000 })
+    const execGit = promisify(execFile)
+    const git = async (args: string[]) => execGit('git', ['-c', `safe.directory=${config.workspaceRoot}`, '-c', 'core.quotepath=false', ...args], {
+      cwd: config.workspaceRoot, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 30_000, windowsHide: true,
+    })
+    const paths = record.scope.map((scope) => scope.startsWith('file:') ? scope.slice(5) : scope)
+    const primary = paths.filter((scope) => !scope.includes(':'))
+    try {
+      await git(['rev-parse', '--is-inside-work-tree'])
+    } catch (error) {
+      const failure = error as { code?: string; stderr?: string }
+      if (failure.code !== 'ENOENT' && !failure.stderr?.includes('not a git repository')) throw error
+      return {
+        workerId, title: record.title, scope: record.scope, status: record.status, diffAvailable: false,
+        note: 'Git diff is unavailable. Read the files listed in the worker report and verify the relevant checks before accepting.',
+      }
+    }
+    const [status, diff, staged] = await Promise.all([
+      git(['status', '--porcelain', '-uall']),
+      primary.length ? git(['diff', '--no-ext-diff', '--', ...primary]) : Promise.resolve({ stdout: '' }),
+      primary.length ? git(['diff', '--cached', '--no-ext-diff', '--', ...primary]) : Promise.resolve({ stdout: '' }),
+    ])
     const changed: string[] = []
     const outside: string[] = []
-    if (!status.error) {
-      for (const line of (status.stdout ?? '').split(/\r?\n/)) {
-        if (line.length < 4) continue
-        const pathText = line.slice(3).trim()
-        const paths = pathText.includes(' -> ') ? pathText.split(' -> ') : [pathText]
-        for (const p of paths) {
-          const normalized = p.replace(/\\/g, '/').replace(/^"|"$/g, '')
-          if (workerOwnsScope(record, normalized)) changed.push(normalized)
-          else if (!(activeOrchestration()?.workers ?? []).some((w) => workerOwnsScope(w, normalized))) outside.push(normalized)
+    const untracked: string[] = []
+    for (const line of status.stdout.split(/\r?\n/)) {
+      if (line.length < 4) continue
+      const pathText = line.slice(3).trim()
+      const changedPaths = pathText.includes(' -> ') ? pathText.split(' -> ') : [pathText]
+      for (const p of changedPaths) {
+        const normalized = p.replace(/\\/g, '/').replace(/^"|"$/g, '')
+        if (workerOwnsScope(record, normalized)) {
+          changed.push(normalized)
+          if (line.startsWith('?? ')) untracked.push(normalized)
+        } else if (!(activeOrchestration()?.workers ?? []).some((w) => workerOwnsScope(w, normalized))) {
+          outside.push(normalized)
         }
       }
     }
-    const body = diff.error ? `git diff failed: ${diff.error.message}` : diff.stdout ?? ''
+    const limit = Math.max(1024, Math.min(maxBytes, 256 * 1024))
+    let body = staged.stdout + diff.stdout
+    let included = 0
+    for (const file of untracked.slice(0, 20)) {
+      if (body.length >= limit) break
+      // git diff --no-index returns 1 when it successfully describes a new file.
+      const patch = await git(['diff', '--no-ext-diff', '--no-index', '--', '/dev/null', file]).catch((error: unknown) => {
+        const result = error as { code?: number; stdout?: string }
+        if (result.code === 1 && typeof result.stdout === 'string') return { stdout: result.stdout }
+        throw error
+      })
+      body += patch.stdout
+      included++
+    }
     return {
       workerId,
       title: record.title,
       scope: record.scope,
       status: record.status,
+      diffAvailable: true,
       changed,
       outOfScope: outside,
-      diff: body.slice(0, Math.max(1024, Math.min(maxBytes, 256 * 1024))),
-      truncated: body.length > maxBytes,
+      diff: body.slice(0, limit),
+      truncated: body.length > limit || included < untracked.length,
+      ...(paths.length !== primary.length ? { note: 'Added-root files are outside the primary git repository; inspect those files with read_file before accepting this report.' } : {}),
     }
+  }
+
+  /** True while the worker's chat holds an approval request nobody answered yet. */
+  function workerAwaitingApproval(record: WorkerRecord): boolean {
+    return (sessions.get(record.runId)?.pendingApprovals.size ?? 0) > 0
   }
 
   function onWorkerEvent(record: WorkerRecord): void {
     record.lastEventAt = Date.now()
     if (record.status === 'queued') record.status = 'running'
+    // 6-3: an agent event proves the worker is working. If it still shows
+    // `blocked` while no approval is pending (e.g. the approval timed out and
+    // the turn continued), the blocked status is stale: put it back to
+    // `running` and clear the blocker, so the orchestrator and the GUI do not
+    // wait for an approval that no longer exists.
+    else if (record.status === 'blocked' && !workerAwaitingApproval(record)) {
+      updateWorker(record, { status: 'running', lastEventAt: Date.now() })
+      return
+    }
     const session = sessions.get(record.runId)
     if (session) session.workerStatus = record.status
   }
@@ -2656,7 +3128,12 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     if (!active) return
     const now = Date.now()
     for (const worker of active.workers) {
-      if (worker.status !== 'running') continue
+      // 6-3: a worker waiting for an approval is not stalled — the request is
+      // already visible to the orchestrator and the user. Any other `blocked`
+      // worker (an approval that timed out, a report that needs attention)
+      // gets heartbeats like a running one, or its silence would go unnoticed.
+      if (worker.status !== 'running' && worker.status !== 'blocked') continue
+      if (worker.status === 'blocked' && workerAwaitingApproval(worker)) continue
       if (now - worker.lastEventAt < 5 * 60_000) continue
       if (worker.lastHeartbeatAt !== undefined && now - worker.lastHeartbeatAt < 5 * 60_000) continue
       worker.lastHeartbeatAt = now
@@ -2664,7 +3141,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         [
           '[worker heartbeat]',
           `worker: ${worker.title} (${worker.runId})`,
-          `status: running`,
+          `status: ${worker.status}`,
           `last event: ${Math.round((now - worker.lastEventAt) / 60_000)} minute(s) ago`,
           `scope: ${worker.scope.join(', ')}`,
           'Check for a stall with orchestrator_workers; do not claim completion from this heartbeat.',
@@ -2815,7 +3292,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     const timer = setTimeout(() => {
       goalTimers.delete(session.runId)
       if (session.busy || session.planMode || deletedRuns.has(session.runId)) return
-      if (session.kind === 'orchestrator' && (orchestratorInbox.length > 0 || orchestratorStarting)) return
+      if (session.kind === 'orchestrator' && (orchestratorInbox.length > 0 || orchestratorStarting || workersAreWriting())) return
       if (peekNextTurn(turnQueue, session.runId)) return
       const conv = session.conv
       const goal = conv?.goalView()
@@ -2840,6 +3317,63 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     goalTimers.set(session.runId, timer)
   }
 
+  /** The dialogue lane cannot edit or accept decisions; execution remains single-owner. */
+  function startDialogue(session: WebSession, message: string, images: ImageInput[]): string {
+    const owner = ensureConversation(session)
+    const log = owner.log
+    const event = log.append('orchestration/dialogue', { role: 'user', content: message, ...(images.length ? { images: images.length } : {}) })
+    const entry: ChatEntry = { id: `dialogue-${event.seq}`, kind: 'user', runId: session.runId, text: message, ts: event.ts, ...(images.length ? { images: images.length } : {}) }
+    session.entries.push(entry)
+    broadcast(session, { type: 'entry', entry })
+    if (session.dialogue && !session.dialogueBusy && session.dialogue.currentModel().provider !== owner.currentModel().provider) delete session.dialogue
+    if (!session.dialogue) {
+      session.dialogue = Conversation.create(config, client, `${session.runId}.dialogue`, false, undefined, undefined, (event) => publishCompaction(session, event), {
+        readOnly: true, delegate: false, checkpoints: false, role: { ...config.orchestratorRole, model: owner.currentModel().model },
+        roleInstruction: promptText('orchestrator-dialogue.md', 'Discuss the project with the user while execution continues. Only the execution owner accepts decisions. Submit actionable requests through orchestrator_request; casual conversation does not change project direction.'),
+        tooling: orchestrationTooling(true, session),
+        sessionContext: () => [
+          projectContext(),
+          '[recent project conversation]\n' + session.entries.filter((item) => item.kind === 'user' || item.kind === 'assistant').slice(-10).map((item) => `${item.kind}: ${item.text.slice(0, 1800)}`).join('\n'),
+        ].filter(Boolean).join('\n\n'),
+      })
+    }
+    if (session.dialogueBusy) {
+      session.dialogue.steer(message, images)
+      return entry.id
+    }
+    session.dialogue.setWorkMode(owner.currentWorkMode())
+    session.dialogue.setInteractionMode(owner.currentInteractionMode())
+    session.dialogue.setEffort(owner.currentEffort())
+    if (session.dialogue.currentModel().model !== owner.currentModel().model) {
+      const model = owner.currentModel()
+      session.dialogue.setModel(model.model, modelProfileLimits(readUserConfigFile().user, model.provider, model.model), false)
+    }
+    session.dialogueBusy = true
+    const controller = new AbortController()
+    session.dialogueController = controller
+    void runWithOrchestrationBudget(session, () => session.dialogue!.turn(message, images, controller.signal)).then((final) => {
+      const reply = log.append('orchestration/dialogue', { role: 'assistant', content: final })
+      const item: ChatEntry = { id: `dialogue-${reply.seq}`, kind: 'assistant', runId: session.runId, text: final, ts: reply.ts, final: true }
+      session.entries.push(item)
+      broadcast(session, { type: 'entry', entry: item })
+    }).catch((error: unknown) => {
+      broadcast(session, { type: 'notice', level: 'warn', text: `conversation: ${errorMessage(error)}` })
+    }).finally(() => {
+      session.dialogueBusy = false
+      delete session.dialogueController
+      // The dialogue lane reserves cost like a turn (see
+      // releaseOrchestrationReservation); it is another place a skipped settle
+      // would survive.
+      releaseOrchestrationReservation(session)
+      // A message after the final boundary must get its own answer.
+      const late = session.dialogue?.takeUndeliveredSteers() ?? []
+      if (late.length && !controller.signal.aborted) startDialogue(session, late.map((item) => item.text).join('\n\n'), late.flatMap((item) => item.images ?? []))
+      broadcast(session, { type: 'state', state: sessionState(session) })
+      if (!session.busy) startNextQueuedTurn(session)
+    })
+    return entry.id
+  }
+
   async function runTurn(
     session: WebSession,
     message: string,
@@ -2851,7 +3385,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       /** Set when this turn came from the durable queue; it is committed or released at the end. */
       queuedId?: string
     } = {},
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (session.kind === 'worker' && options.from !== 'orchestrator') {
       throw new Error('worker chats are read-only; send instructions through the orchestrator')
     }
@@ -2878,8 +3412,13 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     if (withReferences.referenced.length > 0) {
       serverLog(`session ${session.runId}: referenced ${withReferences.referenced.join(', ')}`)
     }
-    const modelMessage =
+    let modelMessage =
       session.kind === 'orchestrator' ? withOrchestrationDigest(withReferences.message) : withReferences.message
+    const pending = session.kind === 'worker' ? workerOfRun(session.runId)?.pendingMessages ?? [] : []
+    if (pending.length) {
+      modelMessage += `\n\n[pending orchestrator instructions]\n${pending.map((item) => item.text).join('\n\n')}`
+      session.startingInstructionIds = pending.map((item) => item.id)
+    }
     if (options.synthetic) {
       const entry: ChatEntry = { id: `event-${Date.now()}`, kind: 'notice', runId: session.runId, text: message, ts: Date.now() }
       session.entries.push(entry)
@@ -2895,16 +3434,20 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     broadcast(session, { type: 'state', state: sessionState(session) })
     broadcastSessions()
     let final = ''
+    let completed = false
     try {
-      final = await conv.turn(modelMessage, images, controller.signal, options.source ? { source: options.source } : undefined)
+      final = await runWithOrchestrationBudget(session, () => conv.turn(modelMessage, images, controller.signal, options.source ? { source: options.source } : undefined))
       session.planMode = conv.isPlanMode()
-      broadcast(session, { type: 'turn/end', outcome: 'completed', final })
-      onTurnFinished(session, 'completed', final)
-      if (options.queuedId !== undefined) finishQueuedTurn(session, options.queuedId, true)
+      completed = conv.turnOutcome() !== 'stalled'
+      if (!completed) session.lastError = final
+      broadcast(session, { type: 'turn/end', outcome: completed ? 'completed' : 'error', final })
+      onTurnFinished(session, completed ? 'completed' : 'error', final)
+      if (options.queuedId !== undefined) finishQueuedTurn(session, options.queuedId, completed)
     } catch (error) {
       const aborted = controller.signal.aborted
       const text = aborted ? 'run cancelled' : errorMessage(error)
       session.lastError = text
+      conv.log.append('turn/error', { outcome: aborted ? 'aborted' : 'error', error: text })
       // A cancelled or failed goal must not auto-continue. DSH pauses the
       // durable goal on cancellation; an explicit resume re-arms it.
       if (session.conv?.goalView()?.phase === 'active') {
@@ -2921,7 +3464,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       if (options.queuedId !== undefined) finishQueuedTurn(session, options.queuedId, false)
       else pauseQueueAfterFailure(session)
     } finally {
-      resolvePending(session)
+      resolvePending(session, session.kind === 'orchestrator' && completed)
       // WP-60: close the turn's timing and persist the snapshot with the log, so
       // the numbers survive a restart (`session/stats`).
       const turnStartedAt = session.statsClock.turnStart
@@ -2955,12 +3498,17 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       }
       session.busy = false
       session.controller = undefined
+      // The turn is over, so the reservation it made cannot still be live; a
+      // request whose provider never settled would otherwise linger (see
+      // releaseOrchestrationReservation).
+      releaseOrchestrationReservation(session)
       session.turns = conv.turns
       session.planMode = conv.isPlanMode()
       session.updatedAt = Date.now()
       // WP-21: a steer that arrived after the last step boundary is in the log
       // and in the history, but the model never acted on it in this turn.
       const late = conv.takeUndeliveredSteers()
+      for (const instruction of late) if (instruction.id) deliveredNotices.delete(instruction.id)
       if (late.length > 0) {
         broadcast(session, {
           type: 'notice',
@@ -2971,10 +3519,17 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       broadcast(session, { type: 'state', state: sessionState(session) })
       broadcastSessions()
       if (session.kind === 'orchestrator') {
+        delete session.directFiles
+        delete session.directExceptionScope
+        delete session.lastWorkerSnapshot
+        delete session.workerPollUnchangedCount
+        if (orchestration.active?.orchestratorRunId === session.runId) { delete orchestration.active.directScope; persistOrchestration() }
         setTimeout(() => {
-          flushOrchestratorInbox()
+          if (completed) flushOrchestratorInbox()
           scheduleGoalRound(session)
         }, 0)
+      } else if (session.kind === 'worker' && completed && workerOfRun(session.runId)?.pendingMessages?.length) {
+        setTimeout(() => resumePendingWorker(session.runId), 0)
       } else if (session.kind !== 'worker') {
         scheduleGoalRound(session)
       }
@@ -2983,6 +3538,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       // in finishQueuedTurn, and a released one stays paused on purpose.
       if (options.queuedId === undefined) setTimeout(() => startNextQueuedTurn(session), 0)
     }
+    return completed
   }
 
   const validateTarget = (body: Record<string, unknown>, existing?: AutomationSchedule | AutomationWebhook) => {
@@ -3601,6 +4157,17 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
           return
         }
 
+        if (pathname === '/api/github/detect-token' && method === 'POST') {
+          const detected = detectWindowsGitToken()
+          if (detected) {
+            const masked = detected.length > 8 ? `${detected.slice(0, 4)}...${detected.slice(-4)}` : '****'
+            json(res, 200, { detected: true, token: detected, masked })
+          } else {
+            json(res, 200, { detected: false })
+          }
+          return
+        }
+
         if (pathname === '/api/automation' && method === 'GET') {
           json(res, 200, {
             schedules: automation.schedules.map((s) => ({ ...s, nextRun: nextCronTime(s.cron)?.toISOString() })),
@@ -3746,11 +4313,12 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             worker: { provider: config.role.provider, model: config.role.model },
             orchestrator: { provider: config.orchestratorRole.provider, model: config.orchestratorRole.model },
             subagent: { provider: config.subagentRole.provider, model: config.subagentRole.model },
+            advisor: { provider: config.advisorRole?.provider ?? config.role.provider, model: config.advisorRole?.model ?? config.role.model },
             grader: { provider: config.graderRole.provider, model: config.graderRole.model },
             compactor: { provider: config.compactorRole.provider, model: config.compactorRole.model },
             summarizer: { provider: config.summarizerRole.provider, model: config.summarizerRole.model },
           }
-          json(res, 200, { models: MODEL_CATALOG, roles })
+          json(res, 200, { models: modelCatalog(), roles })
           return
         }
         if (pathname === '/api/onboarding' && method === 'GET') {
@@ -3787,7 +4355,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             if (state.model !== undefined && session.conv) {
               const { user } = readUserConfigFile()
               const limits = modelProfileLimits(user, session.conv.currentModel().provider, state.model)
-              session.conv.setModel(state.model, limits)
+              session.conv.setModel(state.model, limits, session.kind !== 'orchestrator')
               session.model = session.conv.currentModel()
             }
             broadcast(session, { type: 'state', state: sessionState(session) })
@@ -4119,7 +4687,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
               json(res, 403, { error: 'worker chats are read-only; send instructions through the orchestrator' })
               return
             }
-            if (session.busy) {
+            if (session.busy || session.dialogueBusy) {
               // A running turn answers 409 as before, unless the client asked
               // to reserve the message with `queue: true`. The body is read
               // only to see that flag, and an unparsable body keeps the
@@ -4129,6 +4697,13 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
                 queuedBody = await readBody()
               } catch {
                 json(res, 409, { error: 'this session is already running' })
+                return
+              }
+              if (session.kind === 'orchestrator' && queuedBody.queue !== true) {
+                const message = typeof queuedBody.message === 'string' ? queuedBody.message : ''
+                if (!message.trim()) { json(res, 400, { error: 'message is required' }); return }
+                const entryId = startDialogue(session, message, parseImages(queuedBody.images))
+                json(res, 202, { accepted: true, runId, turn: session.turns, entryId, queued: false })
                 return
               }
               if (queuedBody.queue !== true) {
@@ -4195,7 +4770,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
               json(res, 403, { error: 'worker chats are read-only; send instructions through the orchestrator' })
               return
             }
-            if (!session.busy) {
+            if (!session.busy && !session.dialogueBusy) {
               // Nothing to steer: the caller sends a normal turn instead. The
               // hint is machine-readable so the composer can retry by itself.
               json(res, 400, { error: 'no turn is running', hint: 'turn' })
@@ -4209,6 +4784,11 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             }
             const images = parseImages(body.images)
             let queued: number
+            if (session.kind === 'orchestrator') {
+              const entryId = startDialogue(session, message, images)
+              json(res, 202, { accepted: true, runId, turn: session.turns, entryId, queued: 0 })
+              return
+            }
             try {
               queued = ensureConversation(session).steer(message, images).queued
             } catch (error) {
@@ -4234,6 +4814,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
 
           if (sub === 'cancel' && method === 'POST') {
             session.controller?.abort()
+            session.dialogueController?.abort()
             resolvePending(session)
             broadcast(session, { type: 'turn/cancelling', runId })
             json(res, 200, { cancelling: true })
@@ -4351,18 +4932,14 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
           }
 
           if (sub === 'compact' && method === 'POST') {
+            if (session.busy) return json(res, 409, { error: 'session is busy' })
             const result = await ensureConversation(session).compact()
-            broadcast(session, { type: 'notice', text: result })
             json(res, 200, { result })
             return
           }
 
           if (sub === 'plan-mode' && method === 'POST') {
             const body = await readBody()
-            if (session.kind === 'orchestrator' && body.on !== true) {
-              json(res, 409, { error: 'the orchestrator is permanently in plan mode' })
-              return
-            }
             const conv = ensureConversation(session)
             const on = body.on === true
             const result = conv.setPlanMode(on)
@@ -4371,6 +4948,18 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             broadcast(session, { type: 'state', state: sessionState(session) })
             if (!on) scheduleGoalRound(session)
             json(res, 200, { result, planMode: session.planMode })
+            return
+          }
+
+          if (sub === 'advisor' && method === 'POST') {
+            const body = await readBody()
+            const conv = ensureConversation(session)
+            const on = body.enabled === true
+            const result = conv.setAdvisor(on)
+            session.advisorEnabled = conv.isAdvisorEnabled()
+            broadcast(session, { type: 'notice', text: result })
+            broadcast(session, { type: 'state', state: sessionState(session) })
+            json(res, 200, { result, advisorEnabled: session.advisorEnabled })
             return
           }
 
@@ -4473,14 +5062,29 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
               json(res, 400, { error: 'model is required' })
               return
             }
-            const current = session.conv?.currentModel() ?? session.model
-            const { user } = readUserConfigFile()
+            const roleName = session.kind === 'orchestrator' ? 'orchestrator' : 'worker'
+            const configured = roleName === 'orchestrator' ? config.orchestratorRole : config.role
+            if (isUnavailableOpenCodeGoModel(configured.baseUrl, model)) {
+              json(res, 400, { error: `${model} is unavailable on OpenCode Go. Select a Go model or change the role provider in Settings.` })
+              return
+            }
+            const conversation = ensureConversation(session)
+            const current = conversation.currentModel()
+            const { path: settingsPath, user } = readUserConfigFile()
             const limits = modelProfileLimits(user, current.provider, model)
-            const result = ensureConversation(session).setModel(model, limits)
-            session.model = session.conv?.currentModel() ?? session.model
+            if (body.save === true) {
+              const roles = asRecord(user.roles) ?? {}
+              roles[roleName] = { ...asRecord(roles[roleName]), provider: current.provider, model, ...limits }
+              user.roles = roles
+              fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
+              fs.writeFileSync(settingsPath, `${JSON.stringify(user, null, 2)}\n`, 'utf8')
+            }
+            const result = conversation.setModel(model, limits, roleName === 'worker')
+            session.model = conversation.currentModel()
+            if (body.save === true) await applyRuntimeSettings()
             broadcast(session, { type: 'notice', text: result })
             broadcast(session, { type: 'state', state: sessionState(session) })
-            json(res, 200, { result })
+            json(res, 200, { result, role: roleName })
             return
           }
 
@@ -4850,8 +5454,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             const body = await readBody()
             const server = typeof body.server === 'string' ? body.server : ''
             const tool = typeof body.tool === 'string' ? body.tool : ''
-            if (server !== 'playwright' && server !== 'agent-desktop') {
-              json(res, 403, { error: 'direct GUI calls are limited to the playwright and agent-desktop automation servers' })
+            if (server !== 'playwright' && server !== 'agent-desktop' && server !== 'rustxng') {
+              json(res, 403, { error: 'direct GUI calls are limited to the playwright, agent-desktop, and rustxng automation servers' })
               return
             }
             if (!sessionMcp || !sessionMcp.find(server, tool)) {
@@ -5044,14 +5648,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             json(res, 409, { error: 'this folder is already a workspace root' })
             return
           }
-          const settingsPath = path.join(userConfigDir(), 'config.json')
-          let user: Record<string, unknown> = {}
-          try {
-            const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as unknown
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) user = parsed as Record<string, unknown>
-          } catch {
-            user = {}
-          }
+          const { path: settingsPath, user } = readUserConfigFile()
           try {
             if (body.writable === true) await client.sandboxAddRoot(real)
           } catch (error) {
@@ -5294,9 +5891,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             user = {}
           }
           if (body.roles && typeof body.roles === 'object' && !Array.isArray(body.roles)) {
-            const roles = (user.roles && typeof user.roles === 'object' && !Array.isArray(user.roles) ? user.roles : {}) as Record<string, unknown>
+            const roles = asRecord(user.roles) ?? {}
             for (const [role, value] of Object.entries(body.roles as Record<string, unknown>)) {
-              if (!['worker', 'orchestrator', 'subagent', 'guardian', 'grader', 'compactor', 'summarizer'].includes(role)) continue
+              if (!['worker', 'orchestrator', 'subagent', 'advisor', 'guardian', 'grader', 'compactor', 'summarizer'].includes(role)) continue
               if (!value || typeof value !== 'object' || Array.isArray(value)) continue
               const incoming = { ...(value as Record<string, unknown>) }
               if (typeof incoming.apiKey === 'string') {
@@ -5358,7 +5955,19 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             user.web = { ...(typeof user.web === 'object' && user.web !== null && !Array.isArray(user.web) ? user.web : {}), enabled: body.webEnabled }
           }
           if (body.automation && typeof body.automation === 'object' && !Array.isArray(body.automation)) {
-            user.automation = body.automation
+            const incomingAuto = body.automation as Record<string, unknown>
+            const prevAuto = (user.automation && typeof user.automation === 'object' && !Array.isArray(user.automation) ? user.automation : {}) as Record<string, unknown>
+            const mergedAuto = { ...prevAuto, ...incomingAuto }
+            if (incomingAuto.github && typeof incomingAuto.github === 'object' && !Array.isArray(incomingAuto.github)) {
+              const gh = { ...(incomingAuto.github as Record<string, unknown>) }
+              const prevGh = (prevAuto.github && typeof prevAuto.github === 'object' && !Array.isArray(prevAuto.github) ? prevAuto.github : {}) as Record<string, unknown>
+              if (gh.tokenSet === true && (typeof gh.token !== 'string' || gh.token.length === 0)) {
+                if (typeof prevGh.token === 'string') gh.token = prevGh.token
+              }
+              delete gh.tokenSet
+              mergedAuto.github = gh
+            }
+            user.automation = mergedAuto
           }
           fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
           fs.writeFileSync(settingsPath, `${JSON.stringify(user, null, 2)}\n`, 'utf8')
@@ -5561,6 +6170,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   const heartbeatTimer = setInterval(() => heartbeatCheck(), 60_000)
   heartbeatTimer.unref()
   if (orchestration.active?.status === 'active') {
+    setTimeout(() => flushOrchestratorInbox(), 0)
     const active = orchestration.active
     // A restart kills every in-flight worker turn. Leaving the persisted status
     // as `running` made the UI show work that no process was doing and kept the
@@ -5621,6 +6231,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       await disablePhone(false)
       clearInterval(heartbeatTimer)
       clearInterval(automationTimer)
+      for (const timer of goalTimers.values()) clearTimeout(timer)
+      goalTimers.clear()
       for (const child of automationChildren.values()) child.kill()
       automationChildren.clear()
       for (const job of ralphJobs.values()) {
@@ -5629,6 +6241,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       }
       for (const session of sessions.values()) {
         session.controller?.abort()
+        session.dialogueController?.abort()
+        void session.dialogue?.end()
         // WP-22: background subagent turns belong to this process as well.
         void session.conv?.end()
         session.conv?.agents?.dispose()

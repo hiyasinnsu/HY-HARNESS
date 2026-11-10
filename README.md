@@ -148,10 +148,14 @@ One command builds everything (Rust release binaries, TypeScript, version
 check, unit tests) and packages the result:
 
 ```powershell
-pnpm release:local                 # same version, a new build
-pnpm release:local --bump patch    # 0.4.1 -> 0.4.2 in every package.json and version.ts
-# options: --bump minor|major|x.y.z, --skip-tests, --stage, --replace
+pnpm release:local                 # automatically advances the patch version (0.5.0 -> 0.5.1)
+pnpm release:local --bump minor    # choose a minor release instead, once per build
+# options: --bump patch|minor|major|x.y.z, --skip-tests, --stage, --replace
 ```
+
+`pnpm build` also advances the patch version before compilation and keeps all
+package versions and `HARNESS_VERSION` synchronized. Use `pnpm typecheck` when
+you only want to check the code without creating a new version.
 
 While the app is running it stages the build as
 `release\next\HY-HARNESS-<version>-<YYYYMMDD-HHMM>.exe` with a `.sha256` and a

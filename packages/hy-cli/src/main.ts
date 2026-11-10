@@ -23,7 +23,7 @@ import {
   MockCompactorProvider,
   MockGraderProvider,
   MockGuardianProvider,
-  MODEL_CATALOG,
+  modelCatalog,
   SessionLog,
   SessionIndex,
   ToolRuntime,
@@ -181,7 +181,7 @@ Options:
   --approval <policy>     untrusted (default) | on-request | on-failure | never (CP-05)
   --max-rounds <n>        ralph: rounds (default 5)
   --max-total-tokens <n>  ralph: tokens across all roles (default 500000)
-  --max-cost-usd <n|off>  ralph: USD across all roles (default 2.00; needs role pricing)
+  --max-cost-usd <n|off>  ralph: USD cap across all roles (default: no cap; needs role pricing)
   --max-wall-clock-ms <n> ralph: wall-clock limit (default 1800000)
   --round-timeout-ms <n>  ralph: abort and roll back a round after this long
   --no-grader             ralph: skip Gate 2 (the grader); not recommended
@@ -752,24 +752,26 @@ async function modelsCommand(p: Parsed): Promise<number> {
   const active = Object.fromEntries(
     Object.entries(roles).map(([name, role]) => [name, { provider: role.provider, model: role.model }]),
   )
+  const models = modelCatalog()
   if (bool(p.flags, 'json')) {
-    console.log(JSON.stringify({ models: MODEL_CATALOG, active }, null, 2))
+    console.log(JSON.stringify({ models, active }, null, 2))
     return 0
   }
+  const yesNo = (value: boolean | undefined) => (value === undefined ? '?    ' : value ? 'yes  ' : 'no   ')
   console.log('provider              model                       context   max out   tools  vision  reasoning')
-  for (const entry of MODEL_CATALOG) {
+  for (const entry of models) {
     const isActive = Object.values(roles).some((role) => role.provider === entry.provider && role.model === entry.model)
-    const caps = entry.capabilities
+    const caps = entry.capabilities ?? {}
     console.log(
-      `${isActive ? '*' : ' '} ${entry.provider.padEnd(20)} ${entry.model.padEnd(26)} ${String(entry.contextWindowTokens).padStart(8)}  ${String(entry.maxOutputTokens).padStart(8)}  ${caps.tools ? 'yes  ' : 'no   '}  ${caps.vision ? 'yes   ' : 'no      '}  ${caps.reasoning ? 'yes' : 'no'}`,
+      `${isActive ? '*' : ' '} ${entry.provider.padEnd(20)} ${entry.model.padEnd(26)} ${String(entry.contextWindowTokens ?? '-').padStart(8)}  ${String(entry.maxOutputTokens ?? '-').padStart(8)}  ${yesNo(caps.tools)}  ${yesNo(caps.vision)}  ${yesNo(caps.reasoning)}`,
     )
   }
-  const listed = new Set(MODEL_CATALOG.map((entry) => `${entry.provider}:${entry.model}`))
+  const listed = new Set(models.map((entry) => `${entry.provider}:${entry.model}`))
   const missing = Object.entries(active).filter(([, role]) => !listed.has(`${role.provider}:${role.model}`))
   if (missing.length > 0) {
-    console.log(`\nnot in the catalog (the role's own limits apply): ${missing.map(([name, role]) => `${name}=${role.provider}:${role.model}`).join(', ')}`)
+    console.log(`\nnot registered (the role's own limits apply): ${missing.map(([name, role]) => `${name}=${role.provider}:${role.model}`).join(', ')}`)
   }
-  console.log('\n* = a role uses this model. `hy models list --json` prints the raw catalog.')
+  console.log('\n* = a role uses this model. Models are user-registered: add them under "models" in config.json (`hy models list --json` prints the list).')
   return 0
 }
 
@@ -1015,6 +1017,7 @@ async function ralph(p: Parsed): Promise<number> {
             return decision
           }
           const tools = new ToolRuntime(client, config.workspaceRoot, roundApprove, !allowProtected, {
+            gitReadOnly: true,
             contextWindowTokens: config.role.contextWindowTokens,
             ledger,
             spillDir,
@@ -1050,6 +1053,8 @@ async function ralph(p: Parsed): Promise<number> {
               maxOutputTokens: config.role.maxOutputTokens,
               reasoningHistory: config.reasoningHistory,
               promptVariant: config.promptVariant,
+              richToolDocs: config.richToolDocs,
+              announcePatterns: config.announcePatterns,
               temperature: config.role.temperature ?? 0,
               nativeTools: usesNativeTools(config.role),
               ptc: config.ptc,

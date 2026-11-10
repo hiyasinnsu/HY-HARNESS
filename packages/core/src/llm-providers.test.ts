@@ -146,7 +146,8 @@ test('the Responses adapter sends /responses and parses function_call', async ()
       tools: [{ name: 'read_file', description: 'Read a file', parameters: { type: 'object' } }],
     })
     assert.equal(completion.content, 'Reading now.')
-    assert.deepEqual(completion.toolCalls, [{ name: 'read_file', args: { path: 'README.md' } }])
+    // The call id is kept: a resumed turn can pair the result with its call.
+    assert.deepEqual(completion.toolCalls, [{ name: 'read_file', args: { path: 'README.md' }, id: 'call_1' }])
     assert.deepEqual(completion.usage, { inputTokens: 90, outputTokens: 12, cacheHitTokens: 64, cacheMissTokens: 26 })
     const sent = stub.requests[0]!
     assert.equal(sent.path, '/responses')

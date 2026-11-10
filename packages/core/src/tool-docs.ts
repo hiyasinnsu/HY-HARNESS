@@ -1,11 +1,14 @@
-// Detailed tool descriptions (2026-11-07, `promptVariant: lean4`, the default since 2026-11-09).
+// Detailed tool descriptions (2026-11-07), sent with native function calling
+// when `HarnessConfig.richToolDocs` is on (the default since 2026-11-09; the
+// setting used to be tied to `promptVariant: lean4`).
 //
-// The short descriptions in the registry stay the default. lean4 sends these
-// instead, with a description for every parameter, and drops from the system
-// prompt what they now say (shell use, read-before-edit, how to search, how to
-// patch). Like DeepSeek Harness, the "how to use this tool" guidance lives with
-// the tool. The tool list is the same bytes on every request, so the longer
-// text is a cached prefix.
+// The short descriptions in the registry are the fallback. With rich docs the
+// native tool definitions carry these instead, with a description for every
+// parameter, and the standard (`lean3` / `lean4`) system prompt drops what they
+// now say (shell use, read-before-edit, how to search, how to patch). Like
+// DeepSeek Harness, the "how to use this tool" guidance lives with the tool.
+// The tool list is the same bytes on every request, so the longer text is a
+// cached prefix.
 //
 // Keep every statement true to the implementation (tools.ts, patch.rs, the
 // exec server's defaults); a wrong detail here misleads the model on every call.
@@ -17,6 +20,26 @@ export interface ToolDoc {
 }
 
 const WINDOWS = process.platform === 'win32'
+
+export const FOREGROUND_SHELL_DEFAULT_MS = 600_000
+export const FOREGROUND_SHELL_GUIDANCE =
+  'This session waits for the command to finish while holding exclusive shell access. Set hardTimeoutMs to cover long work (default 600000 ms). foregroundWaitMs does not change this behavior.'
+
+const BACKGROUND_SHELL_GUIDANCE =
+  'The call waits up to foregroundWaitMs (default 5,000 ms); a command still running then keeps going as a background job and the result is `status: "backgrounded"` with a `jobId`, ' +
+  'so give builds and test suites a longer foregroundWaitMs (for example 600000).'
+
+export function foregroundShellDoc(): ToolDoc {
+  const shell = RICH_TOOL_DOCS.shell!
+  return {
+    description: shell.description.replace(BACKGROUND_SHELL_GUIDANCE, FOREGROUND_SHELL_GUIDANCE),
+    params: {
+      ...shell.params,
+      foregroundWaitMs: 'Ignored in this session. The command stays in the foreground until it finishes or reaches hardTimeoutMs.',
+      persistent: 'Unavailable while shell access is exclusive.',
+    },
+  }
+}
 
 export const RICH_TOOL_DOCS: Readonly<Record<string, ToolDoc>> = {
   read_file: {
@@ -57,12 +80,12 @@ export const RICH_TOOL_DOCS: Readonly<Record<string, ToolDoc>> = {
   },
   shell: {
     description: `Run one command in ${WINDOWS ? 'Windows PowerShell (PowerShell syntax; Unix grep/head/find do not exist)' : 'the shell'} and return \`status\`, \`exitCode\`, \`stdout\` and \`stderr\`. ` +
+      'For Git operations use git_status, git_prepare, git_commit and git_push when offered. The host manages GitHub authentication. ' +
       'Use it to build, test and run programs; use read_file, search_glob and search_grep to read and find files. Read an existing file before changing it. ' +
       'Each call is a fresh process: `cd` and variables do not carry over, so pass `cwd` instead. Quote paths that contain spaces. ' +
       (WINDOWS ? 'For multiline Python, write a .py file then run it; Bash heredocs (`<<`) do not work. When combining different object types in one command, format each table explicitly (`Format-Table -AutoSize`) or use `ConvertTo-Json` so columns are not lost. ' : '') +
       'A non-zero exitCode is a failure: read the output and find the cause before moving on. Chained commands can report only the last command\'s status, so inspect intermediate output or run critical checks separately. ' +
-      'The call waits up to foregroundWaitMs (default 5,000 ms); a command still running then keeps going as a background job and the result is `status: "backgrounded"` with a `jobId`, ' +
-      'so give builds and test suites a longer foregroundWaitMs (for example 600000). ' +
+      BACKGROUND_SHELL_GUIDANCE + ' ' +
       'Commands run in the session sandbox; in workspace-write mode they can write only inside the workspace. ' +
       'A plain Node test command (`node --test`, `npm test`, `vitest`, `jest`) gets a sandbox where its child processes work; with a pipe or redirect it does not, so run it on its own and look at the output afterwards.',
     params: {
@@ -98,7 +121,7 @@ export const RICH_TOOL_DOCS: Readonly<Record<string, ToolDoc>> = {
       'Replace exact text in a file: `old` must occur exactly `count` times (default 1), and each occurrence becomes `new`. ' +
       'Copy `old` from read_file output with its exact whitespace and indentation, and include enough surrounding text to make it unique. ' +
       'On a miss, or a different number of occurrences, the error shows the closest lines so you can correct `old`. ' +
-      'Read the file first. Best for small, targeted changes; primary root only.',
+      'Read an existing file first (files created or written with write_file/apply_patch in this session are already tracked). Best for small, targeted changes; primary root only.',
     params: {
       file: 'Workspace-relative path of the file.',
       old: 'The exact text to replace.',
@@ -108,8 +131,8 @@ export const RICH_TOOL_DOCS: Readonly<Record<string, ToolDoc>> = {
   },
   write_file: {
     description:
-      'Create a file, or replace a whole file with new content. Read an existing file first (the same checks as apply_patch). ' +
-      'For changes to part of a file use edit_file or apply_patch instead of rewriting it.',
+      'Create a new file, or replace a whole file with new content. Read an existing file first (the same checks as apply_patch; not required when creating a new file). ' +
+      'For changes to part of an existing file use edit_file or apply_patch instead of rewriting it.',
     params: {
       file: 'Workspace-relative path of the file.',
       content: 'The complete content of the file.',

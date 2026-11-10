@@ -1,6 +1,6 @@
 {
   "name": "hy-harness",
-  "version": "0.5.0",
+  "version": "0.5.55",
   "description": "HY-HARNESS desktop GUI",
   "author": "HY-HARNESS",
   "private": true,
@@ -23,7 +23,7 @@
     "verify:list": "node scripts/verify-all.mjs --list",
     "check:config-schema": "node scripts/gen-config-schema.mjs --check",
     "check:version": "node scripts/check-version.mjs",
-    "build": "tsc -b packages/core packages/seams packages/hy-cli packages/sdk && tsc -p packages/hy-cli/tsconfig.web.json && tsc -p packages/desktop/tsconfig.json",
+    "build": "node scripts/bump-build-version.mjs && tsc -b packages/core packages/seams packages/hy-cli packages/sdk && tsc -p packages/hy-cli/tsconfig.web.json && tsc -p packages/desktop/tsconfig.json",
     "postbuild": "node scripts/copy-assets.mjs && node scripts/write-build-info.mjs",
     "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/seams && tsc --noEmit -p packages/hy-cli && tsc --noEmit -p packages/sdk && tsc --noEmit -p packages/hy-cli/tsconfig.web.json && tsc --noEmit -p packages/desktop/tsconfig.json",
     "desktop": "pnpm build && electron packages/desktop/dist/main.js",

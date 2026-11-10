@@ -49,6 +49,34 @@ test('rebuildHistory replays what the model saw and honours /undo', () => {
   assert.match(toolErrorMessage('shell', 'boom'), /^TOOL ERROR \(shell\): boom\n/)
 })
 
+test('rebuildHistory applies compaction/summary and drops shadowed steps', () => {
+  const events = [
+    ev('turn/start', { turn: 1 }),
+    ev('user/message', { content: 'objective' }),
+    ev('assistant/message', { content: '{"tool":"read_file","args":{"path":"f1"}}' }),
+    ev('tool/result', { name: 'read_file', output: 'content1', isError: false }),
+    ev('assistant/message', { content: '{"tool":"read_file","args":{"path":"f2"}}' }),
+    ev('tool/result', { name: 'read_file', output: 'content2', isError: false }),
+    ev('assistant/message', { content: '{"tool":"read_file","args":{"path":"f3"}}' }),
+    ev('tool/result', { name: 'read_file', output: 'content3', isError: false }),
+    ev('compaction/summary', {
+      shadowedThroughSeq: 8,
+      summaryMarkdown: '{"summary":"Read f1 and f2."}',
+      pairs: 2,
+    }),
+    ev('assistant/message', { content: '{"final":"done"}' }),
+  ]
+  const history = rebuildHistory(events, 'run-a')
+  assert.equal(history.length, 4) // objective with summary + step 3 (assistant + tool) + final assistant
+  assert.match(history[0]!.content, /^objective\n\n<session_summary>\nSummary of earlier steps \(written by the compactor\):\nRead f1 and f2\.\n<\/session_summary>$/)
+  assert.equal(history[1]!.role, 'assistant')
+  assert.equal(history[1]!.content, '{"tool":"read_file","args":{"path":"f3"}}')
+  assert.equal(history[2]!.role, 'user')
+  assert.equal(history[2]!.content, toolResultMessage('read_file', 'content3'))
+  assert.equal(history[3]!.role, 'assistant')
+  assert.equal(history[3]!.content, '{"final":"done"}')
+})
+
 test('identical consecutive tool calls get a reminder (RepeatToolReminderGuard)', async () => {
   const fs = await import('node:fs')
   const os = await import('node:os')
@@ -304,6 +332,63 @@ test('a failing read → patch → shell loop tells the model it is looping', as
   }
 })
 
+test('unchanged MCP calls stop before execution even when other calls are interleaved', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-no-progress-'))
+  try {
+    const usage = { inputTokens: 0, outputTokens: 0 }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-repeat')
+    const repeated = { name: 'mcp_browser_probe', args: { code: 'probe()' } }
+    let executions = 0
+    let step = 0
+    const tools = new ToolRuntime({} as never, dir)
+    tools.execute = async (name) => name === repeated.name
+      ? (executions++, { value: null })
+      : { value: step }
+    const provider = {
+      name: 'scripted',
+      complete: async () => {
+        step++
+        const call = step === 2 || step === 4
+          ? { name: 'read_file', args: { path: `file-${step}.txt` } }
+          : repeated
+        return { content: '', toolCalls: [call], usage }
+      },
+    }
+    const result = await new Agent({ provider, tools, sessionLog: log, workspaceRoot: dir, nativeTools: true }).run('probe')
+    assert.equal(executions, 3)
+    assert.equal(step, 7)
+    assert.equal(result.outcome, 'stalled')
+    assert.deepEqual(rebuildHistory(log.events(), 'run-repeat'), result.history)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('changed observations can repeat, and an output-limited batch never runs', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-tool-retry-'))
+  try {
+    const usage = { inputTokens: 0, outputTokens: 0 }
+    const calls = [{ name: 'read_file', args: { path: 'changing.txt' } }]
+    const replies = [
+      { content: '', usage, toolCalls: calls, outputLimited: true as const },
+      ...Array.from({ length: 6 }, () => ({ content: '', usage, toolCalls: calls })),
+      { content: 'Done.', usage },
+    ]
+    let reads = 0
+    const tools = new ToolRuntime({} as never, dir)
+    tools.execute = async () => ({ value: ++reads })
+    const provider = { name: 'scripted', complete: async () => replies.shift()! }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    const result = await new Agent({ provider, tools, sessionLog: log, workspaceRoot: dir, nativeTools: true }).run('check')
+    assert.equal(reads, 6)
+    assert.equal(result.final, 'Done.')
+    assert.ok(log.events().some((event) => event.type === 'turn/retry' && (event.payload as { reason?: string }).reason === 'output-limit'))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('CP-13: each turn records a session snapshot with the shell cwd', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-snapshot-'))
   try {
@@ -485,7 +570,7 @@ test('a reply cut off for repeating itself is retried once; the history replays 
   }
 })
 
-test('a broken pseudo tool call in native mode is retried once, then ends with a fixed line', async () => {
+test('a broken pseudo tool call is retried natively, downgraded, retried once more, then stalls', async () => {
   const fs = await import('node:fs')
   const os = await import('node:os')
   const path = await import('node:path')
@@ -495,7 +580,12 @@ test('a broken pseudo tool call in native mode is retried once, then ends with a
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-broken-call-'))
   try {
     const broken = ['I will read the file.', '{"tool":"read_file","args":{"path":"a.txt"'].join('\n')
-    const replies = [broken, broken]
+    // One reply per request. The downgrade to the text protocol is a fresh
+    // start, so the text protocol gets its own retry before the turn stalls
+    // (verify-agent-budget 4-a). Before, the flag from native mode survived the
+    // downgrade and the very first text reply ended the turn: three replies
+    // were enough and this test pinned that as the expected behaviour.
+    const replies = [broken, broken, broken, broken]
     const systems: string[] = []
     const provider = {
       name: 'broken',
@@ -515,15 +605,22 @@ test('a broken pseudo tool call in native mode is retried once, then ends with a
       nativeTools: true,
       onEvent: (e) => events.push(e.type),
     }).run('read a')
-    assert.equal(r.outcome, 'final')
-    assert.equal(r.final, 'The model produced an invalid tool call. No changes were made.')
+    assert.equal(r.outcome, 'stalled')
+    assert.match(r.final, /task is incomplete.*earlier results and changes are preserved/)
+    assert.deepEqual(rebuildHistory(log.events(), 'run-b'), r.history)
     // The prompt tells the model not to put a pseudo call in the body.
     assert.match(systems[0]!, /never write JSON such as/)
     assert.match(systems[0]!, /never a final answer: emit a real function call/)
     const retries = log.events().filter((e) => e.type === 'turn/retry')
-    assert.equal(retries.length, 1)
-    assert.equal((retries[0]!.payload as { reason: string }).reason, 'broken-tool-call')
-    assert.equal(events.filter((t) => t === 'retry').length, 1)
+    assert.equal(retries.length, 3, 'native retry, downgrade, one text-protocol retry')
+    assert.deepEqual(
+      retries.map((e) => (e.payload as { reason: string }).reason),
+      ['broken-tool-call', 'tool-protocol-fallback', 'broken-tool-call'],
+    )
+    assert.match(r.final, /invalid tool replies persisted after switching protocols/)
+    assert.doesNotMatch(systems[2]!, /emit a real function call/)
+    assert.doesNotMatch(systems[3]!, /emit a real function call/)
+    assert.equal(events.filter((t) => t === 'retry').length, 3)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -539,7 +636,7 @@ test('a {"tools":[...]} batch written as text runs like calls instead of ending 
   try {
     fs.writeFileSync(path.join(dir, 'a.txt'), 'secret-marker\n')
     const seen: string[] = []
-    const replies = ['{"tools":[{"tool":"read_file","args":{"path":"a.txt"}}]}', 'Done.']
+    const replies = ['<tool calls>\n<tool name="shell" args="{}"></tool>\n</tool>', '{"tools":[{"name":"read_file","arguments":{"path":"a.txt"}}]}', 'Done.']
     const provider = {
       name: 'batch',
       complete: async (messages: Array<{ role: string; content: string }>) => {
@@ -551,8 +648,10 @@ test('a {"tools":[...]} batch written as text runs like calls instead of ending 
     log.setRun('run-t')
     const r = await new Agent({ provider, tools: new ToolRuntime({} as never, dir), sessionLog: log, workspaceRoot: dir, nativeTools: true }).run('read a')
     assert.equal(r.final, 'Done.')
-    assert.equal(seen.length, 2, 'the batch did not end the turn')
-    assert.match(seen[1]!, /secret-marker/, 'the read ran and its result was sent')
+    assert.equal(seen.length, 3, 'neither leaked markup nor the batch ended the turn')
+    assert.match(seen[1]!, /tool reply was invalid and none of its calls ran/)
+    assert.match(seen[2]!, /secret-marker/, 'the read ran and its result was sent')
+    assert.deepEqual(log.events().filter((e) => e.type === 'tool/result').map((e) => (e.payload as { name: string }).name), ['read_file'])
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -656,12 +755,12 @@ test('an unwrapped batch runs every call; a partial reply runs nothing and says 
     // A garbled batch: the first object alone is not run; the model is told none ran.
     const partial = await run(['{"tool":"read_file","args":{"path":"a.txt"}},{"tool":"read_file","args":{"path":"b.txt"}', 'Done.'])
     assert.doesNotMatch(partial.seen[1]!, /alpha-marker/, 'the first call was not run on its own')
-    assert.match(partial.seen[1]!, /none of them ran/)
+    assert.match(partial.seen[1]!, /none of its calls ran/)
     assert.equal(partial.log.events().filter((e) => e.type === 'turn/retry').length, 1)
     // A batch with an entry that is not a call: nothing runs either.
-    const bad = await run(['{"calls":[{"tool":"read_file","args":{"path":"a.txt"}},{"name":"read_file","arguments":{"path":"b.txt"}}]}', 'Done.'])
+    const bad = await run(['{"calls":[{"tool":"read_file","args":{"path":"a.txt"}},{"note":"read the other file too"}]}', 'Done.'])
     assert.doesNotMatch(bad.seen[1]!, /alpha-marker/)
-    assert.match(bad.seen[1]!, /none of them ran/)
+    assert.match(bad.seen[1]!, /none of its calls ran/)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -764,8 +863,8 @@ test('native mode: two empty replies end the turn instead of retrying forever', 
       nativeTools: true,
       onEvent: (e) => events.push({ type: e.type, ...(e.reason !== undefined ? { reason: e.reason } : {}) }),
     }).run('do nothing')
-    assert.equal(r.outcome, 'final')
-    assert.equal(r.final, 'The model returned an empty reply twice. No changes were made.')
+    assert.equal(r.outcome, 'stalled')
+    assert.match(r.final, /task is incomplete: the model returned an empty reply twice/)
     assert.equal(calls, 2, 'an empty reply is retried exactly once')
     const retries = log.events().filter((e) => e.type === 'turn/retry')
     assert.equal(retries.length, 1)
@@ -856,6 +955,21 @@ test('the text protocol still retries an unparseable reply (invalid-json)', asyn
     assert.equal(retryEvents.length, 1)
     assert.equal(retryEvents[0]!.reason, 'invalid-json')
     assert.ok(r.history.some((m) => m.content.includes('single valid JSON object')), 'the JSON instruction is still sent in text mode')
+    const native = new Agent({
+      provider: {
+        name: 'native',
+        complete: async (messages) => {
+          assert.ok(!messages.some((m) => /single valid JSON object|I will read the file now/.test(m.content)))
+          assert.ok(messages.some((m) => m.content === '{"final":"done"}'))
+          return { content: 'Resumed.', usage: { inputTokens: 1, outputTokens: 1 } }
+        },
+      },
+      tools: new ToolRuntime({} as never, dir),
+      sessionLog: log,
+      workspaceRoot: dir,
+      nativeTools: true,
+    })
+    assert.equal((await native.run('resume', rebuildHistory(log.events(), 'run-t'))).final, 'Resumed.')
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -1117,6 +1231,410 @@ test('CP-38: the streaming feature can be turned off', async () => {
     seen.length = 0
     await new Agent({ provider: on as never, tools: new ToolRuntime({} as never, dir), sessionLog: new SessionLog(path.join(dir, 'b.jsonl')), workspaceRoot: dir, onEvent: () => {}, features: { streaming: false } }).run('go')
     assert.equal(seen[0]!.onDelta, undefined, 'the feature turns streaming off')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a correction between calls prevents stale edits and records its source and acknowledgement', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const { Agent } = await import('./agent.js')
+  const { ToolRuntime } = await import('./tools.js')
+  const { SessionLog } = await import('./session-log.js')
+  const { createSteerInbox } = await import('./steering.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-safe-correction-'))
+  try {
+    const inbox = createSteerInbox()
+    const edits: string[] = []
+    const tools = new ToolRuntime({} as never, dir)
+    tools.execute = async (name, args) => {
+      if (name === 'read_file') {
+        inbox.push({ id: 'change-1', source: 'orchestrator', text: 'Use the corrected parent, not the old one.' })
+        return { content: 'original' }
+      }
+      edits.push((args as { content: string }).content)
+      return { appliedFiles: ['a.txt'] }
+    }
+    let step = 0
+    const provider = {
+      name: 'correction-test',
+      complete: async (messages: import('./llm.js').ChatMessage[]) => {
+        step++
+        if (step === 1) return { content: '', toolCalls: [
+          { id: 'read', name: 'read_file', args: { path: 'a.txt' } },
+          { id: 'stale', name: 'apply_patch', args: { file: 'a.txt', content: 'old parent' } },
+        ], usage: { inputTokens: 1, outputTokens: 1 } }
+        if (step === 2) {
+          assert.ok(messages.some((m) => m.content.includes('[the orchestrator sent this while you were working]')))
+          return { content: '', toolCalls: [{ id: 'fixed', name: 'apply_patch', args: { file: 'a.txt', content: 'corrected parent' } }], usage: { inputTokens: 1, outputTokens: 1 } }
+        }
+        return { content: 'done', usage: { inputTokens: 1, outputTokens: 1 } }
+      },
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-correction')
+    const applied: unknown[] = []
+    const result = await new Agent({ provider, tools, sessionLog: log, workspaceRoot: dir, nativeTools: true, steer: inbox,
+      onEvent: (event) => { if (event.type === 'steer-applied') applied.push(event.id) },
+    }).run('change the parent')
+    assert.deepEqual(edits, ['corrected parent'])
+    assert.deepEqual(applied, ['change-1'])
+    assert.deepEqual(rebuildHistory(log.events(), 'run-correction'), result.history)
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a worker observation between calls does not cancel the remaining write', async () => {
+  const { createSteerInbox } = await import('./steering.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-worker-observation-'))
+  try {
+    const inbox = createSteerInbox()
+    const calls: string[] = []
+    const tools = new ToolRuntime({} as never, dir)
+    tools.execute = async (name) => {
+      calls.push(name)
+      if (name === 'read_file') inbox.push({ text: 'Worker finished.', source: 'worker', interrupt: false })
+      return {}
+    }
+    let step = 0
+    const usage = { inputTokens: 1, outputTokens: 1 }
+    const provider = {
+      name: 'observation-test',
+      complete: async (messages: import('./llm.js').ChatMessage[]) => {
+        if (++step === 1) return { content: '', toolCalls: [
+          { name: 'read_file', args: { path: 'a.txt' } },
+          { name: 'apply_patch', args: { file: 'a.txt', content: 'updated' } },
+        ], usage }
+        assert.ok(messages.some((message) => message.content.includes('Worker finished.')))
+        return { content: 'done', usage }
+      },
+    }
+    await new Agent({ provider, tools, sessionLog: new SessionLog(path.join(dir, 'log.jsonl')), workspaceRoot: dir, nativeTools: true, steer: inbox }).run('make the edit')
+    assert.deepEqual(calls, ['read_file', 'apply_patch'])
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('top-level tool arguments beside tool and malformed calls batches run without spending a retry', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const { Agent } = await import('./agent.js')
+  const { ToolRuntime } = await import('./tools.js')
+  const { SessionLog } = await import('./session-log.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-top-level-args-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'top-level-alpha\n')
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'top-level-beta\n')
+    const seen: string[] = []
+    const replies = [
+      // Batch with missing `}` on first call AND top-level `path` beside `"tool"` on second call.
+      '{"calls":[{"tool":"read_file","args":{"path":"a.txt"},{"tool":"read_file","path":"b.txt"}]}',
+      'Done.',
+    ]
+    const provider = {
+      name: 'top-level-and-malformed',
+      complete: async (messages: Array<{ role: string; content: string }>) => {
+        seen.push(messages.map((m) => m.content).join('\n'))
+        return { content: replies.shift()!, usage: { inputTokens: 1, outputTokens: 1 } }
+      },
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-tla')
+    const r = await new Agent({
+      provider,
+      tools: new ToolRuntime({} as never, dir),
+      sessionLog: log,
+      workspaceRoot: dir,
+      nativeTools: true,
+    }).run('read both')
+    assert.equal(r.final, 'Done.')
+    assert.match(seen[1]!, /top-level-alpha/)
+    assert.match(seen[1]!, /top-level-beta/)
+    assert.equal(log.events().filter((e) => e.type === 'turn/retry').length, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('single-key shorthand in calls array, arguments alias, and <tool_call> wrapper run without retries', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const { Agent } = await import('./agent.js')
+  const { ToolRuntime } = await import('./tools.js')
+  const { SessionLog } = await import('./session-log.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-shorthand-calls-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'shorthand-alpha\n')
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'shorthand-beta\n')
+    fs.writeFileSync(path.join(dir, 'c.txt'), 'shorthand-gamma\n')
+    const seen: string[] = []
+    const replies = [
+      // Pattern I: single-key shorthand inside `{"calls":[...]}` (L12397)
+      '{"calls":[{"read_file":{"path":"a.txt"}}]}',
+      // Pattern G+H: `"arguments"` key + trailing `]}</arg_value:...>` (L12819)
+      '{"tool": "read_file", "arguments": {"path": "b.txt"}}]}</arg_value:6124c78e></tool_calls:6124c78e>',
+      // Pattern K: `<tool_call>` with `"name"` and `"arguments"` (L12027)
+      '<tool_call>\n{"name": "read_file", "arguments": {"path": "c.txt"}}\n</tool_call>',
+      'Done.',
+    ]
+    const provider = {
+      name: 'shorthand',
+      complete: async (messages: Array<{ role: string; content: string }>) => {
+        seen.push(messages.map((m) => m.content).join('\n'))
+        return { content: replies.shift()!, usage: { inputTokens: 1, outputTokens: 1 } }
+      },
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-sh')
+    const r = await new Agent({
+      provider,
+      tools: new ToolRuntime({} as never, dir),
+      sessionLog: log,
+      workspaceRoot: dir,
+      nativeTools: true,
+    }).run('read all three')
+    assert.equal(r.final, 'Done.')
+    assert.match(seen[1]!, /shorthand-alpha/)
+    assert.match(seen[2]!, /shorthand-beta/)
+    assert.match(seen[3]!, /shorthand-gamma/)
+    assert.equal(log.events().filter((e) => e.type === 'turn/retry').length, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('allowWaitingReply skips goalMode and announce nudges when yielding to wait for async workers', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const { Agent } = await import('./agent.js')
+  const { ToolRuntime } = await import('./tools.js')
+  const { SessionLog } = await import('./session-log.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-waiting-'))
+  try {
+    const provider = {
+      name: 'waiting',
+      complete: async () => ({ content: 'Workers are running; waiting for reports and will integrate next.', usage: { inputTokens: 1, outputTokens: 1 } }),
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    const r = await new Agent({
+      provider,
+      tools: new ToolRuntime({} as never, dir),
+      sessionLog: log,
+      workspaceRoot: dir,
+      nativeTools: true,
+      goalMode: true,
+      allowWaitingReply: () => true,
+    }).run('wait')
+    assert.equal(r.steps, 1)
+    assert.match(r.final, /waiting for reports/)
+    assert.equal(log.events().filter((e) => e.type === 'turn/retry' || e.type === 'turn/nudge').length, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a JSON-shaped reply cut short is retried as a broken call, not taken as the answer', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-truncated-'))
+  try {
+    // No tool key at all in this one, so only "starts with { and is not JSON"
+    // can tell it apart from an answer. Native mode used to end the turn here.
+    const truncated = '{"content":"abc…'
+    const replies = [truncated, truncated, '{"final":"done"}']
+    const provider = {
+      name: 'truncated',
+      complete: async () => ({ content: replies.shift()!, usage: { inputTokens: 1, outputTokens: 1 } }),
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-truncated')
+    const r = await new Agent({
+      provider,
+      tools: new ToolRuntime({} as never, dir),
+      sessionLog: log,
+      workspaceRoot: dir,
+      nativeTools: true,
+    }).run('go')
+    assert.equal(r.final, 'done')
+    // One native retry, then the protocol downgrade; the text reply is a final.
+    const retries = log.events().filter((e) => e.type === 'turn/retry')
+    assert.deepEqual(
+      retries.map((e) => (e.payload as { reason: string }).reason),
+      ['broken-tool-call', 'tool-protocol-fallback'],
+    )
+    assert.doesNotMatch(JSON.stringify(r.history), /abc…/, 'the cut-off text is never stored as an answer')
+    assert.deepEqual(rebuildHistory(log.events(), 'run-truncated'), r.history)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a native reply cut off after a readable {"final":…} object is not the answer', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-truncated-final-'))
+  try {
+    // The first object parses, so it used to be taken as the answer even though
+    // the reply was cut off after it.
+    const replies = ['{"final":"The answer is 42"}…', '{"final":"done"}']
+    const provider = {
+      name: 'truncated-final',
+      complete: async () => ({ content: replies.shift()!, usage: { inputTokens: 1, outputTokens: 1 } }),
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    const r = await new Agent({
+      provider,
+      tools: new ToolRuntime({} as never, dir),
+      sessionLog: log,
+      workspaceRoot: dir,
+      nativeTools: true,
+    }).run('go')
+    assert.equal(r.final, 'done')
+    assert.deepEqual(
+      log.events().filter((e) => e.type === 'turn/retry').map((e) => (e.payload as { reason: string }).reason),
+      ['broken-tool-call'],
+    )
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a native reply of prose that mentions a brace is still the final answer', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-prose-brace-'))
+  try {
+    const answer = 'The fix is in src/a.ts: guard {the parser} before the call. Nothing else is needed.'
+    const provider = {
+      name: 'prose',
+      complete: async () => ({ content: answer, usage: { inputTokens: 1, outputTokens: 1 } }),
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    const r = await new Agent({
+      provider,
+      tools: new ToolRuntime({} as never, dir),
+      sessionLog: log,
+      workspaceRoot: dir,
+      nativeTools: true,
+    }).run('go')
+    assert.equal(r.outcome, 'final')
+    assert.equal(r.final, answer)
+    assert.equal(log.events().filter((e) => e.type === 'turn/retry' || e.type === 'turn/nudge').length, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('yielding to wait for workers ends the conversation on the assistant message', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-waiting-blocked-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'x\n')
+    const call = JSON.stringify({ tool: 'read_file', args: { path: 'a.txt' } })
+    // The same read returns the same result three times, so the fourth is
+    // blocked; with async workers active the turn yields and waits instead.
+    const replies = [call, call, call, call, '{"final":"unused"}']
+    const provider = {
+      name: 'blocked',
+      complete: async () => ({ content: replies.shift()!, usage: { inputTokens: 1, outputTokens: 1 } }),
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-wait')
+    const r = await new Agent({
+      provider,
+      tools: new ToolRuntime({} as never, dir),
+      sessionLog: log,
+      workspaceRoot: dir,
+      allowWaitingReply: () => true,
+    }).run('wait')
+    const waiting = 'Waiting for the active workers. Their reports will resume this turn’s work.'
+    assert.equal(r.outcome, 'final')
+    assert.equal(r.final, waiting)
+    // The turn ends on this text, so the history and the log both end on the
+    // assistant message (the tool result used to be the last entry).
+    assert.deepEqual(r.history.at(-1), { role: 'assistant', content: waiting })
+    const assistant = log.events().filter((e) => e.type === 'assistant/message').at(-1)!
+    assert.equal((assistant.payload as { content: string }).content, waiting)
+    assert.ok(log.events().some((e) => e.type === 'turn/end' && (e.payload as { reason?: string }).reason === 'waiting-for-workers'))
+    assert.deepEqual(rebuildHistory(log.events(), 'run-wait'), r.history)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a successful call resets the no-progress counter between blocked steps', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-blocked-reset-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n')
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'b\n')
+    const a = JSON.stringify({ tool: 'read_file', args: { path: 'a.txt' } })
+    const b = JSON.stringify({ tool: 'read_file', args: { path: 'b.txt' } })
+    // Three identical reads, a blocked fourth, a successful read of another
+    // file, then the same read again: progress in between means the two blocked
+    // steps are not consecutive and the turn must not stall there.
+    const replies = [a, a, a, a, b, a, '{"final":"done"}']
+    const provider = {
+      name: 'blocked-twice',
+      complete: async () => ({ content: replies.shift()!, usage: { inputTokens: 1, outputTokens: 1 } }),
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-reset')
+    const r = await new Agent({
+      provider,
+      tools: new ToolRuntime({} as never, dir),
+      sessionLog: log,
+      workspaceRoot: dir,
+    }).run('go')
+    assert.equal(r.outcome, 'final')
+    assert.equal(r.final, 'done')
+    assert.equal(log.events().filter((e) => e.type === 'guard/no-progress').length, 2)
+    assert.equal(log.events().filter((e) => e.type === 'turn/failure').length, 0)
+    assert.deepEqual(rebuildHistory(log.events(), 'run-reset'), r.history)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a successful shell command invalidates other observations but keeps its own repeat count', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-shell-clears-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'x\n')
+    const read = JSON.stringify({ tool: 'read_file', args: { path: 'a.txt' } })
+    const shell = JSON.stringify({ tool: 'shell', args: { command: 'echo hi' } })
+    const replies = [read, read, read, shell, shell, read, '{"final":"done"}']
+    const seen: string[] = []
+    const provider = {
+      name: 'shell',
+      complete: async (messages: Array<{ role: string; content: string }>) => {
+        seen.push(messages.at(-1)!.content)
+        return { content: replies.shift()!, usage: { inputTokens: 1, outputTokens: 1 } }
+      },
+    }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-shell')
+    // The tools are stubbed so the test is about the observation cache, not
+    // about starting a shell: both shell runs return the same result, as they
+    // would in a real workspace.
+    const tools = new ToolRuntime({} as never, dir)
+    const executed: string[] = []
+    tools.execute = async (name) => {
+      executed.push(name)
+      return name === 'shell'
+        ? { exitCode: 0, timedOut: false, stdout: 'hi\n', stderr: '', status: 'completed' }
+        : { content: 'x\n' }
+    }
+    const r = await new Agent({ provider, tools, sessionLog: log, workspaceRoot: dir }).run('go')
+    assert.equal(r.final, 'done')
+    // The repeated shell call is still recognised as a repeat ...
+    assert.deepEqual(
+      log.events().filter((e) => e.type === 'guard/repeat').map((e) => e.payload as { tool: string; times: number }),
+      [{ tool: 'read_file', times: 2 }, { tool: 'read_file', times: 3 }, { tool: 'shell', times: 2 }],
+    )
+    assert.match(seen[5]!, /same call with the same arguments 2 times/)
+    // ... while the read observed three times before the shell ran again
+    // instead of being blocked as unchanged.
+    assert.equal(log.events().filter((e) => e.type === 'guard/no-progress').length, 0)
+    assert.deepEqual(executed, ['read_file', 'read_file', 'read_file', 'shell', 'shell', 'read_file'])
+    const readResults = log.events().filter((e) => e.type === 'tool/result' && (e.payload as { name: string }).name === 'read_file')
+    assert.equal(readResults.length, 4)
+    assert.ok(readResults.every((e) => (e.payload as { isError: boolean }).isError === false), 'every read ran')
+    assert.deepEqual(rebuildHistory(log.events(), 'run-shell'), r.history)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

@@ -1,12 +1,58 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import http from 'node:http'
+import os from 'node:os'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fileURLToPath } from 'node:url'
-import { McpManager, elicitationContent, setElicitationHandler } from './mcp.js'
+import { McpManager, elicitationContent, quoteForCmd, resolveWindowsCommand, setElicitationHandler, stdioCommand } from './mcp.js'
+import { ToolRuntime } from './tools.js'
+import { nativeToolDefs } from './prompt.js'
 
 const server = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'tests', 'fixtures', 'mcp-echo-server.mjs')
+
+test('T-5: a Windows .cmd shim is resolved on PATH and started through cmd.exe', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-cmd-shim-'))
+  try {
+    const cmdShim = path.join(dir, 'hy-fake-cmd.cmd')
+    const exe = path.join(dir, 'hy-fake-exe.exe')
+    fs.writeFileSync(cmdShim, '@echo off\r\n')
+    fs.writeFileSync(exe, 'not a real executable')
+    const env = { PATH: dir, PATHEXT: '.COM;.EXE;.BAT;.CMD' }
+    assert.equal(resolveWindowsCommand('hy-fake-cmd', env), cmdShim)
+    assert.equal(resolveWindowsCommand('hy-fake-exe', env), exe)
+    assert.equal(resolveWindowsCommand('hy-no-such-tool', env), undefined, 'a missing command is not invented')
+    // A name that carries a path separator or an extension is used as written.
+    assert.equal(resolveWindowsCommand('hy-fake-cmd.cmd', env), undefined)
+    assert.equal(resolveWindowsCommand('.\\hy-fake-cmd', env), undefined)
+
+    const shim = stdioCommand('hy-fake-cmd', ['-y', 'pkg name'], 'win32', { ...env, ComSpec: 'C:\\Windows\\System32\\cmd.exe' })
+    assert.equal(shim.file, 'C:\\Windows\\System32\\cmd.exe')
+    // One command line: the shim and each argument quoted on their own, the
+    // whole line wrapped so `cmd /s` strips only the outer quotes.
+    assert.deepEqual(shim.args, ['/d', '/s', '/c', `"${quoteForCmd(cmdShim)} -y "pkg name""`])
+    assert.equal(shim.args[3]!.includes('pkg name'), true)
+    assert.equal(shim.windowsVerbatimArguments, true)
+    // The fallback when ComSpec is absent.
+    assert.equal(stdioCommand('hy-fake-cmd', [], 'win32', env).file, 'cmd.exe')
+
+    // A real executable, an unresolved name and POSIX keep the plain spawn.
+    assert.deepEqual(stdioCommand('hy-fake-exe', ['--flag'], 'win32', env), { file: exe, args: ['--flag'] })
+    assert.deepEqual(stdioCommand('hy-no-such-tool', ['x'], 'win32', env), { file: 'hy-no-such-tool', args: ['x'] })
+    assert.deepEqual(stdioCommand('npx', ['-y', 'pkg'], 'linux', env), { file: 'npx', args: ['-y', 'pkg'] })
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('T-5: cmd.exe arguments are quoted individually', () => {
+  assert.equal(quoteForCmd('simple'), 'simple')
+  assert.equal(quoteForCmd('two words'), '"two words"')
+  assert.equal(quoteForCmd('say "hi"'), '"say \\"hi\\""')
+  assert.equal(quoteForCmd('C:\\dir with space\\'), '"C:\\dir with space\\\\"')
+  assert.equal(quoteForCmd(''), '""')
+})
 
 test('MCP: tools across pages, calls, errors, approval hints and the catalog', async () => {
   const mcp = await McpManager.start({
@@ -27,6 +73,22 @@ test('MCP: tools across pages, calls, errors, approval hints and the catalog', a
 
     assert.equal(mcp.needsApproval(mcp.find('echo', 'echo')!), false, 'readOnlyHint')
     assert.equal(mcp.needsApproval(mcp.find('echo', 'add')!), true)
+    const runtime = new ToolRuntime({} as never, process.cwd(), async () => false, false, { mcp })
+    const extraTools = runtime.mcpToolSpecs()
+    const definitions = nativeToolDefs(false, false, { mcp: true, extraTools, allowTools: new Set(['mcp_call']), activeTools: new Set(['mcp_call']) })
+    assert.equal(definitions.length, 3)
+    const add = definitions.find((tool) => tool.description.startsWith('echo/add'))!
+    const echo = definitions.find((tool) => tool.description.startsWith('echo/echo'))!
+    // 5-4: the server's readOnlyHint reaches the tool spec, so a read-only MCP
+    // tool runs in parallel inside run_code (`isReadOnly`).
+    assert.equal(runtime.isReadOnly(echo.name), true)
+    assert.equal(runtime.isReadOnly(add.name), false)
+    assert.deepEqual(add.parameters, mcp.find('echo', 'add')!.inputSchema)
+    await assert.rejects(runtime.execute(add.name, { a: 1 }), /args.b is required/)
+    await assert.rejects(runtime.execute(add.name, { a: 1, b: 2 }), /MCP call not approved/)
+    assert.deepEqual(await runtime.execute(echo.name, { text: 'native' }), { text: 'echo: native' })
+    runtime.setAllowTools(new Set())
+    await assert.rejects(runtime.execute(echo.name, { text: 'blocked' }), /not available while plan mode/)
 
     const catalog = mcp.renderCatalog()
     assert.match(catalog, /^MCP tools \(call with mcp_call/)
@@ -174,4 +236,27 @@ test('CP-11: free-text answers become typed elicitation content', () => {
   assert.deepEqual(elicitationContent({ properties: { a: {}, b: {} } }, '{"a":1,"b":"x"}'), { action: 'accept', content: { a: 1, b: 'x' } })
   assert.deepEqual(elicitationContent({ properties: { a: {}, b: {} } }, 'not json'), { action: 'decline' })
   assert.deepEqual(elicitationContent(undefined, '   '), { action: 'decline' })
+})
+
+test('5-4: only an explicit readOnlyHint makes an MCP tool read-only; long descriptions are cut', () => {
+  const long = 'x'.repeat(1_000)
+  const mcp = {
+    tools: [
+      { server: 'srv', name: 'read', description: 'Reads.', inputSchema: { type: 'object' }, readOnly: true },
+      { server: 'srv', name: 'write', description: long, inputSchema: { type: 'object' }, readOnly: false },
+      // A server that sends no hint, or sends readOnlyHint: false, keeps the
+      // serial path: a false "safe" guess would skip the approval prompt.
+      { server: 'srv', name: 'unhinted', description: 'Unknown.', inputSchema: { type: 'object' } },
+    ],
+  }
+  const runtime = new ToolRuntime({} as never, process.cwd(), undefined, false, { mcp: mcp as never })
+  const specs = runtime.mcpToolSpecs()
+  assert.deepEqual(specs.map((spec) => spec.readOnly), [true, false, false])
+  assert.equal(runtime.isReadOnly(specs[0]!.name), true)
+  assert.equal(runtime.isReadOnly(specs[1]!.name), false)
+  // The description travels in every prompt and native tool definition.
+  assert.ok(specs[1]!.description.length <= 400, String(specs[1]!.description.length))
+  assert.match(specs[1]!.description, /^srv\/write\. /)
+  assert.ok(specs[1]!.description.endsWith('…'))
+  assert.equal(specs[0]!.description, 'srv/read. Reads.')
 })

@@ -12,6 +12,18 @@ export interface UsageView {
   lastCacheMissTokens: number
 }
 
+/** Both lanes belong to one user-visible chat; keep their total cost visible. */
+export function combineUsage(primary: UsageView, dialogue?: UsageView): UsageView {
+  if (!dialogue) return primary
+  return { ...primary,
+    inputTokens: primary.inputTokens + dialogue.inputTokens,
+    outputTokens: primary.outputTokens + dialogue.outputTokens,
+    cacheHitTokens: primary.cacheHitTokens + dialogue.cacheHitTokens,
+    cacheMissTokens: primary.cacheMissTokens + dialogue.cacheMissTokens,
+    cacheUsageComplete: primary.cacheUsageComplete && dialogue.cacheUsageComplete,
+  }
+}
+
 /**
  * Rebuilds a run's usage from its log so a restart keeps the token and cache
  * counters visible before the conversation is reopened for a new turn.

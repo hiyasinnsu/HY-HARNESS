@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { LlmError, type ChatMessage, type Completion, type ImageInput, type LlmProvider, type Usage } from './llm.js'
+import { LlmError, parseLooseJsonObject, type ChatMessage, type CompleteOptions, type Completion, type ImageInput, type LlmProvider, type Usage } from './llm.js'
 import type { SessionEvent, SessionLog } from './session-log.js'
 import { buildSystemPrompt, lastSessionContext, nativeToolDefs, sessionContextBlock, type InteractionMode, type PromptExtras, type WorkMode } from './prompt.js'
 import { AbortRunError, type ToolRuntime } from './tools.js'
@@ -7,7 +7,7 @@ import { Ledger, discoverPinned } from './ledger.js'
 import type { SkillInfo } from './skills.js'
 import type { MemoryStore } from './memory.js'
 import { validate, type Schema, type ToolSpec } from './tool-registry.js'
-import { announcesNextStep, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverTemplateCall, recoverUnwrappedBatch } from './reply-guard.js'
+import { announcesNextStep, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverMalformedCall, recoverTemplateCall, recoverUnwrappedBatch } from './reply-guard.js'
 import { steerMessage, type SteerInbox } from './steering.js'
 import { classifyDenial, type DenialInfo } from './denial.js'
 import { estimateTokens } from './tokens.js'
@@ -28,6 +28,28 @@ export interface SpillRef {
  * (`SpillCompaction`); without one, long outputs are truncated and nothing is
  * compacted.
  */
+/** A 400/413 whose body says the request exceeded the model's context window. */
+function isContextOverflow(error: unknown): boolean {
+  const status = (error as { status?: unknown }).status
+  if (status !== 400 && status !== 413) return false
+  const body = String((error as { body?: unknown }).body ?? (error as { message?: unknown }).message ?? '')
+  if (!/context|prompt is too long|too many tokens|input is too long|reduce the length/i.test(body)) return false
+  return /exceed|too (?:long|large|many)|maximum|limit|reduce/i.test(body)
+}
+
+/** A 400 that says the endpoint does not take function tools at all. */
+function rejectsTools(message: string): boolean {
+  return /tool/i.test(message) && /unsupported|not supported|does not support|unrecognized|unknown (?:field|parameter)|not available/i.test(message)
+}
+
+/** A native tool-call argument value as an object (string JSON, one-element array). */
+function coerceArgs(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  if (typeof value === 'string') return parseLooseJsonObject(value)
+  if (Array.isArray(value) && value.length === 1) return coerceArgs(value[0])
+  return undefined
+}
+
 export interface ContextManager {
   /** Every tool output passes through here before it enters the conversation. */
   toolOutput(callId: string, output: string): { visible: string; spillRef?: SpillRef }
@@ -36,12 +58,18 @@ export interface ContextManager {
    * May return a compacted list; `messages[0]` (system) and `messages[1]`
    * (objective) stay first, and assistant/user pairs are never split.
    */
-  beforeRequest(messages: ChatMessage[], lastInputTokens: number): Promise<ChatMessage[]>
+  beforeRequest(messages: ChatMessage[], lastInputTokens: number, replayTools?: CompleteOptions['tools']): Promise<ChatMessage[]>
+  /**
+   * Compacts now, regardless of the trigger. Used when the provider rejects a
+   * request for exceeding the context window: the next attempt is made with a
+   * shorter history instead of failing the turn.
+   */
+  forceCompact?(messages: ChatMessage[], replayTools?: CompleteOptions['tools']): Promise<ChatMessage[]>
   /**
    * Called after each completion; a manager may prepare work in the background
    * (CP-22: warm the summary for the next request). Must not throw.
    */
-  afterResponse?(messages: ChatMessage[], completion: { usage: { inputTokens: number } }): void
+  afterResponse?(messages: ChatMessage[], completion: { usage: { inputTokens: number } }, replayTools?: CompleteOptions['tools']): void
 }
 
 export interface AgentEvent {
@@ -53,11 +81,15 @@ export interface AgentEvent {
     | 'tool-error'
     | 'final'
     | 'retry'
+    | 'compaction'
     | 'step-start'
     | 'step-end'
     | 'tool-start'
+    | 'steer-applied'
   [key: string]: unknown
 }
+
+type GoalContext = { objective: string; phase: string; blockerReason?: string }
 
 export interface AgentOptions {
   provider: LlmProvider
@@ -67,10 +99,20 @@ export interface AgentOptions {
   maxOutputTokens?: number
   /** Goal mode: a prose-only plan/confirmation must not end the turn before acting. */
   goalMode?: boolean
+  /** When true, ending a turn with plain text is allowed to yield and wait for async background work. */
+  allowWaitingReply?: () => boolean
   /** `full`: assistant messages keep their reasoning, which the provider gets back (HarnessConfig.reasoningHistory). */
   reasoningHistory?: 'none' | 'full'
+  /** The compactor can reuse this provider's native request prefix. */
+  cacheCompaction?: boolean
   /** System-prompt variant (benchmark experiments; HarnessConfig.promptVariant). */
   promptVariant?: 'lean' | 'legacy' | 'lean2' | 'lean3' | 'lean4'
+  /** Send the detailed tool descriptions (default true; prompt.ts decides). */
+  richToolDocs?: boolean
+  /** Extra "announced the next step and stopped" patterns (user-registered). */
+  announcePatterns?: readonly string[]
+  /** Safety cap on the steps of one turn (default: no cap). */
+  maxSteps?: number
   workMode?: () => WorkMode
   /** How the agent involves the user (session context, like the work mode). */
   interactionMode?: () => InteractionMode
@@ -79,7 +121,7 @@ export interface AgentOptions {
   /** CP-19: lifecycle hooks (userPromptSubmit, modelRequest, …). Default: none. */
   hooks?: Hooks
   /** Current goal shown in the system prompt. */
-  goal?: { objective: string; phase: string; blockerReason?: string }
+  goal?: GoalContext | (() => GoalContext | undefined)
   temperature?: number
   effort?: string
   ptc?: boolean
@@ -130,6 +172,7 @@ export interface AgentOptions {
    * a message the user sent mid-turn reaches the model in the next request.
    */
   steer?: SteerInbox
+  sessionContext?: () => string
   /** Makes tool call ids unique across turns (e.g. `t2-`). */
   callIdPrefix?: string
   onEvent?: (event: AgentEvent) => void
@@ -214,6 +257,7 @@ export function rebuildHistory(events: readonly SessionEvent[], runId: string): 
       }
       case 'turn/retry':
       case 'turn/nudge':
+      case 'turn/failure':
         // A rejected reply and the correction the agent sent back.
         if (typeof p.nudge === 'string') {
           if (typeof p.assistant === 'string') history.push(reply(p.assistant, p.withReasoning))
@@ -223,7 +267,7 @@ export function rebuildHistory(events: readonly SessionEvent[], runId: string): 
       case 'user/steer':
         // Logged raw (the transcript shows what the user typed); the marker is
         // added the same way the running agent adds it.
-        history.push({ role: 'user', content: steerMessage(String(p.content ?? '')) })
+        history.push({ role: 'user', content: steerMessage(String(p.content ?? ''), p.source as 'orchestrator' | 'worker' | undefined) })
         break
       case 'assistant/thinking':
         lastThinking = String(p.content ?? '')
@@ -231,6 +275,77 @@ export function rebuildHistory(events: readonly SessionEvent[], runId: string): 
       case 'assistant/message':
         history.push(reply(String(p.content ?? ''), p.withReasoning))
         break
+      case 'compaction/prune': {
+        // Older logs only recorded a count. Preserve the original results in that case.
+        if (!Array.isArray(p.replacements)) break
+        const replacements = new Map<string, Map<number, string>>()
+        for (const item of p.replacements) {
+          if (typeof item?.sourceSha256 !== 'string' || typeof item?.content !== 'string') continue
+          const matches = replacements.get(item.sourceSha256) ?? new Map<number, string>()
+          const occurrence = Number.isSafeInteger(item.occurrence) && item.occurrence > 0 ? item.occurrence : matches.size + 1
+          matches.set(occurrence, item.content)
+          replacements.set(item.sourceSha256, matches)
+        }
+        const seen = new Map<string, number>()
+        for (let i = 1; i < history.length && replacements.size > 0; i++) {
+          const message = history[i]!
+          if (message.role !== 'user' || !/^TOOL (RESULT|ERROR) \(/.test(message.content)) continue
+          const hash = createHash('sha256').update(message.content).digest('hex')
+          const matches = replacements.get(hash)
+          if (!matches) continue
+          const occurrence = (seen.get(hash) ?? 0) + 1
+          seen.set(hash, occurrence)
+          const content = matches.get(occurrence)
+          if (content === undefined) continue
+          history[i] = { role: 'user', content }
+          matches.delete(occurrence)
+          if (matches.size === 0) replacements.delete(hash)
+        }
+        break
+      }
+      case 'compaction/summary': {
+        const rawSummary = String(p.summaryMarkdown ?? '')
+        let summaryText = rawSummary.trim()
+        if (summaryText.startsWith('{')) {
+          try {
+            const parsed = JSON.parse(summaryText) as { summary?: unknown }
+            if (typeof parsed.summary === 'string' && parsed.summary.trim()) {
+              summaryText = parsed.summary.trim()
+            }
+          } catch {
+            // Keep raw text when not valid JSON.
+          }
+        }
+        if (history.length > 0 && summaryText) {
+          const SUMMARY_OPEN = '<session_summary>'
+          const SUMMARY_CLOSE = '</session_summary>'
+          const segments: ChatMessage[][] = []
+          for (const message of history.slice(1)) {
+            if (message.role === 'assistant' || segments.length === 0) segments.push([message])
+            else segments.at(-1)!.push(message)
+          }
+          const pairs = typeof p.pairs === 'number' && p.pairs > 0 ? p.pairs : segments.length
+          const keep = Math.max(0, segments.length - pairs)
+          const recent = segments.slice(segments.length - keep)
+
+          const first = history[0]!
+          const clean = first.content.includes(SUMMARY_OPEN)
+            ? first.content.slice(0, first.content.indexOf(SUMMARY_OPEN)).trimEnd()
+            : first.content
+          history[0] = {
+            ...first,
+            content: `${clean}\n\n${SUMMARY_OPEN}\nSummary of earlier steps (written by the compactor):\n${summaryText}\n${SUMMARY_CLOSE}`,
+          }
+          history.length = 1
+          for (const seg of recent) {
+            history.push(...seg)
+          }
+          for (const [turn, idx] of turnStarts.entries()) {
+            if (idx > history.length) turnStarts.set(turn, history.length)
+          }
+        }
+        break
+      }
       case 'tool/result': {
         const name = String(p.name ?? '')
         const output = String(p.output ?? '')
@@ -251,9 +366,60 @@ interface Call {
   args?: unknown
 }
 
+function callFingerprint(call: Call): string {
+  const json = JSON.stringify(call, (_key, value: unknown) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+      : value)
+  return createHash('sha256').update(json).digest('hex')
+}
+
+const ACTION_ENVELOPE_KEYS = new Set(['tool', 'name', 'args', 'arguments', 'calls', 'tools', 'final'])
+const NON_TOOL_SHORTHAND_KEYS = new Set(['tool', 'name', 'args', 'arguments', 'calls', 'tools', 'final', 'note', 'error', 'result', 'content'])
+
+function isCallEntry(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const obj = value as Record<string, unknown>
+  if (typeof obj.tool === 'string' || (typeof obj.name === 'string' && ('args' in obj || 'arguments' in obj))) return true
+  const keys = Object.keys(obj)
+  if (keys.length === 1 && !NON_TOOL_SHORTHAND_KEYS.has(keys[0]!) && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(keys[0]!)) {
+    const inner = obj[keys[0]!]
+    return !!inner && typeof inner === 'object' && !Array.isArray(inner)
+  }
+  return false
+}
+
+/**
+ * Normalizes a tool-call object into `{ tool, args }`:
+ * - folds top-level argument fields beside `"tool"` into `args`
+ * - accepts `"arguments"` as an alias for `"args"`
+ * - unwraps single-key shorthand `{"shell":{"command":"..."}}` inside a batch.
+ */
+function normalizeCall(raw: Record<string, unknown>): Call {
+  const name = typeof raw.tool === 'string' ? raw.tool : raw.name
+  if (typeof name !== 'string') {
+    const [onlyKey] = Object.keys(raw)
+    if (onlyKey) return { tool: onlyKey, args: raw[onlyKey] }
+  }
+  const tool = String(name)
+  const rawArgs = raw.args !== undefined ? raw.args : raw.arguments
+  const extra: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(raw)) {
+    if (!ACTION_ENVELOPE_KEYS.has(k) && v !== undefined) extra[k] = v
+  }
+  if (Object.keys(extra).length === 0) return { tool, args: rawArgs }
+  const base =
+    rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+      ? (rawArgs as Record<string, unknown>)
+      : {}
+  return { tool, args: { ...extra, ...base } }
+}
+
 interface Action {
   tool?: string
+  name?: string
   args?: unknown
+  arguments?: unknown
   /** Several independent calls in one step. */
   calls?: unknown[]
   /** The same list under the name models sometimes use (`{"tools":[...]}`). */
@@ -278,6 +444,7 @@ function parseAction(text: string): Action | undefined {
   } catch {
     // Fall through to the first balanced object.
   }
+  if (t.startsWith('<') && looksLikeBrokenToolCall(t)) return undefined
   const start = t.indexOf('{')
   if (start < 0) return undefined
   let depth = 0
@@ -309,6 +476,25 @@ function parseAction(text: string): Action | undefined {
 
 /** Tools that hand work to another session; its report arrives later. */
 const DELEGATING_TOOLS: ReadonlySet<string> = new Set(['orchestrator_spawn', 'orchestrator_send', 'delegate', 'send_message'])
+
+const TEXT_PROTOCOL_RETRY =
+  'Your previous reply was not a single valid JSON object. Reply with exactly one JSON object: ' +
+  '{"tool":"read_file","args":{"path":"..."}} or {"final":"..."}'
+
+/** Keep the text-mode cache intact, but do not send its repair exchanges to a native session. */
+function withoutTextProtocolRetries(history: readonly ChatMessage[]): ChatMessage[] {
+  const kept: ChatMessage[] = []
+  for (const message of history) {
+    if (message.role === 'user' && (message.content === TEXT_PROTOCOL_RETRY || message.content.startsWith(TEXT_PROTOCOL_RETRY + '\n\n<hy_session_context>'))) {
+      if (kept.at(-1)?.role === 'assistant') kept.pop()
+      const context = message.content.slice(TEXT_PROTOCOL_RETRY.length).trimStart()
+      if (context) kept.push({ role: 'user', content: context })
+    } else {
+      kept.push(message)
+    }
+  }
+  return kept
+}
 
 /** Sent once when a final answer announced the agent's next step instead of taking it. */
 export const ANNOUNCED_WITHOUT_ACTION =
@@ -404,7 +590,11 @@ export class Agent {
       workspaceRoot: this.options.workspaceRoot,
       provider: this.options.provider.name,
     })
+    const mcpSpecs = (this.options.tools as Partial<ToolRuntime>).mcpToolSpecs?.() ?? []
+    const extraTools = [...(this.options.extraTools ?? []), ...mcpSpecs]
+    const runtimeFeatures = (this.options.tools as Partial<ToolRuntime>).toolFeatures?.()
     const extras: PromptExtras = {
+      ...(runtimeFeatures ? { features: runtimeFeatures } : {}),
       ...(this.options.skills ? { skills: this.options.skills } : {}),
       ...(this.options.mcpCatalog !== undefined ? { mcp: true } : {}),
       ...(this.options.delegate ? { delegate: true } : {}),
@@ -417,9 +607,11 @@ export class Agent {
       // The date and goal are not here: they change during a session, so they
       // travel in the session-context block (see `sessionContext` below).
       ...(this.options.ask ? { ask: true } : {}),
-      ...(this.options.extraTools?.length ? { extraTools: this.options.extraTools } : {}),
+      ...(extraTools.length ? { extraTools } : {}),
       ...(this.options.memory ? { memory: true } : {}),
       ...(this.options.promptVariant ? { promptVariant: this.options.promptVariant } : {}),
+      ...(this.options.richToolDocs !== undefined ? { richToolDocs: this.options.richToolDocs } : {}),
+      ...((this.options.tools as Partial<ToolRuntime>).foregroundShell?.() ? { foregroundShell: true } : {}),
     }
     // Native function calling when the provider supports it; a model that
     // rejects tools switches the turn to the JSON text protocol.
@@ -429,6 +621,12 @@ export class Agent {
     let nudged = false
     // Set once a broken tool call has been retried (native mode).
     let brokenRetried = false
+    let protocolFallback = false
+    let limitedRetried = false
+    // Set once the provider rejected a request for the context length and the
+    // history was force-compacted.
+    let contextCompacted = false
+    let invalidTextRetried = false
     let degenerateRetried = false
     // Set once a reply that announced its next step without acting was nudged.
     let announceNudged = false
@@ -444,7 +642,7 @@ export class Agent {
     const ledger = this.options.ledger ?? new Ledger(discoverPinned(this.options.workspaceRoot))
     let messages: ChatMessage[] = [
       { role: 'system', content: base },
-      ...history,
+      ...(native ? withoutTextProtocolRetries(history) : history),
       { role: 'user', content: promptText, ...(images.length > 0 ? { images } : {}) },
     ]
     this.options.sessionLog.append('user/message', {
@@ -462,8 +660,30 @@ export class Agent {
     let repeats = 0
     // Loop guard: the same multi-step sequence (A → B → C → A → B → C …).
     const stepHistory: string[] = []
+    const unchanged = new Map<string, { result: string; count: number; step: number }>()
+    let blockedSteps = 0
+    const failReply = (step: number, reason: string, detail: string, assistantAdded = true): AgentResult => {
+      const final = `The task is incomplete: ${detail}. The failed calls did not run; earlier results and changes are preserved.`
+      messages.push({ role: 'user', content: final })
+      this.options.sessionLog.append('turn/failure', { step, reason, ...replay(messages, assistantAdded) })
+      this.options.sessionLog.append('turn/end', { status: 'stalled', reason })
+      this.options.onEvent?.({ type: 'final', content: final })
+      return { outcome: 'stalled', final, steps: step, usage, history: messages.slice(1) }
+    }
 
+    // User-registered "announced the next step" patterns (any language), in
+    // addition to the built-in Japanese and English detection.
+    const announcePatterns = (this.options.announcePatterns ?? []).flatMap((pattern) => {
+      try {
+        return [new RegExp(pattern, 'iu')]
+      } catch {
+        return []
+      }
+    })
     for (let step = 1; ; step++) {
+      if (this.options.maxSteps !== undefined && step > this.options.maxSteps) {
+        return failReply(step - 1, 'max-steps', `the turn reached its step limit (${this.options.maxSteps})`)
+      }
       // CP-10: `tool_search` may have loaded a deferred tool; refresh the
       // tool section so the rest of the turn sees it.
       const nextBase = prompt()
@@ -476,33 +696,46 @@ export class Agent {
       // so the request built just below is the first one that carries it. The
       // log entry is written here (not when the user pressed send) so the log
       // order is exactly the order the model saw.
-      for (const steer of this.options.steer?.drain() ?? []) {
+      const instructions = this.options.steer?.drain() ?? []
+      if (instructions.some((message) => message.interrupt !== false)) {
+        unchanged.clear()
+        blockedSteps = 0
+        brokenRetried = false
+        limitedRetried = false
+        invalidTextRetried = false
+      }
+      for (const steer of instructions) {
         messages.push({
           role: 'user',
-          content: steerMessage(steer.text),
+          content: steerMessage(steer.text, steer.source),
           ...(steer.images?.length ? { images: steer.images } : {}),
         })
         this.options.sessionLog.append('user/steer', {
           content: steer.text,
           step,
+          ...(steer.id ? { id: steer.id } : {}),
+          ...(steer.source ? { source: steer.source } : {}),
           ...(steer.images?.length ? { images: steer.images.length } : {}),
         })
       }
       this.options.onEvent?.({ type: 'step-start', step, role: 'worker', model: this.options.provider.name })
-      if (this.options.context) messages = await this.options.context.beforeRequest(messages, lastInputTokens)
+      const requestTools = native ? nativeToolDefs(ptc, objectiveMode, { ...extras, activeTools: this.activeTools() }) : undefined
+      const replayTools = this.options.cacheCompaction ? requestTools : undefined
+      if (this.options.context) messages = await this.options.context.beforeRequest(messages, lastInputTokens, replayTools)
       // Prefix cache (DSH "in-history" updates): the system prompt stays
       // byte-identical for the whole session. The date, goal, constraints,
       // notes and memory go into a session-context block appended to the
       // newest user message whenever it differs from the last block the
       // conversation holds. Compaction or pruning that drops that block makes
       // it differ, so the current block is always in the request (Goal 3).
+      const goal = typeof this.options.goal === 'function' ? this.options.goal() : this.options.goal
       const context = sessionContextBlock({
         ...(this.options.workMode ? { workMode: this.options.workMode() } : {}),
         ...(this.options.interactionMode ? { interactionMode: this.options.interactionMode() } : {}),
         // The model's own sense of "now" is its training cutoff (DSH time context).
         date: new Date().toLocaleDateString('sv-SE'),
-        ...(this.options.goal ? { goal: this.options.goal } : {}),
-        sections: [ledger.render(), this.options.memory?.render() ?? '', this.options.mcpCatalog ?? ''],
+        ...(goal ? { goal } : {}),
+        sections: [ledger.render(), this.options.memory?.render() ?? '', native && mcpSpecs.length ? '' : this.options.mcpCatalog ?? '', this.options.sessionContext?.() ?? ''],
       })
       if (lastSessionContext(messages) !== context) {
         const last = messages.at(-1)
@@ -530,11 +763,22 @@ export class Agent {
           temperature: this.temperature,
           ...(this.effort ? { effort: this.effort } : {}),
           ...(this.options.signal ? { signal: this.options.signal } : {}),
-          ...(native ? { tools: nativeToolDefs(ptc, objectiveMode, { ...extras, activeTools: this.activeTools() }) } : {}),
+          ...(requestTools ? { tools: requestTools } : {}),
         })
       } catch (error) {
         if (this.options.signal?.aborted) throw new AbortRunError('turn cancelled')
-        if (native && error instanceof LlmError && error.status === 400 && /tool/i.test(error.message)) {
+        // The endpoint refused the request because of the context length: compact
+        // now (once) and retry, instead of losing the turn.
+        if (isContextOverflow(error) && this.options.context?.forceCompact && !contextCompacted) {
+          contextCompacted = true
+          this.options.sessionLog.append('context/forced-compaction', { step, reason: error instanceof Error ? error.message.slice(0, 300) : 'context overflow' })
+          messages = await this.options.context.forceCompact(messages, requestTools)
+          step -= 1
+          continue
+        }
+        // A capability rejection, not any 400 that mentions a tool: switch the
+        // turn to the JSON text protocol.
+        if (native && error instanceof LlmError && error.status === 400 && rejectsTools(error.message)) {
           native = false
           base = prompt()
           this.options.sessionLog.append('native-tools/off', { reason: error.message.slice(0, 300) })
@@ -546,7 +790,7 @@ export class Agent {
       const latencyMs = Date.now() - requestStarted
       lastInputTokens = completion.usage.inputTokens
       // CP-22: let the context manager warm its next compaction in the background.
-      this.options.context?.afterResponse?.(messages, { usage: { inputTokens: completion.usage.inputTokens } })
+      this.options.context?.afterResponse?.(messages, { usage: { inputTokens: completion.usage.inputTokens } }, replayTools)
       // CP-23: record estimate vs actual so the coefficients can be checked.
       {
         const estimated = estimateTokens(messages.map((message) => message.content).join('\n'))
@@ -573,7 +817,16 @@ export class Agent {
       // reasoningHistory full: this step's reasoning stays on its assistant
       // message, so later steps see why it acted (DSH / DeepSeek reasoning_content).
       const kept = this.options.reasoningHistory === 'full' && completion.reasoning?.trim() ? completion.reasoning : undefined
-      const reply = (text: string): ChatMessage => (kept ? { role: 'assistant', content: text, reasoning: kept } : { role: 'assistant', content: text })
+      // Native arguments arrive as an object on most endpoints, but some send a
+      // JSON string or a one-element array; coerce before deciding they are broken.
+      const nativeCalls = completion.toolCalls?.map(({ name, args }) => ({ tool: name, args: coerceArgs(args) }))
+      const wireCalls = nativeCalls?.flatMap((call) => (call.args === undefined ? [] : [{ tool: call.tool, args: call.args }]))
+      const wireReply = wireCalls?.length ? JSON.stringify(wireCalls.length === 1 ? wireCalls[0] : { calls: wireCalls }) : completion.content.trim()
+      const reply = (text: string): ChatMessage => ({
+        role: 'assistant', content: text,
+        ...(kept ? { reasoning: kept } : {}),
+        ...(completion.gemini && text === wireReply ? { gemini: { ...completion.gemini, content: text } } : {}),
+      })
       if (completion.reasoning?.trim()) {
         const thinkingEvent = this.options.sessionLog.append('assistant/thinking', { content: completion.reasoning })
         this.options.onEvent?.({ type: 'thinking', step, content: truncate(completion.reasoning, 8_000), seq: thinkingEvent.seq })
@@ -584,24 +837,55 @@ export class Agent {
         model: this.options.provider.name,
         usage: completion.usage,
         latencyMs,
+        replyChannel: wireCalls?.length ? 'native' : wireReply ? 'text' : 'empty',
+        ...(completion.outputLimited ? { outputLimited: true } : {}),
         // Detects prompt-template changes between steps (design §1).
         systemSha256: createHash('sha256').update(messages[0].content).digest('hex').slice(0, 16),
       })
       this.options.onEvent?.({ type: 'step-end', step, usage: completion.usage })
+      for (const instruction of instructions) this.options.onEvent?.({ type: 'steer-applied', step, id: instruction.id, source: instruction.source })
 
+      const retryReply = (reason: string, nudge: string) => {
+        messages.push({ role: 'user', content: nudge })
+        this.options.sessionLog.append('turn/retry', { step, reason, ...replay(messages, false) })
+        this.options.onEvent?.({ type: 'retry', step, reason, content: truncate(wireReply, 2_000) })
+      }
+      if (completion.outputLimited) {
+        if (limitedRetried) return failReply(step, 'output-limit', 'the provider cut off two replies at its output limit', false)
+        limitedRetried = true
+        retryReply('output-limit', 'The provider cut off your reply. None of its calls ran. Continue from the last confirmed result and send one smaller, complete action. Split large edits into separate calls.')
+        continue
+      }
+      limitedRetried = false
+      const retryProtocol = (reason: string) => {
+        if (brokenRetried && native) {
+          native = false
+          protocolFallback = true
+          // The downgrade is a fresh start for the text protocol: its first
+          // format mistake gets its own retry. Keeping the native-mode flag
+          // ended the turn on the first text reply that was neither a call nor
+          // a final, before the model could follow the new instructions
+          // (verify-agent-budget 4-a).
+          brokenRetried = false
+          this.options.sessionLog.append('native-tools/off', { step, reason })
+          retryReply('tool-protocol-fallback', 'Native tool replies were invalid. No calls from those replies ran. Use the current JSON text protocol and send one complete action from the last confirmed result.')
+        } else {
+          brokenRetried = true
+          retryReply(reason, native
+            ? 'The tool reply was invalid and none of its calls ran. Send one complete native function call with object arguments, continuing from the last confirmed result.'
+            : TEXT_PROTOCOL_RETRY)
+        }
+      }
       // The stream was cut because the model looped on one fragment: the text
       // is not an answer and may hold half a tool call. Retry once with the
       // loop removed from the history; a second loop ends the turn plainly.
       if (completion.degenerate === 'repetition') {
         const cut = completion.content.trim()
+        if (cut) messages.push(reply(cut))
         if (degenerateRetried) {
-          const final = 'The model kept repeating the same text, so the reply was cut off. No further changes were made.'
-          this.options.sessionLog.append('turn/end', { status: 'completed' })
-          this.options.onEvent?.({ type: 'final', content: final })
-          return { outcome: 'final', final, steps: step, usage, history: messages.slice(1) }
+          return failReply(step, 'repetition', 'repeated model output prevented continuation', Boolean(cut))
         }
         degenerateRetried = true
-        if (cut) messages.push(reply(cut))
         messages.push({
           role: 'user',
           content:
@@ -615,10 +899,15 @@ export class Agent {
       let content = completion.content.trim()
       let action: Action | undefined
       let calls: Call[] | undefined
-      if (completion.toolCalls && completion.toolCalls.length > 0) {
-        calls = completion.toolCalls.map((c) => ({ tool: c.name, args: c.args }))
+      if (nativeCalls && nativeCalls.length > 0) {
+        if (nativeCalls.some(({ args }) => args === undefined)) {
+          if (brokenRetried && !native) return failReply(step, 'tool-protocol', 'invalid native tool arguments prevented continuation', false)
+          retryProtocol('invalid-native-arguments')
+          continue
+        }
+        calls = wireCalls
         // History keeps one string per message: the calls in the text protocol's form.
-        content = JSON.stringify(calls.length === 1 ? calls[0] : { calls })
+        content = wireReply
       } else {
         // A call batch cut short by leaked template tags is restored, not
         // retried; history keeps the repaired text, as the model will see it.
@@ -633,50 +922,44 @@ export class Agent {
           this.options.sessionLog.append('reply/recovered', { step, reason: 'unwrapped-batch' })
           content = batch
         }
+        // A call or `{"calls":[...]}` batch with a missing closing `}` / `]` or
+        // raw newlines inside string literals.
+        const malformed = recoverMalformedCall(content)
+        if (malformed !== undefined) {
+          this.options.sessionLog.append('reply/recovered', { step, reason: 'malformed-call' })
+          content = malformed
+        }
         // Only a whole reply runs. When just its first object parses and more
         // calls follow, running that object alone dropped the rest silently
         // (an orchestrator then reported four workers that never started).
         const partial = hasCallsAfterFirstObject(content)
         action = partial ? undefined : parseAction(content)
+        // Native mode: one whole JSON value is an answer, but a body cut off
+        // after a readable object (`{"final":"ok"}…`) is not — without this it
+        // ended the turn with the truncated text.
+        if (native && action !== undefined && action.final !== undefined && looksLikeBrokenToolCall(content)) action = undefined
         // `{"tools":[...]}` is the same batch under another name. As valid JSON
         // it is not a broken call, so without this it was taken as the final
         // answer and the turn ended mid-task (security-holdout thorough #4).
         if (action && !Array.isArray(action.calls) && Array.isArray(action.tools) && action.final === undefined) action.calls = action.tools
-        // A batch with an entry that is not a call ({"name":...}, a string):
+        // A batch with an entry that is not a call ({"note":...}, a string):
         // running the rest would drop that entry without a word.
-        const badEntry = !!action && Array.isArray(action.calls) && action.calls.some((c) => !c || typeof (c as Call).tool !== 'string')
+        const badEntry = !!action && Array.isArray(action.calls) && action.calls.some((c) => !isCallEntry(c))
         if (badEntry) action = undefined
         if (action && Array.isArray(action.calls)) {
-          calls = action.calls.filter((c): c is Call => !!c && typeof (c as Call).tool === 'string')
-        } else if (action && typeof action.tool === 'string') {
-          calls = [{ tool: action.tool, args: action.args }]
+          calls = action.calls.filter(isCallEntry).map(normalizeCall)
+        } else if (action && (typeof action.tool === 'string' || (action.final === undefined && typeof action.name === 'string' && (action.args !== undefined || action.arguments !== undefined)))) {
+          calls = [normalizeCall(action as unknown as Record<string, unknown>)]
         } else if (native && content && (!action || action.final === undefined)) {
           if (partial || badEntry || looksLikeBrokenToolCall(content)) {
-            // A tool call the model failed to emit as a function call arrives
-            // as plain content; showing it as the final answer would present a
-            // broken call as the result. Retry once, then stop with a fixed text.
-            messages.push(reply(content))
-            if (brokenRetried) {
-              const final = 'The model produced an invalid tool call. No changes were made.'
-              this.options.sessionLog.append('turn/end', { status: 'completed' })
-              this.options.onEvent?.({ type: 'final', content: final })
-              return { outcome: 'final', final, steps: step, usage, history: messages.slice(1) }
-            }
-            brokenRetried = true
-            messages.push({
-              role: 'user',
-              content: partial || badEntry
-                ? 'Your reply listed several tool calls, but they were not all valid calls, so none of them ran. Send them again as real function calls.'
-                : 'Your reply looked like a broken tool call. Use a real function call for tools, or reply with a short plain-text summary when finished.',
-            })
-            this.options.sessionLog.append('turn/retry', { step, reason: 'broken-tool-call', ...replay(messages, true) })
-            this.options.onEvent?.({ type: 'retry', step, reason: 'broken-tool-call', content: truncate(content, 2_000) })
+            retryProtocol('broken-tool-call')
             continue
           }
           // Goal mode: a plan, confirmation request or "I will proceed" is not
           // an answer. Nudge once to execute; if the model repeats it, accept
-          // the reply as final instead of looping.
-          if (this.options.goalMode && !goalNudged && performedToolCalls === 0) {
+          // the reply as final instead of looping. Exempt when yielding to wait
+          // for active async workers.
+          if (this.options.goalMode && !goalNudged && performedToolCalls === 0 && !this.options.allowWaitingReply?.()) {
             goalNudged = true
             messages.push(reply(content))
             messages.push({
@@ -699,17 +982,24 @@ export class Agent {
       }
 
       if (!action && !calls) {
+        if (protocolFallback && brokenRetried) {
+          return failReply(step, 'tool-protocol', 'invalid tool replies persisted after switching protocols', false)
+        }
+        if (!native && content && looksLikeBrokenToolCall(content)) {
+          if (brokenRetried) return failReply(step, 'tool-protocol', 'consecutive invalid tool calls prevented continuation', false)
+          retryProtocol('broken-tool-call')
+          continue
+        }
         messages.push(reply(content))
+        // Two consecutive empty replies (in either native or text mode) stop
+        // the turn instead of looping to the step limit.
+        if (!content && emptyReplied) {
+          return failReply(step, 'empty-reply', 'the model returned an empty reply twice')
+        }
         // Native mode has no JSON text protocol: an empty reply carries neither a
         // tool call nor text, so the text-protocol retry below cannot help it and
         // a model that answers with reasoning only would repeat it to the limit.
         if (native && !content) {
-          if (emptyReplied) {
-            const final = 'The model returned an empty reply twice. No changes were made.'
-            this.options.sessionLog.append('turn/end', { status: 'completed' })
-            this.options.onEvent?.({ type: 'final', content: final })
-            return { outcome: 'final', final, steps: step, usage, history: messages.slice(1) }
-          }
           emptyReplied = true
           messages.push({
             role: 'user',
@@ -720,15 +1010,25 @@ export class Agent {
           this.options.onEvent?.({ type: 'retry', step, reason: 'empty-reply', content: '' })
           continue
         }
-        const retry =
-          'Your previous reply was not a single valid JSON object. Reply with exactly one JSON object: ' +
-          '{"tool":"read_file","args":{"path":"..."}} or {"final":"..."}'
-        messages.push({ role: 'user', content: retry })
+        if (!native && invalidTextRetried) {
+          return failReply(step, 'invalid-json', 'two replies did not conform to the text tool protocol')
+        }
+        invalidTextRetried = !native
+        emptyReplied = !content
+        messages.push({ role: 'user', content: TEXT_PROTOCOL_RETRY })
         this.options.sessionLog.append('turn/retry', { step, reason: 'invalid-json', ...replay(messages, true) })
         this.options.onEvent?.({ type: 'retry', step, reason: 'invalid-json', content: truncate(content, 2_000) })
         continue
       }
+      emptyReplied = false
+      invalidTextRetried = false
 
+      if (!calls && this.options.steer?.hasInterrupt()) {
+        messages.push(reply(content))
+        messages.push({ role: 'user', content: 'A newer instruction arrived while this reply was being generated. Read it before completing the turn; the previous reply was not delivered as final.' })
+        this.options.sessionLog.append('turn/retry', { step, reason: 'pending-instruction', ...replay(messages, true) })
+        continue
+      }
       this.options.sessionLog.append('assistant/message', { content, ...(kept ? { withReasoning: true } : {}) })
       // Tool calls are rendered from the structured tool-start/tool events.
       // Sending the serialized call here as well lets a 4K truncation cut the
@@ -765,7 +1065,11 @@ export class Agent {
       // ("ここを確認します。", "I'll add the test now.") did nothing: the turn
       // would stop and leave the user waiting. Nudge once, in every mode; the
       // model either acts or says plainly that it is waiting.
-      if (!calls && action && typeof action.final === 'string' && !objectiveMode && !announceNudged && !lastStepDelegated && announcesNextStep(action.final)) {
+      const announcedStep =
+        action !== undefined &&
+        typeof action.final === 'string' &&
+        (announcesNextStep(action.final) || announcePatterns.some((pattern) => pattern.test(action.final as string)))
+      if (!calls && action && typeof action.final === 'string' && !objectiveMode && !announceNudged && !lastStepDelegated && !this.options.allowWaitingReply?.() && announcedStep) {
         announceNudged = true
         messages.push(reply(content))
         messages.push({ role: 'user', content: ANNOUNCED_WITHOUT_ACTION })
@@ -803,17 +1107,27 @@ export class Agent {
         const key = JSON.stringify(calls)
         repeats = key === lastCall ? repeats + 1 : 1
         lastCall = key
-        const reminder = repeats >= 2 ? repeatReminder(repeats) : ''
-        if (reminder) this.options.sessionLog.append('guard/repeat', { tool: calls.map((c) => c.tool).join(','), times: repeats })
         messages.push(reply(content))
-        const outcomes = await this.executeCalls(step, calls)
+        for (const [key, entry] of unchanged) if (step - entry.step > 32) unchanged.delete(key)
+        const outcomes = await this.executeCalls(step, calls, unchanged)
+        const reminder = repeats >= 2 && calls.every((call) => (unchanged.get(callFingerprint(call))?.count ?? 0) >= 2)
+          ? repeatReminder(repeats) : ''
+        if (reminder) this.options.sessionLog.append('guard/repeat', { tool: calls.map((c) => c.tool).join(','), times: repeats })
+        if (outcomes.some((outcome) => outcome.ok)) {
+          brokenRetried = false
+          // The no-progress guard counts *consecutive* steps without progress:
+          // a successful call in between means the turn is moving, so two
+          // all-blocked steps elsewhere in the turn are not a stall
+          // (verify-agent-budget 4-c).
+          blockedSteps = 0
+        }
         lastStepDelegated = outcomes.some((o) => o.ok && DELEGATING_TOOLS.has(o.call.tool))
         performedToolCalls += calls.length
         // WP-30: `read_image` hands the bytes over out of band. They ride on the
         // tool-result message, so the assistant/user alternation (and the mock's
         // request shape) stays exactly as before.
         const images = this.options.tools.takeImages()
-        stepHistory.push(JSON.stringify([calls, outcomes.map((o) => o.ok)]))
+        stepHistory.push(JSON.stringify([calls, outcomes.map((o) => o.ok), calls.map((call) => unchanged.get(callFingerprint(call))?.result)]))
         if (stepHistory.length > 64) stepHistory.shift()
         let loopNote = ''
         const cycle = reminder ? undefined : detectCycle(stepHistory)
@@ -824,8 +1138,11 @@ export class Agent {
           loopNote = cycleReminder(tools, cycle.times, failing)
           this.options.sessionLog.append('guard/cycle', { tools, period: cycle.period, times: cycle.times, failing })
         }
+        const waitingHint = (reminder || loopNote) && this.options.allowWaitingReply?.()
+          ? '\n[waiting hint] Async workers are currently active. Stop calling tools to poll or fill time—reply briefly in plain text without tool calls to end this turn and wait for automatic wakeup.'
+          : ''
         const parts = outcomes.map((o, i) => {
-          const tail = i === outcomes.length - 1 ? reminder + loopNote : ''
+          const tail = i === outcomes.length - 1 ? reminder + loopNote + waitingHint : ''
           const output = o.output + tail
           this.options.sessionLog.append('tool/result', {
             callId: o.callId,
@@ -839,12 +1156,37 @@ export class Agent {
           return o.ok ? toolResultMessage(o.call.tool, output) : toolErrorMessage(o.call.tool, output)
         })
         const imageNote = images.length > 0 ? `\n\n[image attached: ${images.map((image) => image.label).join(', ')}]` : ''
+        const toolResultText = `${parts.join('\n\n')}${imageNote}`
+        const nativeCalls = completion.toolCalls
         messages.push({
           role: 'user',
-          content: `${parts.join('\n\n')}${imageNote}`,
+          content: toolResultText,
+          ...(completion.gemini && nativeCalls?.length === parts.length && nativeCalls.every((call) => call.id) ? {
+            toolResults: {
+              entries: nativeCalls.map((call, i) => ({ id: call.id!, name: call.name, text: parts[i]! })),
+              rendered: toolResultText,
+            },
+          } : {}),
           ...(images.length > 0 ? { images: images.map((image) => ({ mimeType: image.mimeType, data: image.data })) } : {}),
         })
         if (images.length > 0) this.options.sessionLog.append('image/attached', { step, files: images.map((image) => image.label) })
+        if (outcomes.every((outcome) => outcome.blocked)) {
+          if (this.options.allowWaitingReply?.() && !this.options.steer?.hasInterrupt()) {
+            const final = 'Waiting for the active workers. Their reports will resume this turn’s work.'
+            // The turn ends on this text, so the conversation must end on an
+            // assistant message: without it the history and the reloaded log ended
+            // with the tool result and the waiting line vanished from the
+            // transcript (verify-agent-budget 4-b).
+            messages.push(reply(final))
+            this.options.sessionLog.append('assistant/message', { content: final, ...(kept ? { withReasoning: true } : {}) })
+            this.options.sessionLog.append('turn/end', { status: 'completed', reason: 'waiting-for-workers' })
+            this.options.onEvent?.({ type: 'final', content: final })
+            return { outcome: 'final', final, steps: step, usage, history: messages.slice(1) }
+          }
+          if (++blockedSteps >= 2 && !this.options.steer?.hasInterrupt()) {
+            return failReply(step, 'tool-no-progress', 'repeated tool calls produced no new result', false)
+          }
+        }
         // claim_complete, directly or from a run_code script, ends the session.
         const claim = this.options.tools.takeClaim()
         if (claim !== undefined) {
@@ -871,21 +1213,59 @@ export class Agent {
    * Runs one step's calls: all at once when every one is read-only, else in
    * order. Errors become tool errors except run-ending ones.
    */
-  private async executeCalls(step: number, calls: Call[]) {
+  private async executeCalls(step: number, calls: Call[], unchanged: Map<string, { result: string; count: number; step: number }>) {
     const one = async (call: Call, i: number) => {
       const prefix = this.options.callIdPrefix ?? ''
       const callId = calls.length === 1 ? `${prefix}step-${step}` : `${prefix}step-${step}.${i + 1}`
       if (this.options.signal?.aborted) throw new AbortRunError('turn cancelled')
       this.options.onEvent?.({ type: 'tool-start', step, callId, name: call.tool, args: call.args })
+      const key = callFingerprint(call)
+      const previous = unchanged.get(key)
+      const observe = (output: string) => {
+        const result = createHash('sha256').update(output).digest('hex')
+        unchanged.set(key, { result, count: previous?.result === result ? previous.count + 1 : 1, step })
+      }
       try {
+        if (this.options.steer?.hasInterrupt()) throw new Error('A newer instruction arrived; this call did not run. Read the instruction before continuing.')
+        if ((previous?.count ?? 0) >= 3) {
+          this.options.sessionLog.append('guard/no-progress', { step, tool: call.tool, times: previous!.count })
+          return { call, callId, ok: false as const, blocked: true, denial: undefined, output: 'This call did not run. It already returned the same result three times without a changed prerequisite. Use a different action or wait for new evidence.' }
+        }
         const result = await this.options.tools.execute(call.tool, call.args)
         const raw = JSON.stringify(result, null, 2)
+        const shellFailed = call.tool === 'shell' && (result.timedOut === true || typeof result.exitCode === 'number' && result.exitCode !== 0)
+        const changedCwd = call.tool === 'working_directory' && !!(call.args as { path?: string } | undefined)?.path
+        if (changedCwd || ['apply_patch', 'write_file', 'edit_file'].includes(call.tool)) {
+          // Workspace edits and cwd changes can invalidate prior file checks.
+          unchanged.clear()
+        } else if (call.tool === 'shell') {
+          if (result.status !== 'backgrounded') {
+            // A command that succeeded may have changed anything, so every other
+            // tool's earlier observation is stale and is dropped. The call's own
+            // entry is written again by `observe` with the count it already had,
+            // so repeating the same command is still detected
+            // (verify-agent-budget 4-c).
+            if (!shellFailed) unchanged.clear()
+            observe(JSON.stringify([result.exitCode, result.timedOut, result.stdout, result.stderr]))
+          }
+        } else if (call.tool === 'run_code') {
+          // A script can change anything, same as a shell command.
+          unchanged.clear()
+          observe(raw)
+        } else if (this.options.tools.isReadOnly?.(call.tool) || call.tool === 'mcp_call' ||
+                   call.tool.startsWith('browser_') || call.tool.startsWith('mcp_')) {
+          observe(raw)
+        }
         const view = this.options.context?.toolOutput(callId, raw) ?? { visible: truncate(raw) }
+        if (shellFailed) {
+          return { call, callId, ok: false as const, output: view.visible }
+        }
         return { call, callId, ok: true as const, result, output: view.visible, ...(view.spillRef ? { spillRef: view.spillRef } : {}) }
       } catch (error) {
         // Run-ending errors (e.g. Guardian's breaker) are not the model's to fix.
         if (error instanceof AbortRunError) throw error
         const message = error instanceof Error ? error.message : String(error)
+        if (!this.options.steer?.hasInterrupt()) observe(message)
         // CP-06: a denied call is recorded once, so the GUI and `hy sandbox
         // status` can explain what was blocked instead of showing a bare error.
         const denial: DenialInfo | undefined = classifyDenial(message)
@@ -901,7 +1281,7 @@ export class Agent {
         return { call, callId, ok: false as const, output: message, ...(denial ? { denial } : {}) }
       }
     }
-    const parallel = calls.length > 1 && calls.every((c) => this.options.tools.isReadOnly(c.tool))
+    const parallel = calls.length > 1 && new Set(calls.map(callFingerprint)).size === calls.length && calls.every((c) => this.options.tools.isReadOnly(c.tool))
     if (parallel) return Promise.all(calls.map(one))
     const out = []
     for (let i = 0; i < calls.length; i++) out.push(await one(calls[i]!, i))

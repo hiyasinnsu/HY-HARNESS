@@ -10,7 +10,9 @@ import http from 'node:http'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fileURLToPath } from 'node:url'
-import { GeminiProvider, LazyProvider, LlmError, MockCompactorProvider, OllamaProvider, OpenAiProvider, isOpenCodeHost, repetitionStart } from './llm.js'
+import { GeminiProvider, LazyProvider, LlmError, MockCompactorProvider, OllamaProvider, OpenAiProvider, createProvider, isOpenCodeHost, repetitionStart, withModelBudget, type ChatMessage } from './llm.js'
+import { resetProviderStates } from './llm-negotiate.js'
+import { setModelRegistry } from './model-catalog.js'
 import type { RoleConfig } from './config.js'
 
 const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'test', 'fixtures')
@@ -91,17 +93,27 @@ test('OpenAI-compatible: json=false omits response_format', async () => {
   }
 })
 
-test('OpenAI-compatible: GPT-5/6 and o-series use max_completion_tokens', async () => {
+test('OpenAI-compatible: unregistered models start with max_tokens; the registry can switch it', async () => {
   process.env.HY_TEST_API_KEY = 'sk-test'
-  const s = await serve([{ status: 200, body: fixture('openai-chat.json') }])
+  const s = await serve([{ status: 200, body: fixture('openai-chat.json') }, { status: 200, body: fixture('openai-chat.json') }])
   try {
+    // No name heuristic: an unregistered reasoning model is not guessed from its name.
     await new OpenAiProvider({ ...role('openai-compatible', s.base), model: 'gpt-6-luna' }, fast).complete(messages, {
       maxTokens: 32,
       temperature: 0,
     })
-    assert.equal(s.seen[0]!.body.max_completion_tokens, 32)
-    assert.equal(s.seen[0]!.body.max_tokens, undefined)
+    assert.equal(s.seen[0]!.body.max_tokens, 32)
+    assert.equal(s.seen[0]!.body.max_completion_tokens, undefined)
+    // The user registers what the endpoint takes.
+    setModelRegistry([{ id: 'x', provider: 'openai-compatible', model: 'gpt-6-luna', label: 'Luna', compat: { tokenField: 'max_completion_tokens' } }])
+    await new OpenAiProvider({ ...role('openai-compatible', s.base), model: 'gpt-6-luna' }, fast).complete(messages, {
+      maxTokens: 32,
+      temperature: 0,
+    })
+    assert.equal(s.seen[1]!.body.max_completion_tokens, 32)
+    assert.equal(s.seen[1]!.body.max_tokens, undefined)
   } finally {
+    setModelRegistry([])
     delete process.env.HY_TEST_API_KEY
     await s.close()
   }
@@ -211,28 +223,68 @@ test('OpenCode: sends the stable session and user-agent headers', async () => { 
   }
 })
 
-test('DeepSeek models get earlier reasoning back as reasoning_content; other servers do not', async () => {
+test('reasoning is echoed after the endpoint returns it, or when the role/registry says so', async () => {
   process.env.HY_TEST_API_KEY = 'sk-test'
   const history = [
     ...messages,
     { role: 'assistant' as const, content: '{"tool":"read_file","args":{"path":"a"}}', reasoning: 'read a first' },
     { role: 'user' as const, content: 'TOOL RESULT (read_file):\nx' },
   ]
-  for (const [r, expected] of [
-    [{ ...role('opencode', ''), model: 'deepseek-v4.1-flash' }, 'read a first'],
-    [{ ...role('deepseek', ''), model: 'deepseek-chat' }, 'read a first'],
-    [role('openai-compatible', ''), undefined],
-  ] as const) {
-    const s = await serve([{ status: 200, body: fixture('openai-chat.json') }])
-    try {
-      await new OpenAiProvider({ ...r, baseUrl: s.base }, fast, 'run-r').complete(history, { maxTokens: 32, temperature: 0 })
-      const sent = (s.seen[0]!.body.messages as Array<{ role: string; reasoning_content?: string }>).find((m) => m.role === 'assistant')!
-      assert.equal(sent.reasoning_content, expected, r.provider)
-    } finally {
-      await s.close()
-    }
+  const sentReasoning = (seen: { body: { messages?: unknown } }): unknown =>
+    (seen.body.messages as Array<{ role: string; reasoning_content?: string }>).find((m) => m.role === 'assistant')?.reasoning_content
+  const acceptsReasoning = {
+    status: 200,
+    body: JSON.stringify({ choices: [{ message: { content: 'ok', reasoning_content: 'thought' } }], usage: { prompt_tokens: 5, completion_tokens: 1 } }),
   }
-  delete process.env.HY_TEST_API_KEY
+  try {
+    // Default: nothing is echoed on the first request (no name heuristic).
+    const first = await serve([{ status: 200, body: fixture('openai-chat.json') }, { status: 200, body: fixture('openai-chat.json') }])
+    try {
+      const provider = new OpenAiProvider({ ...role('openai-compatible', ''), baseUrl: first.base }, fast, 'run-r')
+      await provider.complete(history, { maxTokens: 32, temperature: 0 })
+      assert.equal(sentReasoning(first.seen[0]!), undefined)
+    } finally {
+      await first.close()
+    }
+
+    // The endpoint returned reasoning: the next request echoes it.
+    const learned = await serve([acceptsReasoning, acceptsReasoning])
+    try {
+      const provider = new OpenAiProvider({ ...role('openai-compatible', ''), baseUrl: learned.base }, fast, 'run-r')
+      await provider.complete(messages, { maxTokens: 32, temperature: 0 })
+      await provider.complete(history, { maxTokens: 32, temperature: 0 })
+      assert.equal(sentReasoning(learned.seen[1]!), 'read a first')
+    } finally {
+      await learned.close()
+    }
+
+    // The role can force it from the first request.
+    const forced = await serve([{ status: 200, body: fixture('openai-chat.json') }])
+    try {
+      const provider = new OpenAiProvider({ ...role('openai-compatible', ''), baseUrl: forced.base, reasoningEcho: true }, fast, 'run-r')
+      await provider.complete(history, { maxTokens: 32, temperature: 0 })
+      assert.equal(sentReasoning(forced.seen[0]!), 'read a first')
+    } finally {
+      await forced.close()
+    }
+
+    // A server that rejects the field makes one failed request; the field is
+    // dropped from then on and the request succeeds.
+    const rejects = await serve([
+      { status: 400, body: JSON.stringify({ error: { message: 'Unrecognized field: reasoning_content' } }) },
+      { status: 200, body: fixture('openai-chat.json') },
+      { status: 200, body: fixture('openai-chat.json') },
+    ])
+    try {
+      const provider = new OpenAiProvider({ ...role('openai-compatible', ''), baseUrl: rejects.base, reasoningEcho: true }, fast, 'run-r')
+      await provider.complete(history, { maxTokens: 32, temperature: 0 })
+      assert.equal(sentReasoning(rejects.seen[1]!), undefined)
+    } finally {
+      await rejects.close()
+    }
+  } finally {
+    delete process.env.HY_TEST_API_KEY
+  }
 })
 
 test('OpenAI-compatible: prompt cache usage is parsed', async () => {
@@ -309,7 +361,7 @@ test('Gemini: Interactions API shape; thinking counts as output; key never in th
     const p = new GeminiProvider(role('gemini', s.base), fast)
     const r = await p.complete(messages, { maxTokens: 77, temperature: 0 })
     assert.equal(r.content, '{"final":"ok"}', 'text blocks of model_output steps; thought steps ignored')
-    assert.deepEqual(r.usage, { inputTokens: 523, outputTokens: 127 })
+    assert.deepEqual(r.usage, { inputTokens: 523, outputTokens: 127, cacheHitTokens: 0, cacheMissTokens: 523 })
     const first = s.seen[0]!
     assert.equal(first.url, '/interactions')
     assert.equal(first.headers['x-goog-api-key'], 'g-test')
@@ -324,6 +376,101 @@ test('Gemini: Interactions API shape; thinking counts as output; key never in th
     delete process.env.HY_TEST_API_KEY
     await s.close()
   }
+})
+
+test('Gemini: native tools, function_call steps, thought summaries, and empty assistant filtering', async () => {
+  process.env.HY_TEST_API_KEY = 'g-test'
+  const s = await serve([
+    {
+      status: 200,
+      body: JSON.stringify({
+        steps: [
+          { type: 'thought', summary: [{ type: 'text', text: 'Checking file status first.' }] },
+          { type: 'function_call', name: 'read_file', arguments: { path: 'a.txt' }, id: 'fc-1' },
+        ],
+        usage: { total_input_tokens: 100, total_output_tokens: 20, total_thought_tokens: 30 },
+      }),
+    },
+  ])
+  try {
+    const p = new GeminiProvider(role('gemini', s.base), fast)
+    const r = await p.complete(
+      [
+        ...messages,
+        { role: 'assistant', content: '' },
+        { role: 'user', content: 'retry prompt' },
+      ],
+      {
+        maxTokens: 128,
+        temperature: 0,
+        tools: [{ name: 'read_file', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } } } }],
+      },
+    )
+    assert.equal(r.content, '')
+    assert.equal(r.reasoning, 'Checking file status first.')
+    assert.deepEqual(r.toolCalls, [{ name: 'read_file', args: { path: 'a.txt' }, id: 'fc-1' }])
+    assert.deepEqual(r.usage, { inputTokens: 100, outputTokens: 50 })
+    const sent = s.seen[0]!.body
+    assert.equal(sent.input, 'USER:\ndo it\n\nUSER:\nretry prompt\n\nASSISTANT:', 'empty assistant messages are omitted from input')
+    assert.deepEqual(sent.tools, [
+      {
+        type: 'function',
+        name: 'read_file',
+        description: 'Read a file',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } },
+      },
+    ])
+  } finally {
+    delete process.env.HY_TEST_API_KEY
+    await s.close()
+  }
+})
+
+test('Gemini continues with typed results, accounts for cache and reseeds rewritten history', async () => {
+  const s = await serve([
+    { status: 200, body: JSON.stringify({ id: 'i1', steps: [{ type: 'function_call', id: 'c1', name: 'read_file', arguments: { path: 'a' } }], usage: { total_input_tokens: 80, total_cached_tokens: 0 } }) },
+    { status: 200, body: JSON.stringify({ id: 'i2', usage: { total_input_tokens: 100, total_cached_tokens: 80 } }) },
+    { status: 200, body: JSON.stringify({ usage: { total_input_tokens: 10 } }) },
+  ])
+  try {
+    const p = new GeminiProvider({ ...role('gemini', s.base), apiKey: 'fixture' }, fast)
+    const options = { maxTokens: 100, temperature: 0 }
+    const first = await p.complete(messages, options)
+    assert.equal(first.usage.cacheHitTokens, 0)
+    const content = '{"tool":"read_file","args":{"path":"a"}}'
+    const rendered = 'TOOL RESULT (read_file): content'
+    const history: ChatMessage[] = [...messages, {
+      role: 'assistant', content, gemini: { ...first.gemini!, content },
+    }, {
+      role: 'user', content: rendered + '\n\nNew context',
+      toolResults: { rendered, entries: [{ id: 'c1', name: 'read_file', text: rendered }] },
+    }]
+    const second = await p.complete(history, options)
+    assert.equal(second.usage.cacheHitTokens, 80)
+    assert.equal(second.usage.cacheMissTokens, 20)
+    assert.equal(s.seen[1]!.body.previous_interaction_id, 'i1')
+    assert.deepEqual(s.seen[1]!.body.input, [
+      { type: 'function_result', name: 'read_file', call_id: 'c1', result: [{ type: 'text', text: rendered }] },
+      { type: 'user_input', content: [{ type: 'text', text: 'New context' }] },
+    ])
+    history[1] = { role: 'user', content: 'Compacted history' }
+    const third = await p.complete(history, options)
+    assert.equal(s.seen[2]!.body.previous_interaction_id, undefined)
+    assert.equal(typeof s.seen[2]!.body.input, 'string')
+    assert.equal(third.usage.cacheHitTokens, undefined)
+  } finally {
+    await s.close()
+  }
+})
+
+test('repetitionStart detects multi-sentence reasoning loops up to 512 chars', () => {
+  const unit =
+    'Need maybe include logs/memory_watchdog.log file. Need maybe include scratch/ability_retention/ directory. Need maybe include checkpoints/v3_1/rebuild_a_v1_colab/g3cv/ directory. Need maybe include scratch/matrix_next_20261109/ directory. '
+  assert.ok(unit.length > 200 && unit.length <= 512)
+  const prefix = 'Normal reasoning about worker scope.\n'
+  const text = prefix + unit.repeat(25)
+  const cut = repetitionStart(text)
+  assert.equal(cut, prefix.length + unit.length)
 })
 
 test('backoff doubles up to the cap, with ±25% jitter', async () => {
@@ -412,11 +559,12 @@ test('OpenAI-compatible: native tools replace response_format; string arguments 
   }
 })
 
-test('OpenAI-compatible: gpt-6.1-terra omits reasoning_effort when tools are sent', async () => {
+test('OpenAI-compatible: a registered effort/tool conflict omits reasoning_effort', async () => {
   process.env.HY_TEST_API_KEY = 'k'
   const s = await serve([{ status: 200, body: fixture('openai-tool-calls.json') }])
   try {
-    await new OpenAiProvider({ ...role('openai-compatible', s.base), model: 'gpt-6.1-terra' }, fast).complete(messages, {
+    setModelRegistry([{ id: 'x', provider: 'openai-compatible', model: 'strict-model', label: 'S', compat: { effortWithTools: false } }])
+    await new OpenAiProvider({ ...role('openai-compatible', s.base), model: 'strict-model' }, fast).complete(messages, {
       maxTokens: 64,
       temperature: 0,
       effort: 'high',
@@ -426,6 +574,7 @@ test('OpenAI-compatible: gpt-6.1-terra omits reasoning_effort when tools are sen
     assert.equal(s.seen[0]!.body.reasoning_effort, undefined)
     assert.ok(s.seen[0]!.body.tools)
   } finally {
+    setModelRegistry([])
     delete process.env.HY_TEST_API_KEY
     await s.close()
   }
@@ -514,6 +663,7 @@ test('CP-18: the OpenAI-compatible adapter streams deltas and assembles the repl
       chunk({ content: 'lo' })
       chunk({ reasoning_content: 'think' })
       chunk({ tool_calls: [{ index: 0, function: { name: 'read_file', arguments: '{"path":"a"}' } }] })
+      res.write(`data: ${JSON.stringify({ choices: [{ finish_reason: 'length' }] })}\n\n`)
       res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 2 } })}\n\n`)
       res.write('data: [DONE]\n\n')
       res.end()
@@ -546,6 +696,7 @@ test('CP-18: the OpenAI-compatible adapter streams deltas and assembles the repl
     assert.equal(completion.content, 'Hello')
     assert.equal(completion.reasoning, 'think')
     assert.deepEqual(completion.toolCalls, [{ name: 'read_file', args: { path: 'a' } }])
+    assert.equal(completion.outputLimited, true)
     assert.deepEqual(completion.usage, { inputTokens: 10, outputTokens: 2 })
     assert.deepEqual(deltas, [{ content: 'Hel' }, { content: 'lo' }, { reasoning: 'think' }])
   } finally {
@@ -675,5 +826,160 @@ test('CP-18: a streaming request retries 503 and 429 before the stream starts; 4
     assert.equal(calls, 1)
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+const sentReasoning = (seen: Seen): unknown =>
+  (seen.body.messages as Array<{ role: string; reasoning_content?: string }>).find((m) => m.role === 'assistant')?.reasoning_content
+
+test('a 400-learned field drop is shared by later providers of the same endpoint', async () => {
+  process.env.HY_TEST_API_KEY = 'sk-test'
+  resetProviderStates()
+  const s = await serve([
+    { status: 400, body: JSON.stringify({ error: { message: 'temperature is not supported for this model' } }) },
+    { status: 200, body: fixture('openai-chat.json') },
+  ])
+  try {
+    const sharedRole = { ...role('openai-compatible', s.base), model: 'shared-drop' }
+    await new OpenAiProvider(sharedRole, fast).complete(messages, { maxTokens: 32, temperature: 0.5 })
+    assert.equal(s.seen[0]!.body.temperature, 0.5, 'the first request tries temperature')
+    // A new turn builds a new provider: it starts from what the first learned.
+    await new OpenAiProvider(sharedRole, fast).complete(messages, { maxTokens: 32, temperature: 0.5 })
+    assert.equal(s.seen.length, 3, 'the second provider did not provoke another 400')
+    assert.equal(s.seen[2]!.body.temperature, undefined)
+  } finally {
+    resetProviderStates()
+    delete process.env.HY_TEST_API_KEY
+    await s.close()
+  }
+})
+
+test('reasoning echo learned by one provider is used by the next provider of the same endpoint', async () => {
+  process.env.HY_TEST_API_KEY = 'sk-test'
+  resetProviderStates()
+  const answer = {
+    status: 200,
+    body: JSON.stringify({ choices: [{ message: { content: 'ok', reasoning_content: 'thought' } }], usage: { prompt_tokens: 5, completion_tokens: 1 } }),
+  }
+  const history = [
+    ...messages,
+    { role: 'assistant' as const, content: '{"tool":"read_file","args":{"path":"a"}}', reasoning: 'read a first' },
+    { role: 'user' as const, content: 'TOOL RESULT (read_file):\nx' },
+  ]
+  const s = await serve([answer, answer, answer])
+  try {
+    const sharedRole = { ...role('openai-compatible', s.base), model: 'shared-echo' }
+    await new OpenAiProvider(sharedRole, fast).complete(messages, { maxTokens: 32, temperature: 0 })
+    assert.equal(sentReasoning(s.seen[0]!), undefined, 'nothing is echoed before the endpoint returns reasoning')
+    const second = new OpenAiProvider(sharedRole, fast)
+    await second.complete(history, { maxTokens: 32, temperature: 0 })
+    assert.equal(sentReasoning(s.seen[1]!), 'read a first', 'the next provider echoes without learning again')
+    const explicitOff = new OpenAiProvider({ ...sharedRole, reasoningEcho: false }, fast)
+    await explicitOff.complete(history, { maxTokens: 32, temperature: 0 })
+    assert.equal(sentReasoning(s.seen[2]!), undefined, 'an explicit role setting wins over what was learned')
+  } finally {
+    resetProviderStates()
+    delete process.env.HY_TEST_API_KEY
+    await s.close()
+  }
+})
+
+test('createProvider settles the whole reservation when the endpoint reports no usage', async () => {
+  process.env.HY_TEST_API_KEY = 'sk-test'
+  const s = await serve([{ status: 200, body: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }])
+  try {
+    const reserved: number[] = []
+    const settled: number[] = []
+    const result = await withModelBudget(
+      (maximum) => {
+        reserved.push(maximum)
+        return (amount: number) => {
+          settled.push(amount)
+        }
+      },
+      () =>
+        createProvider({ ...role('openai-compatible', s.base), pricing: { inputPerMTokUsd: 1, outputPerMTokUsd: 2 } }, process.cwd()).complete(
+          messages,
+          { maxTokens: 8, temperature: 0 },
+        ),
+    )
+    assert.equal(result.content, 'ok')
+    assert.equal(reserved.length, 1)
+    assert.deepEqual(settled, reserved, 'the reservation is charged in full, not left checked out')
+  } finally {
+    delete process.env.HY_TEST_API_KEY
+    await s.close()
+  }
+})
+
+test('a degenerate stream also settles its reservation', async () => {
+  process.env.HY_TEST_API_KEY = 'sk-test'
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"tool":"shell","args":{"command":"dir"}}' } }] })}\n\n`)
+      const timer = setInterval(() => res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: ']}}' } }] })}\n\n`), 0)
+      res.on('close', () => clearInterval(timer))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const { port } = server.address() as AddressInfo
+  try {
+    const reserved: number[] = []
+    const settled: number[] = []
+    const result = await withModelBudget(
+      (maximum) => {
+        reserved.push(maximum)
+        return (amount: number) => {
+          settled.push(amount)
+        }
+      },
+      () =>
+        createProvider(
+          {
+            provider: 'openai-compatible',
+            model: 'm',
+            baseUrl: `http://127.0.0.1:${port}`,
+            apiKey: 'k',
+            contextWindowTokens: 10_000,
+            maxOutputTokens: 100,
+            pricing: { inputPerMTokUsd: 1, outputPerMTokUsd: 1 },
+          },
+          process.cwd(),
+        ).complete([{ role: 'user', content: 'hi' }], { maxTokens: 8, temperature: 0, onDelta: () => undefined }),
+    )
+    assert.equal(result.degenerate, 'repetition')
+    assert.deepEqual(settled, reserved)
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+test('under a USD budget a 503 is retried, not failed (a 5xx is assumed unbilled)', async () => {
+  process.env.HY_TEST_API_KEY = 'sk-test'
+  const s = await serve([
+    { status: 503, body: 'busy' },
+    { status: 200, body: JSON.stringify({ choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 10, completion_tokens: 2 } }) },
+  ])
+  try {
+    const settled: number[] = []
+    const result = await withModelBudget(
+      () => (amount: number) => {
+        settled.push(amount)
+      },
+      () =>
+        createProvider({ ...role('openai-compatible', s.base), pricing: { inputPerMTokUsd: 1, outputPerMTokUsd: 1 } }, process.cwd()).complete(
+          messages,
+          { maxTokens: 8, temperature: 0 },
+        ),
+    )
+    assert.equal(result.content, 'ok')
+    assert.equal(s.seen.length, 2, 'the 5xx was retried')
+    assert.equal(settled.length, 1, 'the successful attempt was settled once')
+  } finally {
+    delete process.env.HY_TEST_API_KEY
+    await s.close()
   }
 })

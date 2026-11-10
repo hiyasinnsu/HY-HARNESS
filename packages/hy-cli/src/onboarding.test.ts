@@ -45,6 +45,14 @@ test('a fresh install has no onboarding state and nothing is applied', () => {
 
 test('the three choices are validated, saved and applied to the next start', () => {
   const root = workspace()
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-onboarding-cfg-'))
+  const savedConfigDir = process.env.HY_CONFIG_DIR
+  process.env.HY_CONFIG_DIR = configDir
+  // Model facts are user data: register the model the way a user would.
+  fs.writeFileSync(
+    path.join(configDir, 'config.json'),
+    JSON.stringify({ models: [{ id: 'mini', name: 'Gateway mini', provider: 'openai-compatible', model: 'gpt-4.1-mini', contextWindowTokens: 128_000, maxOutputTokens: 8_192 }] }),
+  )
   try {
     const config = configFor(root)
     const state = writeOnboarding(config.stateDir, {
@@ -67,9 +75,13 @@ test('the three choices are validated, saved and applied to the next start', () 
     assert.equal(next.role.model, 'gpt-4.1-mini')
     assert.equal(next.role.baseUrl, 'https://gateway.example/v1')
     assert.equal(next.role.apiKeyEnv, 'OPENAI_API_KEY')
-    // A catalog model brings the catalog's limits with it.
-    assert.equal(next.role.contextWindowTokens, 1_047_576)
+    // A registered model brings its own limits with it.
+    assert.equal(next.role.contextWindowTokens, 128_000)
+    assert.equal(next.role.maxOutputTokens, 8_192)
   } finally {
+    if (savedConfigDir === undefined) delete process.env.HY_CONFIG_DIR
+    else process.env.HY_CONFIG_DIR = savedConfigDir
+    fs.rmSync(configDir, { recursive: true, force: true })
     fs.rmSync(path.dirname(root), { recursive: true, force: true })
   }
 })

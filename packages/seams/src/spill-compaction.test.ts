@@ -8,7 +8,9 @@ import {
   Ledger,
   SessionLog,
   ToolRuntime,
+  estimateTokens,
   readEvents,
+  rebuildHistory,
   type ChatMessage,
   type Completion,
   type LlmProvider,
@@ -77,12 +79,15 @@ test('tier 1 prunes old tool outputs to locators and keeps recent ones', async (
   const dir = tmp()
   try {
     const log = new SessionLog(path.join(dir, 'session.v1.jsonl'))
+    log.setRun('run-prune')
+    const notices: unknown[] = []
     const sc = new SpillCompaction({
       spillDir: path.join(dir, 'spill'),
       sessionId: log.sessionId,
       contextWindowTokens: 10_000,
       keepRecentTurns: 2,
       log,
+      onResult: (event) => notices.push(event.payload),
     })
     const worker = new ScriptedProvider(
       (i) => (i < 5 ? `{"tool":"read_file","args":{"path":"f${i}.txt"}}` : '{"final":"done"}'),
@@ -95,17 +100,35 @@ test('tier 1 prunes old tool outputs to locators and keeps recent ones', async (
       workspaceRoot: dir,
       context: sc,
     })
-    await agent.run('read the files')
+    const result = await agent.run('read the files')
     const last = worker.requests.at(-1)!
     assertPairsIntact(last)
     const results = last.filter((m) => m.content.startsWith('TOOL RESULT'))
     assert.equal(results.length, 5)
     assert.equal(results.filter((m) => m.content.includes('[pruned to save context')).length, 3)
-    const locator = /spill:\/\/[\w-]+\/[\w.-]+/.exec(results[0]!.content)![0]
+    const locator = /spill:\/\/[\w-]+\/[\w.-]+/.exec(results.find((message) => message.content.includes('[pruned to save context'))!.content)![0]
     const file = path.join(dir, 'spill', `${locator.slice('spill://'.length)}.txt`)
     // The pruned tool result (JSON) is kept on disk in full.
     assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).content, 'line\n'.repeat(400))
     assert.ok(readEvents(log.file).some((e) => e.type === 'compaction/prune'))
+    assert.deepEqual(notices, [{ outcome: 'shortened' }])
+    assert.deepEqual(rebuildHistory(readEvents(log.file), 'run-prune'), result.history)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('tier 1 keeps the original prefix when newer tool results can make enough room', async () => {
+  const dir = tmp()
+  try {
+    const sc = new SpillCompaction({ spillDir: dir, sessionId: 's', contextWindowTokens: 10_000 })
+    const messages = longSession().map((message) => message.content.startsWith('TOOL RESULT')
+      ? { ...message, content: message.content.repeat(20) }
+      : message)
+    const compacted = await sc.beforeRequest(messages, 7_600)
+    assert.deepEqual(compacted.slice(0, 6), messages.slice(0, 6), 'the leading tool history stays byte-identical')
+    assert.notDeepEqual(compacted.slice(6, -4), messages.slice(6, -4), 'eligible results later in history were pruned')
+    assert.deepEqual(compacted.slice(-4), messages.slice(-4), 'recent results stay available')
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -263,6 +286,32 @@ function longSession(): ChatMessage[] {
   return messages
 }
 
+test('a compatible compactor replays the original native prefix only when needed', async () => {
+  const dir = tmp()
+  try {
+    const messages = longSession()
+    const tools = [{ name: 'read_file', description: 'read a file', parameters: { type: 'object' } }]
+    const provider = new ScriptedProvider(() => '{"summary":"replayed"}')
+    const sc = new SpillCompaction({
+      spillDir: dir, sessionId: 's', contextWindowTokens: 1_000,
+      compactor: {
+        name: provider.name,
+        complete: (prompt, options) => {
+          assert.deepEqual(options.tools, tools)
+          return provider.complete(prompt)
+        },
+      },
+    })
+    sc.afterResponse(messages, { usage: { inputTokens: 900 } }, tools)
+    assert.equal(provider.requests.length, 0)
+    const compacted = await sc.beforeRequest(messages, 900, tools)
+    assert.deepEqual(provider.requests[0]!.slice(0, -1), messages.slice(0, -4))
+    assert.match(compacted[1]!.content, /replayed/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('CP-22: a failing compactor keeps the tier-1 result and reports it', async () => {
   const dir = tmp()
   try {
@@ -378,6 +427,143 @@ test('CP-22: afterResponse without a compactor or below the trigger does nothing
     })
     withCompactor.afterResponse(longSession(), { usage: { inputTokens: 100 } })
     // Nothing throws and nothing is cached: the next request computes synchronously.
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('beforeRequest compacts on Step 1 (lastInputTokens === 0) when messages exceed trigger', async () => {
+  const dir = tmp()
+  try {
+    const log = new SessionLog(path.join(dir, 'session.v1.jsonl'))
+    const compactor = {
+      name: 'step1-compactor',
+      complete: async () => ({ content: '{"summary":"compacted at step 1"}', usage: { inputTokens: 0, outputTokens: 0 } }),
+    }
+    const sc = new SpillCompaction({
+      spillDir: path.join(dir, 'spill'),
+      sessionId: log.sessionId,
+      contextWindowTokens: 1_000,
+      keepRecentTurns: 2,
+      compactor: compactor as never,
+      log,
+    })
+    const messages: ChatMessage[] = [
+      { role: 'system', content: 'system prompt' },
+      { role: 'user', content: 'initial objective' },
+      ...Array.from({ length: 10 }, (_, i) => [
+        { role: 'assistant' as const, content: `{"tool":"read_file","args":{"path":"f${i}.txt"}}` },
+        { role: 'user' as const, content: `TOOL RESULT (read_file):\n${'result line '.repeat(100)}` },
+      ]).flat(),
+    ]
+    const out = await sc.beforeRequest(messages, 0)
+    assert.ok(out.length < messages.length, 'compacted older messages at Step 1')
+    assert.ok(out.some((m) => m.content.includes('<session_summary>') && m.content.includes('compacted at step 1')), 'summary injected')
+    assert.ok(readEvents(log.file).some((e) => e.type === 'compaction/prune' || e.type === 'compaction/summary'))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/** 8 steps whose tool results are `size` ASCII characters each. */
+function toolSession(size: number): ChatMessage[] {
+  const messages: ChatMessage[] = [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'objective' },
+  ]
+  for (let i = 0; i < 8; i++) {
+    messages.push({ role: 'assistant', content: `{"tool":"read_file","args":{"path":"f${i}.txt"}}` })
+    messages.push({ role: 'user', content: `TOOL RESULT (read_file):\n${'a'.repeat(size)}-${i}` })
+  }
+  return messages
+}
+
+/**
+ * A window below the messages' estimate (tier 1's target) yet above their
+ * trigger, so `beforeRequest` alone leaves them alone and only a forced
+ * compaction has work to do.
+ */
+function forcedWindow(messages: ChatMessage[]): number {
+  const estimated = Math.ceil(estimateTokens(messages.map((m) => m.content).join('\n')) * 1.35)
+  return Math.ceil(estimated / 0.7)
+}
+
+test('forceCompact prunes below the trigger and leaves recent results alone', async () => {
+  const dir = tmp()
+  try {
+    const log = new SessionLog(path.join(dir, 'session.v1.jsonl'))
+    log.setRun('run-force')
+    const notices: unknown[] = []
+    const messages = toolSession(600)
+    const sc = new SpillCompaction({
+      spillDir: path.join(dir, 'spill'),
+      sessionId: log.sessionId,
+      contextWindowTokens: forcedWindow(messages),
+      keepRecentTurns: 2,
+      log,
+      onResult: (event) => notices.push(event.payload),
+    })
+    assert.deepEqual(await sc.beforeRequest(messages, 0), messages, 'below the trigger nothing is pruned')
+
+    const out = await sc.forceCompact(messages)
+    assertPairsIntact(out)
+    const results = out.filter((message) => message.content.startsWith('TOOL RESULT'))
+    assert.equal(results.length, 8)
+    assert.ok(results.some((message) => message.content.includes('[pruned to save context')), 'tier 1 ran without a trigger')
+    assert.deepEqual(out.slice(-4), messages.slice(-4), 'the recent results stay available')
+    assert.ok(!out.some((message) => message.content.includes('<session_summary>')), 'without a compactor only tier 1 runs')
+    assert.ok(readEvents(log.file).some((event) => event.type === 'compaction/prune'))
+    assert.deepEqual(notices, [{ outcome: 'shortened' }])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('forceCompact summarizes even when tier 1 already reached the target', async () => {
+  const dir = tmp()
+  try {
+    const log = new SessionLog(path.join(dir, 'session.v1.jsonl'))
+    log.setRun('run-force-summary')
+    const notices: unknown[] = []
+    const messages = toolSession(600)
+    const compactor = new ScriptedProvider(() => '{"summary":"forced summary"}')
+    const sc = new SpillCompaction({
+      spillDir: path.join(dir, 'spill'),
+      sessionId: log.sessionId,
+      contextWindowTokens: forcedWindow(messages),
+      keepRecentTurns: 2,
+      compactor,
+      log,
+      onResult: (event) => notices.push(event.payload),
+    })
+    const out = await sc.forceCompact(messages)
+    assert.equal(compactor.requests.length, 1, 'the compactor ran although pruning was below the trigger')
+    assert.ok(out.some((message) => message.content.includes('<session_summary>') && message.content.includes('forced summary')))
+    assert.ok(readEvents(log.file).some((event) => event.type === 'compaction/summary'))
+    assert.deepEqual(notices, [{ outcome: 'summarized' }])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('forceCompact returns the input unchanged when compaction fails', async () => {
+  const dir = tmp()
+  try {
+    // A file where the spill directory belongs makes the tier-1 spill throw.
+    fs.writeFileSync(path.join(dir, 'spill'), '')
+    const log = new SessionLog(path.join(dir, 'session.v1.jsonl'))
+    log.setRun('run-force-fail')
+    const messages = toolSession(600)
+    const sc = new SpillCompaction({
+      spillDir: path.join(dir, 'spill'),
+      sessionId: log.sessionId,
+      contextWindowTokens: forcedWindow(messages),
+      keepRecentTurns: 2,
+      log,
+    })
+    const out = await sc.forceCompact(messages)
+    assert.deepEqual(out, messages, 'the retry can resend the original history')
+    assert.ok(readEvents(log.file).some((event) => event.type === 'compaction/failed'))
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

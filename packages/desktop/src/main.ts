@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray, type MenuItemConstructorOptions } from 'electron'
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { FileHashCache } from './file-hash.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -310,9 +310,7 @@ function isPortableExe(file: string): boolean {
   }
 }
 
-function fileHash(file: string): string {
-  return createHash('sha256').update(fs.readFileSync(file)).digest('hex')
-}
+const fileHashes = new FileHashCache()
 
 /**
  * The `.sha256` sidecar written by the fetcher, when it is next to the staged
@@ -333,7 +331,7 @@ type UpdateEvaluation =
   | { ok: false; error: string; reason?: 'unsupported' | 'none' | 'same' | 'downgrade'; newest?: UpdateCandidateView | undefined }
 
 /** Finds the staged build the self-update would apply, without applying it. */
-function evaluateUpdate(): UpdateEvaluation {
+async function evaluateUpdate(fresh = false): Promise<UpdateEvaluation> {
   const portable = process.env.PORTABLE_EXECUTABLE_FILE
   if (!portable) return { ok: false, reason: 'unsupported', error: 'self-update is only available in the portable exe' }
   const current = path.resolve(portable)
@@ -343,18 +341,19 @@ function evaluateUpdate(): UpdateEvaluation {
   } catch {
     return { ok: false, error: `current exe is missing: ${current}` }
   }
-  let currentHash: string | undefined
-  const sameAsCurrent = (file: string, size: number): boolean => {
+  let currentHash: Promise<string> | undefined
+  const sameAsCurrent = async (file: string, size: number): Promise<boolean> => {
     if (size !== currentStat.size) return false
-    currentHash ??= fileHash(current)
-    return fileHash(file) === currentHash
+    currentHash ??= fileHashes.hash(current, fresh)
+    const currentDigest = await currentHash
+    return await fileHashes.hash(file, fresh) === currentDigest
   }
-  const evaluated: UpdateCandidateView[] = stagedUpdateCandidates()
-    .filter((candidate) => path.resolve(candidate.file).toLowerCase() !== current.toLowerCase() && isPortableExe(candidate.file))
-    .map((candidate) => {
-      const stat = fs.statSync(candidate.file)
-      return { ...candidate, mtime: stat.mtimeMs, same: sameAsCurrent(candidate.file, stat.size), info: readStagedInfo(candidate.file) }
-    })
+  const evaluated: UpdateCandidateView[] = []
+  for (const candidate of stagedUpdateCandidates()) {
+    if (path.resolve(candidate.file).toLowerCase() === current.toLowerCase() || !isPortableExe(candidate.file)) continue
+    const stat = fs.statSync(candidate.file)
+    evaluated.push({ ...candidate, mtime: stat.mtimeMs, same: await sameAsCurrent(candidate.file, stat.size), info: readStagedInfo(candidate.file) })
+  }
   const result = pickUpdate(app.getVersion(), currentStat.mtimeMs, evaluated)
   if (result.ok) return { ok: true, current, pick: result.pick }
   if (result.reason === 'downgrade') {
@@ -372,8 +371,8 @@ function evaluateUpdate(): UpdateEvaluation {
 }
 
 /** For the renderer's "update ready" banner: what would be applied, if anything. */
-function checkUpdate(): { available: boolean; version?: string; commit?: string; builtAt?: string; current: string; reason?: string } {
-  const evaluation = evaluateUpdate()
+async function checkUpdate(): Promise<{ available: boolean; version?: string; commit?: string; builtAt?: string; current: string; reason?: string }> {
+  const evaluation = await evaluateUpdate()
   if (!evaluation.ok) return { available: false, current: app.getVersion(), ...(evaluation.reason ? { reason: evaluation.reason } : {}) }
   const info = evaluation.pick.info
   return {
@@ -385,8 +384,8 @@ function checkUpdate(): { available: boolean; version?: string; commit?: string;
   }
 }
 
-function applyUpdate(): { ok: boolean; error?: string; from?: string } {
-  const evaluation = evaluateUpdate()
+async function applyUpdate(): Promise<{ ok: boolean; error?: string; from?: string }> {
+  const evaluation = await evaluateUpdate(true)
   if (!evaluation.ok) return { ok: false, error: evaluation.error }
   const current = evaluation.current
   const staged = evaluation.pick.file
@@ -397,7 +396,7 @@ function applyUpdate(): { ok: boolean; error?: string; from?: string } {
   const updaterSource = path.join(app.getAppPath(), 'packages', 'desktop', 'update.ps1')
   const registerSource = path.join(app.getAppPath(), 'packages', 'desktop', 'update-register.ps1')
   if (!fs.existsSync(updaterSource) || !fs.existsSync(registerSource)) {
-    return { ok: false, error: 'updater scripts are missing from the package' }
+    return { ok: false, error: 'The extracted update files are missing. Quit HY-HARNESS completely, then reopen the portable exe once to extract them again.' }
   }
   const updateDir = path.join(process.env.PUBLIC ?? 'C:\\Users\\Public', 'hy-harness-update')
   const script = path.join(updateDir, 'update.ps1')

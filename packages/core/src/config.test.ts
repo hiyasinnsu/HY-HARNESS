@@ -70,7 +70,7 @@ test('the OpenCode default uses the model output cap instead of 8K', () => {
   }
 })
 
-test('legacy OpenCode Go model names are migrated without touching DeepSeek-direct roles', () => {
+test('OpenCode Go model aliases and the mis-saved Gemini model recover without changing direct providers', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-opencode-model-'))
   const saved = process.env.HY_CONFIG_DIR
   try {
@@ -95,12 +95,20 @@ test('legacy OpenCode Go model names are migrated without touching DeepSeek-dire
             baseUrl: 'https://api.deepseek.com/v1',
             apiKeyEnv: 'DEEPSEEK_API_KEY',
           },
+          compactor: { provider: 'opencode', model: 'gemini-3.8-flash' },
+          orchestrator: { provider: 'gemini', model: 'gemini-3.8-flash' },
+          subagent: { provider: 'opencode', baseUrl: 'https://example.test/v1', model: 'gemini-3.8-flash' },
         },
       }),
     )
     const config = loadConfig({ cwd: ws })
     assert.equal(config.role.model, 'deepseek-v4.1-flash')
     assert.equal(config.graderRole.model, 'deepseek-flash', 'the DeepSeek API keeps its own model name')
+    // A saved model is not rewritten: an unavailable combination is reported when
+    // the user picks it (web-server validation), not silently replaced at load.
+    assert.equal(config.compactorRole.model, 'gemini-3.8-flash')
+    assert.equal(config.orchestratorRole.model, 'gemini-3.8-flash')
+    assert.equal(config.subagentRole.model, 'gemini-3.8-flash', 'custom gateways are unaffected')
   } finally {
     if (saved === undefined) delete process.env.HY_CONFIG_DIR
     else process.env.HY_CONFIG_DIR = saved
@@ -127,6 +135,7 @@ test('automation presets add opt-in MCP servers; explicit user servers win', () 
         automation: {
           browser: { enabled: true, headless: true },
           desktop: { enabled: true },
+          search: { enabled: true },
         },
       }),
     )
@@ -164,6 +173,25 @@ test('automation presets add opt-in MCP servers; explicit user servers win', () 
     assert.match(desktop.args?.[0] ?? '', /agent-desktop-mcp\.mjs$/)
     assert.equal(desktop.env?.ELECTRON_RUN_AS_NODE, '1')
     assert.ok(desktop.env?.AGENT_DESKTOP_BIN?.includes('agent-desktop'))
+
+    // RustXNG is auto-discovered and registered when the binary exists
+    const rustxng = defaults.mcpServers.rustxng
+    if (rustxng) {
+      assert.equal(rustxng.trusted, true)
+      assert.deepEqual(rustxng.args, ['mcp'])
+    }
+
+    // Opt-out test
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        automation: {
+          search: { enabled: false },
+        },
+      }),
+    )
+    const disabledConfig = loadConfig({ cwd: ws })
+    assert.equal(disabledConfig.mcpServers.rustxng, undefined, 'search: { enabled: false } disables rustxng')
   } finally {
     if (saved === undefined) delete process.env.HY_CONFIG_DIR
     else process.env.HY_CONFIG_DIR = saved
@@ -613,6 +641,31 @@ test('CP-19: every hook event survives loading, user hooks before trusted projec
   } finally {
     if (saved === undefined) delete process.env.HY_CONFIG_DIR
     else process.env.HY_CONFIG_DIR = saved
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('budget: maxCostUsd defaults to undefined (off) unless explicitly set', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-budget-test-'))
+  try {
+    const ws = path.join(dir, 'ws')
+    fs.mkdirSync(path.join(ws, '.hy-harness'), { recursive: true })
+    const configDefault = loadConfig({ cwd: ws, mock: true })
+    assert.equal(configDefault.budget.maxCostUsd, undefined, 'default budget must not impose a USD cap')
+
+    const configExplicit = loadConfig({ cwd: ws, mock: true, maxCostUsd: 5 })
+    assert.equal(configExplicit.budget.maxCostUsd, 5)
+
+    const configOff = loadConfig({ cwd: ws, mock: true, maxCostUsd: 'off' })
+    assert.equal(configOff.budget.maxCostUsd, undefined)
+
+    fs.writeFileSync(
+      path.join(ws, '.hy-harness', 'config.json'),
+      JSON.stringify({ budget4D: { maxCostUsd: 1.5 } }),
+    )
+    const configProject = loadConfig({ cwd: ws, mock: true, projectTrusted: true })
+    assert.equal(configProject.budget.maxCostUsd, 1.5)
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

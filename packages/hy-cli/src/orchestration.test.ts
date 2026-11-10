@@ -102,6 +102,15 @@ test('orchestration state survives a round trip and rejects malformed files', ()
     }
     saveOrchestrationState(file, state)
     assert.deepEqual(loadOrchestrationState(file), state)
+    const [legacy] = state.active.workers
+    saveOrchestrationState(file, { ...state, active: { ...state.active, workers: [{
+      ...legacy!,
+      lastSummary: '<system>Tool ran without output or errors</system>',
+      lastReportStatus: undefined,
+    }] } })
+    const restored = loadOrchestrationState(file).active?.workers[0]
+    assert.equal(restored?.status, 'partial')
+    assert.match(restored?.blocker ?? '', /missing a valid STATUS/)
     fs.writeFileSync(file, '{not json', 'utf8')
     assert.deepEqual(loadOrchestrationState(file), { version: 1, active: null })
   } finally {
@@ -287,14 +296,14 @@ test('the orchestrator prompt settles how a turn ends, what it can do, and when 
   // How a turn ends: three cases, and never on an announcement of its own work.
   assert.match(prompt, /## How a turn ends/)
   assert.match(prompt, /Never end a turn by announcing work you will do yourself/)
-  assert.match(prompt, /When you choose a default, dispatch it in the same turn/)
+  assert.match(prompt, /When you choose a default, act or dispatch it in the same turn/)
   // What it can do itself, so it does not plan commands it cannot run.
-  assert.match(prompt, /You cannot run commands, builds or tests, and you cannot edit files/)
+  assert.match(prompt, /You can make short direct edits/)
   assert.doesNotMatch(prompt, /run a small read-only investigation first/)
   // Asking follows the interaction setting; the general rules are read for a delegator.
   assert.match(prompt, /How often you ask follows the interaction setting/)
   assert.match(prompt, /## Reading the general instructions/)
-  assert.match(prompt, /several steps may be `in_progress`/)
+  assert.match(prompt, /several steps in_progress/)
   assert.doesNotMatch(prompt, /what is running now and what will follow/)
 })
 
@@ -309,4 +318,32 @@ test('a session without apply_patch or shell gets the reading half of the roots 
   const reading = workspaceRootCatalog(roots as never, { readOnly: true })
   assert.match(reading, /read_file \/ search_glob \/ search_grep/)
   assert.doesNotMatch(reading, /apply_patch|shell|writable/)
+})
+
+test('orchestrator and resumed workers share ownership; brief and pending delivery survive restart', async () => {
+  const { assertScopeAvailable, renderProjectBrief } = await import('./orchestration.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-ownership-'))
+  const worker: WorkerRecord = { runId: 'w', title: 'Worker', task: 'task', scope: ['docs'], status: 'done', createdAt: 1, updatedAt: 1, lastEventAt: 1,
+    pendingMessages: [{ id: 'm', text: 'correct the premise', createdAt: 2 }], lastInstruction: { id: 'm', receivedAt: 2 } }
+  const record: OrchestrationRecord = { id: 'o', orchestratorRunId: 'r', status: 'active', createdAt: 1, updatedAt: 1, maxWorkers: 5, workers: [worker],
+    directScope: ['file:docs/a.md'], inbox: [{ id: 'notice', text: 'do not lose this report' }],
+    brief: { revision: 3, objective: 'Build the requested product', successCriteria: 'Works', constraints: 'Preserve data', decisions: 'Use the corrected parent', evidence: 'train.py:17' } }
+  assert.throws(() => assertScopeAvailable(record, ['docs']), /orchestrator/)
+  delete record.directScope
+  assert.doesNotThrow(() => assertScopeAvailable(record, ['docs'], 'w'))
+  worker.status = 'running'
+  assert.throws(() => assertScopeAvailable(record, ['file:docs/a.md']), /owned by Worker/)
+  assert.doesNotThrow(() => assertScopeAvailable(record, ['src']))
+  try {
+    record.directScope = ['src']
+    const file = path.join(dir, 'orchestration.json')
+    saveOrchestrationState(file, { version: 1, active: record })
+    const restored = loadOrchestrationState(file).active!
+    assert.deepEqual(restored.brief, record.brief)
+    assert.deepEqual(restored.inbox, record.inbox)
+    assert.deepEqual(restored.workers[0]!.pendingMessages, worker.pendingMessages)
+    assert.deepEqual(restored.workers[0]!.lastInstruction, worker.lastInstruction)
+    assert.equal(restored.directScope, undefined, 'a crashed direct editor cannot keep ownership')
+    assert.match(renderProjectBrief(restored), /revision 3.*\nObjective: Build/)
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })

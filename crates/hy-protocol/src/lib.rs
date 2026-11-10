@@ -535,6 +535,11 @@ pub struct PatchApplyParams {
     /// every non-dry-run mutation; absent keeps `initialize`'s behavior.
     #[serde(default)]
     pub sandbox_mode: Option<SandboxMode>,
+    /// Text encoding of the files in this patch: `utf8` (default, BOM allowed),
+    /// `utf16le` or `utf16be`. The control plane sends it when it decoded the
+    /// file itself (`edit_file` on a UTF-16 document).
+    #[serde(default)]
+    pub encoding: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]

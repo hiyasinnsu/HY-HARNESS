@@ -1,10 +1,22 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { roleApiKey, type RoleConfig } from './config.js'
 import { isSteerMessage, steerText } from './steering.js'
-import { effortWithToolsFor, temperatureAllowedFor, tokenFieldFor } from './model-catalog.js'
+import { catalogForRole, effortWithToolsFor, reasoningEchoFor, tokenFieldFor } from './model-catalog.js'
+import {
+  normalizeUsage,
+  rejectedFields,
+  requestHeaders,
+  requestSignal,
+  sharedProviderState,
+  textOf,
+  type ProviderNegotiationState,
+  type RawUsage,
+} from './llm-negotiate.js'
 import { estimateTokens } from './tokens.js'
+import { redactGitHubSecrets } from './github.js'
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -17,6 +29,21 @@ export interface ChatMessage {
    * (DeepSeek `reasoning_content`).
    */
   reasoning?: string
+  /** Provider continuation metadata. Local history remains authoritative. */
+  gemini?: GeminiContinuation & { content: string }
+  toolResults?: { entries: NativeToolResult[]; rendered: string }
+}
+
+interface GeminiContinuation {
+  id: string
+  prefix: string
+  callIds: string[]
+}
+
+interface NativeToolResult {
+  id: string
+  name: string
+  text: string
 }
 
 export interface ImageInput {
@@ -64,6 +91,7 @@ export interface Usage {
 /** One tool call returned through a provider's native function-calling interface. */
 export interface ToolCall {
   name: string
+  id?: string
   /** Parsed arguments (OpenAI sends a JSON string; an unparsable one is kept as the string). */
   args: unknown
 }
@@ -75,6 +103,9 @@ export interface Completion {
   reasoning?: string
   /** Native function calls, when the request offered `tools`. */
   toolCalls?: ToolCall[]
+  /** The provider stopped at its output limit. A partial tool batch must never run. */
+  outputLimited?: true
+  gemini?: GeminiContinuation
   /**
    * Set when the harness cut the stream because the model fell into a loop
    * repeating a short fragment; `content` / `reasoning` end where the loop
@@ -85,12 +116,13 @@ export interface Completion {
 
 /** How long a run of one short repeated fragment may grow before the stream is cut. */
 export const REPETITION_LIMIT_CHARS = 4_000
-const REPETITION_MAX_PERIOD = 16
+const REPETITION_MAX_PERIOD = 512
 
 /**
  * Where a runaway repetition at the end of `text` begins: the tail is one
- * fragment of at most 16 chars repeated over at least 4,000 chars (e.g.
- * `]}}]}}]}}…`). Undefined when the tail is ordinary text.
+ * fragment of at most 512 chars repeated over at least 4,000 chars (e.g.
+ * `]}}]}}]}}…` or a repeated reasoning sentence). Undefined when the tail is
+ * ordinary text.
  */
 export function repetitionStart(text: string): number | undefined {
   if (text.length < REPETITION_LIMIT_CHARS) return undefined
@@ -132,12 +164,101 @@ function toolsField(tools: NativeToolDef[]) {
   return tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }))
 }
 
+function escapeStringControlChars(text: string): string {
+  let out = ''
+  let inString = false
+  let escape = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!
+    if (inString) {
+      if (escape) {
+        escape = false
+        out += c
+      } else if (c === '\\') {
+        escape = true
+        out += c
+      } else if (c === '"') {
+        inString = false
+        out += c
+      } else if (c === '\n') {
+        out += '\\n'
+      } else if (c === '\r') {
+        out += '\\r'
+      } else if (c === '\t') {
+        out += '\\t'
+      } else {
+        out += c
+      }
+      continue
+    }
+    if (c === '"') inString = true
+    out += c
+  }
+  return out
+}
+
+/**
+ * Recovers a JSON argument object when a model's tool-call arguments string has
+ * minor syntax noise: leaked template closing tags, raw newlines inside string
+ * literals, an extra closing brace (`{...}}`), or a second concatenated call
+ * after an accidentally escaped quote (`...\"}},{"tool":...`).
+ */
+export function parseLooseJsonObject(raw: string): Record<string, unknown> | undefined {
+  let s = raw.trim()
+  if (!s.startsWith('{')) return undefined
+  const cut = s.search(/<\/(?:｜|\||tool_calls?(?:[:>])|arg_value(?:[:>])|function(?:[:>])|invoke>|parameter>)/)
+  if (cut > 0) s = s.slice(0, cut).trimEnd()
+  const tryParse = (candidate: string): Record<string, unknown> | undefined => {
+    for (const variant of [candidate, escapeStringControlChars(candidate)]) {
+      try {
+        const parsed = JSON.parse(variant) as unknown
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as Record<string, unknown>
+        }
+      } catch {
+        // try next
+      }
+    }
+    return undefined
+  }
+  const direct = tryParse(s)
+  if (direct) return direct
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!
+    if (inString) {
+      if (escape) escape = false
+      else if (c === '\\') escape = true
+      else if (c === '"') inString = false
+      continue
+    }
+    if (c === '"') inString = true
+    else if (c === '{') depth += 1
+    else if (c === '}') {
+      depth -= 1
+      if (depth === 0) {
+        const first = tryParse(s.slice(0, i + 1))
+        if (first) return first
+        break
+      }
+    }
+  }
+  const concatMatch = /\\"\}\s*\}\s*,\s*\{\s*"tool"\s*:/.exec(s)
+  if (concatMatch && concatMatch.index > 0) {
+    const fromConcat = tryParse(`${s.slice(0, concatMatch.index)}"}`)
+    if (fromConcat) return fromConcat
+  }
+  return undefined
+}
+
 function parseArgs(raw: unknown): unknown {
   if (typeof raw !== 'string') return raw ?? {}
   try {
     return JSON.parse(raw)
   } catch {
-    return raw
+    return parseLooseJsonObject(raw) ?? raw
   }
 }
 
@@ -185,6 +306,12 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  * POSTs and returns the response text, retrying 429 and 5xx (honoring
  * `Retry-After`) and network errors with exponential backoff (design §9).
  * Other HTTP errors fail at once with `LlmError`.
+ *
+ * Retries are not suppressed when a USD budget is active: a 5xx or a failed
+ * connection is assumed not to have been billed, so retrying does not spend
+ * past the reservation. This is provider-dependent — a provider may bill a
+ * request that failed after it was received — hence the caller's settlement:
+ * a request that returns no usage is settled at the full reservation.
  */
 export async function postWithRetry(
   label: string,
@@ -222,7 +349,9 @@ export async function postWithRetry(
  * CP-18: opens a streaming POST, retrying like `postWithRetry` (429, 5xx,
  * network errors; `Retry-After` honoured) until the response is OK. Nothing
  * has been streamed before the status is known, so a retry cannot duplicate
- * output. Returns the open response; its body is the caller's to read.
+ * output. Returns the open response; its body is the caller's to read. The
+ * billing assumption behind retrying under a USD budget is stated on
+ * `postWithRetry`.
  */
 export async function openStreamWithRetry(
   label: string,
@@ -266,14 +395,16 @@ export class OllamaProvider implements LlmProvider {
   async complete(messages: ChatMessage[], options: CompleteOptions): Promise<Completion> {
     const text = await postWithRetry(
       'ollama',
-      `${this.baseUrl}/api/chat`,
+      `${this.baseUrl}${this.role.apiPath ?? '/api/chat'}`,
       {
-        headers: { 'Content-Type': 'application/json' },
+        headers: requestHeaders(this.role, '', { 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           model: this.role.model,
           messages: ollamaMessages(messages),
           stream: false,
-          think: false,
+          // Local reasoning models are opt-in: `think` stays off unless the
+          // role asks for it through `effort`.
+          think: options.effort !== undefined && options.effort !== 'none',
           // Constrained JSON and native tool calls exclude each other.
           ...(options.tools ? { tools: toolsField(options.tools) } : options.json === false ? {} : { format: 'json' }),
           options: {
@@ -283,19 +414,22 @@ export class OllamaProvider implements LlmProvider {
             // context window recorded in the role.
             num_ctx: this.role.contextWindowTokens,
           },
+          ...(this.role.extraBody ?? {}),
         }),
-        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        signal: requestSignal(options.signal, this.role.requestTimeoutMs),
       },
       this.retry,
     )
     const body = JSON.parse(text) as {
       message?: { content?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: unknown } }> }
+      done_reason?: string
       prompt_eval_count?: number
       eval_count?: number
     }
     const calls = (body.message?.tool_calls ?? []).filter((c) => c.function?.name)
     return {
       content: body.message?.content ?? '',
+      ...(body.done_reason === 'length' ? { outputLimited: true } : {}),
       usage: {
         inputTokens: body.prompt_eval_count ?? 0,
         outputTokens: body.eval_count ?? 0,
@@ -305,41 +439,26 @@ export class OllamaProvider implements LlmProvider {
   }
 }
 
-/** OpenAI's reasoning and GPT-5/6+ chat models require `max_completion_tokens`. */
-function openAiTokenField(provider: string, model: string): 'max_tokens' | 'max_completion_tokens' {
-  if (provider !== 'openai-compatible' && provider !== 'opencode' && provider !== 'openai-responses') return 'max_tokens'
-  // WP-41: the model catalog owns the quirk; unknown models keep the heuristic.
-  return tokenFieldFor(provider as RoleConfig['provider'], model)
-}
-
-/** A 400 saying the chosen token-limit parameter is not supported by this model. */
-function alternateTokenField(
-  field: 'max_tokens' | 'max_completion_tokens',
-  error: unknown,
-): 'max_tokens' | 'max_completion_tokens' | undefined {
-  if (!(error instanceof LlmError) || error.status !== 400) return undefined
-  const body = (error.body ?? error.message).toLowerCase()
-  if (!body.includes('unsupported') && !body.includes('not supported') && !body.includes('unknown')) return undefined
-  if (field === 'max_tokens' && body.includes('max_completion_tokens')) return 'max_completion_tokens'
-  if (field === 'max_completion_tokens' && body.includes('max_tokens')) return 'max_tokens'
-  return undefined
-}
-
-/** gpt-6.1-terra rejects reasoning_effort together with function tools. */
-function reasoningEffortConflict(error: unknown): boolean {
-  if (!(error instanceof LlmError) || error.status !== 400) return false
-  const body = (error.body ?? error.message).toLowerCase()
-  return body.includes('reasoning_effort') && body.includes('function tools')
-}
-
 export class OpenAiProvider implements LlmProvider {
   readonly name: string
   private readonly baseUrl: string
   private readonly apiKey: string
-  /** Set for models known to reject effort + tools, or after the first 400. */
+  /** Set for models the registry knows reject effort + tools. */
   private omitEffortWithTools: boolean
-  /** DeepSeek takes earlier reasoning back as `reasoning_content` (also through OpenCode). */
-  private readonly sendsReasoning: boolean
+  /**
+   * What this endpoint has taught the harness: rejected request fields and
+   * whether reasoning goes back. Shared per `${provider}|${baseUrl}|${model}`,
+   * so the provider of the next turn (or worker, or retry) starts from what
+   * earlier ones learned instead of provoking the same 400 again.
+   */
+  private readonly state: ProviderNegotiationState
+  /** The token-limit field the endpoint takes (switched after a 400). */
+  private tokenField: 'max_tokens' | 'max_completion_tokens'
+  /**
+   * Whether earlier reasoning is sent back as `reasoning_content`. Turned on
+   * by the first response that carries reasoning, unless the role says no.
+   */
+  private echoReasoning: boolean
 
   constructor(
     private readonly role: RoleConfig,
@@ -348,8 +467,12 @@ export class OpenAiProvider implements LlmProvider {
   ) {
     this.name = `${role.provider}:${role.model}`
     this.baseUrl = (role.baseUrl ?? 'https://api.openai.com/v1').replace(/\/+$/, '')
+    this.state = sharedProviderState(`${role.provider}|${this.baseUrl}|${role.model}`)
     this.omitEffortWithTools = !effortWithToolsFor(role.provider, role.model)
-    this.sendsReasoning = role.provider === 'deepseek' || /deepseek/i.test(role.model)
+    this.tokenField = tokenFieldFor(role.provider, role.model)
+    // An explicit role setting wins; then what earlier providers for this
+    // endpoint learned; then the model registry.
+    this.echoReasoning = role.reasoningEcho ?? this.state.echoReasoning ?? reasoningEchoFor(role.provider, role.model) ?? false
     const key = roleApiKey(role)
     if (!key) {
       throw new LlmError(
@@ -359,41 +482,93 @@ export class OpenAiProvider implements LlmProvider {
     this.apiKey = key
   }
 
+  /**
+   * The request body, shaped by the role, the model registry and what this
+   * endpoint has already rejected (see `learnFrom`).
+   */
+  private payload(messages: ChatMessage[], options: CompleteOptions, streaming: boolean): string {
+    const { drop } = this.state
+    const tokenField = drop.has('tokenField')
+      ? this.tokenField === 'max_tokens' ? 'max_completion_tokens' : 'max_tokens'
+      : this.tokenField
+    const json = options.json !== false && !options.tools && !drop.has('response_format')
+    // Echo reasoning once this endpoint has returned some, unless the role or
+    // the model registry says otherwise. A server that rejects the field makes
+    // the request fail once; `learnFrom` drops it from then on.
+    const echo = this.role.reasoningEcho ?? this.echoReasoning
+    return JSON.stringify({
+      model: this.role.model,
+      messages: openAiMessages(messages, echo && !drop.has('reasoning_content')),
+      ...(streaming ? { stream: true, ...(drop.has('stream_options') ? {} : { stream_options: { include_usage: true } }) } : {}),
+      [tokenField]: options.maxTokens,
+      ...(drop.has('temperature') ? {} : { temperature: options.temperature }),
+      // A learned "effort is rejected" applies to every request, not only tool calls.
+      ...(options.effort && !drop.has('effort') && !(options.tools && this.omitEffortWithTools) ? { reasoning_effort: options.effort } : {}),
+      ...(options.tools && !drop.has('tools') ? { tools: toolsField(options.tools) } : json ? { response_format: { type: 'json_object' } } : {}),
+      ...(this.role.extraBody ?? {}),
+    })
+  }
+
+  /** Records the fields a 400 rejected; true when anything new was learned. */
+  private learnFrom(error: unknown): boolean {
+    let learned = false
+    for (const field of rejectedFields(error)) {
+      if (this.state.drop.has(field)) continue
+      this.state.drop.add(field)
+      learned = true
+    }
+    return learned
+  }
+
+  /**
+   * The endpoint returned reasoning: send it back from now on. Shared, so the
+   * next provider for this endpoint echoes from its first request.
+   */
+  private learnReasoningEcho(): void {
+    this.echoReasoning = true
+    this.state.echoReasoning = true
+  }
+
+  private headers(extra: Record<string, string> = {}): Record<string, string> {
+    const opencodeSession = this.sessionId && (this.role.provider === 'opencode' || isOpenCodeHost(this.baseUrl))
+      ? `ses_${this.sessionId.replace(/^ses_/, '').replace(/[^a-zA-Z0-9_-]/g, '_')}`
+      : undefined
+    return requestHeaders(this.role, this.apiKey, { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` }, {
+      ...(opencodeSession ? { 'x-opencode-session': opencodeSession, 'User-Agent': 'HY-HARNESS/0.1.0' } : {}),
+      ...extra,
+    })
+  }
+
+  private chatUrl(): string {
+    return `${this.baseUrl}${this.role.apiPath ?? '/chat/completions'}`
+  }
+
 
   /**
    * CP-18: one streaming request. Parses `data:` chunks, emits deltas and
    * assembles the same `Completion` the non-streaming path returns.
    */
   private async completeStreaming(messages: ChatMessage[], options: CompleteOptions): Promise<Completion> {
-    const opencodeSession = this.sessionId && (this.role.provider === 'opencode' || isOpenCodeHost(this.baseUrl))
-      ? `ses_${this.sessionId.replace(/^ses_/, '').replace(/[^a-zA-Z0-9_-]/g, '_')}`
-      : undefined
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${this.apiKey}`,
-      Accept: 'text/event-stream',
-      ...(opencodeSession ? { 'x-opencode-session': opencodeSession, 'User-Agent': 'HY-HARNESS/0.1.0' } : {}),
-    }
-    const tokenField = openAiTokenField(this.role.provider, this.role.model)
-    const withTemperature = temperatureAllowedFor(this.role.provider, this.role.model)
-    const omitEffort = this.omitEffortWithTools
-    const body = JSON.stringify({
-      model: this.role.model,
-      messages: openAiMessages(messages, this.sendsReasoning),
-      stream: true,
-      stream_options: { include_usage: true },
-      [tokenField]: options.maxTokens,
-      ...(withTemperature ? { temperature: options.temperature } : {}),
-      ...(options.effort && !(options.tools && omitEffort) ? { reasoning_effort: options.effort } : {}),
-      ...(options.tools ? { tools: toolsField(options.tools) } : options.json === false ? {} : { response_format: { type: 'json_object' } }),
-    })
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(new Error('stream timed out')), 600_000)
+    const timeout = setTimeout(() => controller.abort(new Error('stream timed out')), this.role.requestTimeoutMs ?? 600_000)
     const signal = options.signal
       ? (typeof AbortSignal.any === 'function' ? AbortSignal.any([options.signal, controller.signal]) : options.signal)
       : controller.signal
     try {
-      const response = await openStreamWithRetry(this.role.provider, `${this.baseUrl}/chat/completions`, { headers, body, signal }, this.retry)
+      const open = () => openStreamWithRetry(
+        this.role.provider,
+        this.chatUrl(),
+        { headers: this.headers({ Accept: 'text/event-stream' }), body: this.payload(messages, options, true), signal },
+        this.retry,
+      )
+      let response: Awaited<ReturnType<typeof open>>
+      try {
+        response = await open()
+      } catch (error) {
+        // The endpoint named an optional field it does not take: drop it and retry once.
+        if (!this.learnFrom(error)) throw error
+        response = await open()
+      }
       const reader = response.body?.getReader()
       if (!reader) throw new LlmError(`${this.role.provider}: the streaming response has no body`)
       const decoder = new TextDecoder()
@@ -406,6 +581,7 @@ export class OpenAiProvider implements LlmProvider {
       // (a dropped connection, a proxy timeout): its partial answer must not
       // pass for a complete one.
       let finished = false
+      let outputLimited = false
       // A model stuck repeating one fragment (`]}}]}}…`) would stream until the
       // 600 s timer and fail the whole run; it is cut here instead, and the
       // agent retries the step.
@@ -440,13 +616,13 @@ export class OpenAiProvider implements LlmProvider {
           if (payload === '' || payload === '[DONE]') continue
           let chunk: {
             error?: { message?: string }
-            usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_cache_hit_tokens?: number; prompt_cache_miss_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } }
+            usage?: RawUsage
             choices?: Array<{
               finish_reason?: string | null
               delta?: {
-                content?: string | null
-                reasoning_content?: string | null
-                reasoning?: string | null
+                content?: unknown
+                reasoning_content?: unknown
+                reasoning?: unknown
                 tool_calls?: Array<{ index?: number; function?: { name?: string; arguments?: string } }>
               }
             }>
@@ -457,26 +633,23 @@ export class OpenAiProvider implements LlmProvider {
             continue
           }
           if (chunk.error?.message) throw new LlmError(`${this.role.provider}: ${chunk.error.message}`)
-          if (chunk.usage) {
-            const input = chunk.usage.prompt_tokens ?? 0
-            const hasCache = chunk.usage.prompt_cache_hit_tokens !== undefined || chunk.usage.prompt_cache_miss_tokens !== undefined || chunk.usage.prompt_tokens_details?.cached_tokens !== undefined
-            const cached = chunk.usage.prompt_cache_hit_tokens ?? chunk.usage.prompt_tokens_details?.cached_tokens ?? (chunk.usage.prompt_cache_miss_tokens !== undefined ? Math.max(0, input - chunk.usage.prompt_cache_miss_tokens) : 0)
-            usage = {
-              inputTokens: input,
-              outputTokens: chunk.usage.completion_tokens ?? 0,
-              ...(hasCache ? { cacheHitTokens: cached, cacheMissTokens: chunk.usage.prompt_cache_miss_tokens ?? Math.max(0, input - cached) } : {}),
-            }
+          if (chunk.usage) usage = normalizeUsage(chunk.usage)
+          if (chunk.choices?.[0]?.finish_reason) {
+            finished = true
+            outputLimited ||= /^(length|max_tokens)$/.test(chunk.choices[0].finish_reason)
           }
-          if (chunk.choices?.[0]?.finish_reason) finished = true
           const delta = chunk.choices?.[0]?.delta
           if (!delta) continue
-          if (typeof delta.content === 'string' && delta.content.length > 0) {
-            content += delta.content
-            options.onDelta?.({ content: delta.content })
+          const piece = textOf(delta.content)
+          if (piece.length > 0) {
+            content += piece
+            options.onDelta?.({ content: piece })
           }
-          const thought = delta.reasoning_content ?? delta.reasoning
-          if (typeof thought === 'string' && thought.length > 0) {
+          const thought = textOf(delta.reasoning_content) || textOf(delta.reasoning)
+          if (thought.length > 0) {
             reasoning += thought
+            // The endpoint returns reasoning: send it back on later requests.
+            if (this.role.reasoningEcho === undefined) this.learnReasoningEcho()
             options.onDelta?.({ reasoning: thought })
           }
           for (const [i, call] of (delta.tool_calls ?? []).entries()) {
@@ -508,6 +681,7 @@ export class OpenAiProvider implements LlmProvider {
       return {
         content,
         ...(reasoning.length > 0 ? { reasoning } : {}),
+        ...(outputLimited ? { outputLimited: true } : {}),
         usage,
         ...(toolCalls.length > 0 ? { toolCalls } : {}),
       }
@@ -518,93 +692,41 @@ export class OpenAiProvider implements LlmProvider {
   async complete(messages: ChatMessage[], options: CompleteOptions): Promise<Completion> {
     // CP-18: stream when the caller wants live deltas.
     if (options.onDelta) return this.completeStreaming(messages, options)
-    const opencodeSession = this.sessionId && (this.role.provider === 'opencode' || isOpenCodeHost(this.baseUrl))
-      ? `ses_${this.sessionId.replace(/^ses_/, '').replace(/[^a-zA-Z0-9_-]/g, '_')}`
-      : undefined
-    const headers = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${this.apiKey}`,
-      ...(opencodeSession ? { 'x-opencode-session': opencodeSession, 'User-Agent': 'HY-HARNESS/0.1.0' } : {}),
-    }
-    const payload = (
-      tokenField: 'max_tokens' | 'max_completion_tokens',
-      withTemperature: boolean,
-      omitEffort = this.omitEffortWithTools,
-    ): string =>
-      JSON.stringify({
-        model: this.role.model,
-        messages: openAiMessages(messages, this.sendsReasoning),
-        [tokenField]: options.maxTokens,
-        ...(withTemperature ? { temperature: options.temperature } : {}),
-        ...(options.effort && !(options.tools && omitEffort) ? { reasoning_effort: options.effort } : {}),
-        ...(options.tools ? { tools: toolsField(options.tools) } : options.json === false ? {} : { response_format: { type: 'json_object' } }),
-      })
-    const tokenField = openAiTokenField(this.role.provider, this.role.model)
-    // OpenAI's newest reasoning models only accept the default temperature.
-    const withTemperature = temperatureAllowedFor(this.role.provider, this.role.model)
+    const post = () => postWithRetry(
+      this.role.provider,
+      this.chatUrl(),
+      { headers: this.headers(), body: this.payload(messages, options, false), signal: requestSignal(options.signal, this.role.requestTimeoutMs) },
+      this.retry,
+    )
     let text: string
     try {
-      text = await postWithRetry(
-        this.role.provider,
-        `${this.baseUrl}/chat/completions`,
-        { headers, body: payload(tokenField, withTemperature), ...(options.signal !== undefined ? { signal: options.signal } : {}) },
-        this.retry,
-      )
+      text = await post()
     } catch (error) {
-      const alternate = alternateTokenField(tokenField, error)
-      const omitEffort = reasoningEffortConflict(error)
-      if (!alternate && !omitEffort) throw error
-      if (omitEffort) this.omitEffortWithTools = true
-      const nextField = alternate ?? tokenField
-      text = await postWithRetry(
-        this.role.provider,
-        `${this.baseUrl}/chat/completions`,
-        {
-          headers,
-          body: payload(nextField, nextField === 'max_tokens', omitEffort || this.omitEffortWithTools),
-          ...(options.signal !== undefined ? { signal: options.signal } : {}),
-        },
-        this.retry,
-      )
+      // The endpoint named an optional field it does not take: drop it and retry once.
+      if (!this.learnFrom(error)) throw error
+      text = await post()
     }
     const body = JSON.parse(text) as {
       choices?: Array<{
+        finish_reason?: string
         message?: {
-          content?: string | null
-          reasoning_content?: string | null
-          reasoning?: string | null
+          content?: unknown
+          reasoning_content?: unknown
+          reasoning?: unknown
           tool_calls?: Array<{ function?: { name?: string; arguments?: unknown } }>
         }
       }>
-      usage?: {
-        prompt_tokens?: number
-        completion_tokens?: number
-        prompt_cache_hit_tokens?: number
-        prompt_cache_miss_tokens?: number
-        prompt_tokens_details?: { cached_tokens?: number }
-      }
+      usage?: RawUsage
     }
     const message = body.choices?.[0]?.message
     const calls = (message?.tool_calls ?? []).filter((c) => c.function?.name)
-    const inputTokens = body.usage?.prompt_tokens ?? 0
-    const hasCache =
-      body.usage?.prompt_cache_hit_tokens !== undefined ||
-      body.usage?.prompt_cache_miss_tokens !== undefined ||
-      body.usage?.prompt_tokens_details?.cached_tokens !== undefined
-    const cacheHitTokens = body.usage?.prompt_cache_hit_tokens ?? body.usage?.prompt_tokens_details?.cached_tokens ?? (body.usage?.prompt_cache_miss_tokens !== undefined ? Math.max(0, inputTokens - body.usage.prompt_cache_miss_tokens) : 0)
-    const cacheMissTokens = body.usage?.prompt_cache_miss_tokens ?? Math.max(0, inputTokens - cacheHitTokens)
-    const reasoning = message?.reasoning_content?.trim()
-      ? message.reasoning_content
-      : message?.reasoning?.trim()
-        ? message.reasoning
-        : undefined
+    const reasoning = textOf(message?.reasoning_content) || textOf(message?.reasoning) || undefined
+    // The endpoint returns reasoning: send it back on later requests.
+    if (reasoning && this.role.reasoningEcho === undefined) this.learnReasoningEcho()
     return {
-      content: message?.content ?? '',
-      usage: {
-        inputTokens,
-        outputTokens: body.usage?.completion_tokens ?? 0,
-        ...(hasCache ? { cacheHitTokens, cacheMissTokens } : {}),
-      },
+      content: textOf(message?.content),
+      ...(/^(length|max_tokens)$/.test(body.choices?.[0]?.finish_reason ?? '') ? { outputLimited: true } : {}),
+      usage: normalizeUsage(body.usage),
       ...(reasoning ? { reasoning } : {}),
       ...(calls.length > 0 ? { toolCalls: calls.map((c) => ({ name: c.function!.name!, args: parseArgs(c.function!.arguments) })) } : {}),
     }
@@ -767,7 +889,10 @@ export class MockProvider implements LlmProvider {
     } else if (prompt.startsWith('CALL ')) {
       content = JSON.stringify(scriptedCall(prompt))
     } else if (/^TOOL (RESULT|ERROR) \(/.test(last) && stripContext(lastPrompt(messages)).startsWith('CALL ')) {
-      content = JSON.stringify({ final: `called: ${last.split('\n').join(' ').slice(0, 400)}` })
+      const report = messages[0]?.content.includes('# Worker role')
+        ? last.startsWith('TOOL ERROR ') ? 'STATUS: partial\nBLOCKED_BY: Tool failed\n\n' : 'STATUS: done\n\n'
+        : ''
+      content = JSON.stringify({ final: `${report}called: ${last.split('\n').join(' ').slice(0, 400)}` })
     } else if (prompt.startsWith('ASK ')) {
       content = JSON.stringify({ tool: 'ask_user', args: { question: prompt.slice(4) } })
     } else if (last.startsWith('TOOL RESULT (ask_user)') || last.startsWith('TOOL ERROR (ask_user)')) {
@@ -872,16 +997,21 @@ export class MockGuardianProvider implements LlmProvider {
   }
 }
 
+/** Gemini's official effort values; the harness's wider scale is mapped onto them. */
+function geminiThinkingLevel(effort: string | undefined): 'low' | 'medium' | 'high' | undefined {
+  if (effort === undefined || effort === 'none') return undefined
+  if (effort === 'minimal' || effort === 'low') return 'low'
+  if (effort === 'medium') return 'medium'
+  if (effort === 'high' || effort === 'xhigh' || effort === 'max') return 'high'
+  return undefined
+}
+
 /**
  * Gemini through the Interactions API (`POST /v1beta/interactions`,
  * verification/sources/gemini_thinking.txt and gemini_tokens.txt).
  *
- * Each request is a single-turn interaction: the system prompt goes in
- * `system_instruction` and the conversation is flattened into `input` with
- * role labels. Stateless multi-turn use would require resending every
- * `thought` block exactly as received, and the agent rewrites its history on
- * compaction; a single turn has no earlier model turns to carry. Usage counts
- * thinking as output, because thinking is billed as output.
+ * Continue an unchanged local prefix on the server. On resume, compaction,
+ * or an expired interaction, seed a new chain from the authoritative local history.
  */
 export class GeminiProvider implements LlmProvider {
   readonly name: string
@@ -902,49 +1032,118 @@ export class GeminiProvider implements LlmProvider {
   async complete(messages: ChatMessage[], options: CompleteOptions): Promise<Completion> {
     if (messages.some((m) => m.images?.length)) throw new LlmError('the Gemini adapter does not send images yet; use an Ollama or OpenAI-compatible vision model')
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n')
-    const turns = messages.filter((m) => m.role !== 'system')
-    const input =
+    // Drop empty assistant messages left behind by failed/empty steps so they
+    // do not appear as `ASSISTANT:\n\n` few-shot examples of an empty reply.
+    const turns = messages.filter((m) => m.role !== 'system' && !(m.role === 'assistant' && !m.content.trim()))
+    const prefix = (history: ChatMessage[]) => createHash('sha256').update(JSON.stringify([
+      this.baseUrl, this.role.model, system, history.map(({ role, content }) => [role, content]),
+    ])).digest('hex')
+    const anchor = turns.findLastIndex((m) => m.role === 'assistant')
+    const checkpoint = turns[anchor]?.gemini
+    const tail = turns.slice(anchor + 1)
+    const results = tail[0]?.toolResults
+    const continuing = checkpoint && checkpoint.content === turns[anchor]?.content &&
+      checkpoint.prefix === prefix(turns.slice(0, anchor)) && tail.length > 0 &&
+      tail.every((m) => m.role === 'user' && (!m.toolResults || m.content.startsWith(m.toolResults.rendered))) &&
+      checkpoint.callIds.length === (results?.entries.length ?? 0) &&
+      checkpoint.callIds.every((id, i) => id === results?.entries[i]?.id)
+    const continuationInput = tail.flatMap((message): unknown[] => {
+      const userInput = (text: string) => ({ type: 'user_input', content: [{ type: 'text', text }] })
+      if (!message.toolResults) return [userInput(message.content)]
+      const { entries, rendered } = message.toolResults
+      return [
+        ...entries.map(({ id, name, text }) => ({
+          type: 'function_result', name, call_id: id, result: [{ type: 'text', text }],
+        })),
+        ...(message.content.length > rendered.length ? [userInput(message.content.slice(rendered.length).trim())] : []),
+      ]
+    })
+    const fullInput = () =>
       turns.length === 1
         ? turns[0]!.content
         : turns.map((m) => `${m.role === 'user' ? 'USER' : 'ASSISTANT'}:\n${m.content}`).join('\n\n') + '\n\nASSISTANT:'
-    const text = await postWithRetry(
+    const send = (previous?: string) => postWithRetry(
       'gemini',
-      `${this.baseUrl}/interactions`,
+      `${this.baseUrl}${this.role.apiPath ?? '/interactions'}`,
       {
         // The key goes in a header, never in the URL.
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this.apiKey },
+        headers: requestHeaders(this.role, this.apiKey, { 'Content-Type': 'application/json', 'x-goog-api-key': this.apiKey }),
         body: JSON.stringify({
           model: this.role.model,
-          input,
+          input: previous ? continuationInput : fullInput(),
+          ...(previous ? { previous_interaction_id: previous } : {}),
           ...(system ? { system_instruction: system } : {}),
+          ...(options.tools && options.tools.length > 0
+            ? {
+                tools: options.tools.map((t) => ({
+                  type: 'function',
+                  name: t.name,
+                  description: t.description,
+                  parameters: t.parameters,
+                })),
+              }
+            : {}),
           // Caps thinking and output together; thinking_level selects the
           // official low/medium/high effort for Gemini 3.8 Flash.
           generation_config: {
             max_output_tokens: options.maxTokens,
-            ...(options.effort && /^(low|medium|high)$/.test(options.effort)
-              ? { thinking_level: options.effort }
-              : {}),
+            ...(geminiThinkingLevel(options.effort) ? { thinking_level: geminiThinkingLevel(options.effort) } : {}),
           },
+          ...(this.role.extraBody ?? {}),
         }),
-        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        signal: requestSignal(options.signal, this.role.requestTimeoutMs),
       },
       this.retry,
     )
-    const body = JSON.parse(text) as {
-      steps?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>
-      usage?: { total_input_tokens?: number; total_output_tokens?: number; total_thought_tokens?: number }
+    let text: string
+    try {
+      text = await send(continuing ? checkpoint.id : undefined)
+    } catch (error) {
+      if (!continuing || !(error instanceof LlmError) ||
+          !(error.status === 404 || error.status === 400 && /previous.interaction|call.id|function.result/i.test(error.message))) throw error
+      text = await send()
     }
-    const content = (body.steps ?? [])
+    const body = JSON.parse(text) as {
+      id?: string
+      steps?: Array<{
+        id?: string
+        type?: string
+        name?: string
+        arguments?: unknown
+        summary?: Array<{ type?: string; text?: string }>
+        content?: Array<{ type?: string; text?: string }>
+      }>
+      usage?: { total_input_tokens?: number; total_output_tokens?: number; total_thought_tokens?: number; total_cached_tokens?: number }
+    }
+    const steps = body.steps ?? []
+    const content = steps
       .filter((s) => s.type === 'model_output')
       .flatMap((s) => s.content ?? [])
       .filter((c) => c.type === 'text')
       .map((c) => c.text ?? '')
       .join('')
+    const reasoning = steps
+      .filter((s) => s.type === 'thought')
+      .flatMap((s) => s.summary ?? s.content ?? [])
+      .filter((c) => c.type === 'text')
+      .map((c) => c.text ?? '')
+      .join('')
+    const toolCalls = steps
+      .filter((s) => s.type === 'function_call' && typeof s.name === 'string' && s.name.length > 0)
+      .map((s) => ({ name: s.name!, args: parseArgs(s.arguments), ...(s.id ? { id: s.id } : {}) }))
+    const inputTokens = body.usage?.total_input_tokens ?? 0
+    const cached = body.usage?.total_cached_tokens
     return {
       content,
+      ...(reasoning ? { reasoning } : {}),
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      ...(body.id && toolCalls.every((call) => call.id)
+        ? { gemini: { id: body.id, prefix: prefix(turns), callIds: toolCalls.map((call) => call.id!) } } : {}),
       usage: {
-        inputTokens: body.usage?.total_input_tokens ?? 0,
+        inputTokens,
         outputTokens: (body.usage?.total_output_tokens ?? 0) + (body.usage?.total_thought_tokens ?? 0),
+        ...(typeof cached === 'number' && cached >= 0 && cached <= inputTokens
+          ? { cacheHitTokens: cached, cacheMissTokens: inputTokens - cached } : {}),
       },
     }
   }
@@ -977,6 +1176,17 @@ export class LazyProvider implements LlmProvider {
 // ---------------------------------------------------------------------------
 
 const ANTHROPIC_VERSION = '2023-06-01'
+
+/**
+ * Extended-thinking budget for a harness effort value (undefined = off). The
+ * API needs `budget_tokens` smaller than `max_tokens`.
+ */
+function anthropicThinkingBudget(effort: string | undefined, maxTokens: number): number | undefined {
+  if (effort === undefined || effort === 'none') return undefined
+  const wanted = effort === 'minimal' ? 1_024 : effort === 'low' ? 2_048 : effort === 'medium' ? 8_192 : effort === 'high' ? 16_384 : 32_768
+  const budget = Math.min(wanted, maxTokens - 1_024)
+  return budget >= 1_024 ? budget : maxTokens >= 2_048 ? 1_024 : undefined
+}
 
 type CacheControl = { cache_control?: { type: 'ephemeral' } }
 type AnthropicBlock =
@@ -1042,28 +1252,31 @@ export class AnthropicProvider implements LlmProvider {
 
   async complete(messages: ChatMessage[], options: CompleteOptions): Promise<Completion> {
     const system = messages.find((message) => message.role === 'system')?.content ?? ''
+    // Extended thinking needs the default temperature and a budget below max_tokens.
+    const thinking = anthropicThinkingBudget(options.effort, options.maxTokens)
     const body = {
       model: this.role.model,
       max_tokens: options.maxTokens,
-      temperature: options.temperature,
+      ...(thinking === undefined ? { temperature: options.temperature } : { thinking: { type: 'enabled', budget_tokens: thinking } }),
       // Prompt caching: explicit breakpoints (see withAnthropicCacheBreakpoints).
       ...(system ? { system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] } : {}),
       messages: withAnthropicCacheBreakpoints(anthropicMessages(messages)),
       ...(options.tools && options.tools.length > 0
         ? { tools: options.tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })) }
         : {}),
+      ...(this.role.extraBody ?? {}),
     }
     const text = await postWithRetry(
       this.name,
-      `${this.baseUrl}/v1/messages`,
+      `${this.baseUrl}${this.role.apiPath ?? '/v1/messages'}`,
       {
-        headers: {
+        headers: requestHeaders(this.role, this.apiKey, {
           'Content-Type': 'application/json',
           'x-api-key': this.apiKey,
           'anthropic-version': ANTHROPIC_VERSION,
-        },
+        }),
         body: JSON.stringify(body),
-        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        signal: requestSignal(options.signal, this.role.requestTimeoutMs),
       },
       this.retry,
     )
@@ -1075,6 +1288,7 @@ export class AnthropicProvider implements LlmProvider {
 export function parseAnthropicResponse(text: string): Completion {
   let body: {
     content?: Array<{ type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }>
+    stop_reason?: string
     usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
     error?: { type?: string; message?: string }
   }
@@ -1105,6 +1319,7 @@ export function parseAnthropicResponse(text: string): Completion {
   }
   return {
     content: textParts.join(''),
+    ...(body.stop_reason === 'max_tokens' ? { outputLimited: true } : {}),
     usage,
     ...(reasoning ? { reasoning } : {}),
     ...(toolCalls.length > 0 ? { toolCalls } : {}),
@@ -1164,6 +1379,9 @@ export class OpenAiResponsesProvider implements LlmProvider {
         : {}),
       ...(this.role.verbosity ? { text: { verbosity: this.role.verbosity } } : {}),
       ...(this.role.serviceTier ? { service_tier: this.role.serviceTier } : {}),
+      // Reasoning models take the default temperature only.
+      ...(options.effort ? {} : { temperature: options.temperature }),
+      ...(this.role.extraBody ?? {}),
       // CP-23: a stable cache key lets the provider reuse the prompt prefix.
       ...(this.sessionId ? { prompt_cache_key: `hy-${this.sessionId}` } : {}),
       ...(options.tools && options.tools.length > 0
@@ -1179,11 +1397,11 @@ export class OpenAiResponsesProvider implements LlmProvider {
     }
     const text = await postWithRetry(
       this.name,
-      `${this.baseUrl}/responses`,
+      `${this.baseUrl}${this.role.apiPath ?? '/responses'}`,
       {
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
+        headers: requestHeaders(this.role, this.apiKey, { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` }),
         body: JSON.stringify(body),
-        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        signal: requestSignal(options.signal, this.role.requestTimeoutMs),
       },
       this.retry,
     )
@@ -1197,11 +1415,13 @@ export function parseOpenAiResponses(text: string): Completion {
     output?: Array<{
       type?: string
       content?: Array<{ type?: string; text?: string }>
+      summary?: Array<{ type?: string; text?: string }>
       name?: string
       arguments?: string
       call_id?: string
     }>
     output_text?: string
+    incomplete_details?: { reason?: string }
     usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } }
     error?: { message?: string }
   }
@@ -1212,20 +1432,27 @@ export function parseOpenAiResponses(text: string): Completion {
   }
   if (body.error?.message) throw new LlmError(`OpenAI Responses: ${body.error.message}`)
   const parts: string[] = []
-  const toolCalls: Array<{ name: string; args: unknown }> = []
+  const toolCalls: Array<{ name: string; args: unknown; id?: string }> = []
+  let reasoning = ''
   for (const item of body.output ?? []) {
     if (item.type === 'message') {
       for (const block of item.content ?? []) {
         if (block.type === 'output_text' && typeof block.text === 'string') parts.push(block.text)
       }
+    } else if (item.type === 'reasoning') {
+      for (const part of item.summary ?? []) {
+        if (typeof part.text === 'string') reasoning += part.text
+      }
     } else if (item.type === 'function_call' && typeof item.name === 'string') {
-      toolCalls.push({ name: item.name, args: parseArgs(item.arguments) })
+      toolCalls.push({ name: item.name, args: parseArgs(item.arguments), ...(item.call_id ? { id: item.call_id } : {}) })
     }
   }
   const inputTokens = body.usage?.input_tokens ?? 0
   const cached = body.usage?.input_tokens_details?.cached_tokens ?? 0
   return {
     content: parts.length > 0 ? parts.join('') : (body.output_text ?? ''),
+    ...(reasoning ? { reasoning } : {}),
+    ...(body.incomplete_details?.reason === 'max_output_tokens' ? { outputLimited: true } : {}),
     usage: {
       inputTokens,
       outputTokens: body.usage?.output_tokens ?? 0,
@@ -1300,7 +1527,82 @@ export function cacheRouteKey(workspaceRoot: string, sessionId?: string): string
   return `hy-ws-${createHash('sha256').update(root).digest('hex').slice(0, 16)}`
 }
 
+type ReserveModelCost = (maximum: number) => (settled: number) => void
+const modelBudget = new AsyncLocalStorage<ReserveModelCost>()
+
+export function withModelBudget<T>(reserve: ReserveModelCost, run: () => T): T {
+  return modelBudget.run(reserve, run)
+}
+
+/**
+ * USD pricing for a role. The harness ships none: prices change and differ by
+ * plan, so they are user data — set `pricing` on the role or on the model in
+ * `models[]`. Without it a USD cap cannot be enforced and the run is refused
+ * before any request is sent.
+ */
+function modelPricing(role: RoleConfig): RoleConfig['pricing'] | undefined {
+  return role.pricing ?? catalogForRole(role)?.pricing
+}
+
 export function createProvider(role: RoleConfig, workspaceRoot: string, runId?: string): LlmProvider {
+  const provider = createUnbudgetedProvider(role, workspaceRoot, runId)
+  return {
+    name: provider.name,
+    async complete(messages, options) {
+      // Old sessions can contain credentials from before the Git host boundary.
+      const safeMessages = messages.map((message) => {
+        const content = redactGitHubSecrets(message.content)
+        const reasoning = message.reasoning === undefined ? undefined : redactGitHubSecrets(message.reasoning)
+        if (content === message.content && reasoning === message.reasoning) return message
+        return { role: message.role, content, ...(message.images ? { images: message.images } : {}), ...(reasoning === undefined ? {} : { reasoning }) }
+      })
+      const reserve = modelBudget.getStore()
+      if (!reserve || role.provider === 'mock' || role.provider === 'ollama') return provider.complete(safeMessages, options)
+      const pricing = modelPricing(role)
+      if (!pricing) {
+        throw new LlmError(
+          `No USD pricing for ${provider.name}: set roles.*.pricing or add a "pricing" entry for this model in "models", or run without a USD cap.`,
+        )
+      }
+      const context = role.contextWindowTokens
+      const maximum = (context * pricing.inputPerMTokUsd + options.maxTokens * pricing.outputPerMTokUsd) / 1_000_000
+      const settle = reserve(maximum)
+      let result: Completion
+      try {
+        result = await provider.complete(safeMessages, options)
+      } catch (error) {
+        // An interrupted response may have incurred charges without returning usage.
+        settle(maximum)
+        throw error
+      }
+      // A degenerate stream and a response without usable usage (an endpoint
+      // that refused `stream_options` reports none) both leave the real cost
+      // unknown, so the whole reservation is charged. Settling here instead of
+      // returning early is what keeps the reservation from staying checked out
+      // for the rest of the orchestration, where it would silently lower every
+      // later call's ceiling until the turn fails on a phantom overspend.
+      const usage = result.usage
+      if (
+        result.degenerate ||
+        !usage ||
+        !Number.isFinite(usage.inputTokens) ||
+        !Number.isFinite(usage.outputTokens) ||
+        usage.inputTokens <= 0 ||
+        usage.outputTokens < 0
+      ) {
+        settle(maximum)
+        return result
+      }
+      const { inputTokens, outputTokens, cacheHitTokens = 0 } = usage
+      const cached = Math.min(inputTokens, Math.max(0, Number.isFinite(cacheHitTokens) ? cacheHitTokens : 0))
+      settle(((inputTokens - cached) * pricing.inputPerMTokUsd + cached * (pricing.cachedInputPerMTokUsd ?? pricing.inputPerMTokUsd) +
+        outputTokens * pricing.outputPerMTokUsd) / 1_000_000)
+      return result
+    },
+  }
+}
+
+function createUnbudgetedProvider(role: RoleConfig, workspaceRoot: string, runId?: string): LlmProvider {
   const sessionId = cacheRouteKey(workspaceRoot, runId)
   switch (role.provider) {
     case 'mock':

@@ -2,6 +2,15 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { STEER_PREFIX, createSteerInbox, isSteerMessage, steerMessage, steerText } from './steering.js'
 
+test('worker observations do not interrupt, while user corrections still do', () => {
+  const inbox = createSteerInbox()
+  inbox.push({ text: 'worker completed', source: 'worker', interrupt: false })
+  assert.equal(inbox.hasInterrupt(), false)
+  inbox.push({ text: 'change the scope' })
+  assert.equal(inbox.hasInterrupt(), true)
+  assert.equal(inbox.drain().length, 2)
+})
+
 test('the inbox drains in order and empties itself', () => {
   const inbox = createSteerInbox()
   assert.equal(inbox.size(), 0)

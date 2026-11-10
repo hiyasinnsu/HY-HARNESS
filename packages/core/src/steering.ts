@@ -14,24 +14,28 @@ import type { ImageInput } from './llm.js'
 export interface SteerMessage {
   text: string
   images?: ImageInput[]
+  id?: string
+  source?: 'orchestrator' | 'worker'
+  /** Observations join the next request without invalidating a call already chosen. */
+  interrupt?: boolean
 }
 
 /** Marker in front of a steering message in the model's history. */
 export const STEER_PREFIX = '[the user sent this while you were working]'
 
 /** The history form of a steering message (used by the agent and `rebuildHistory`). */
-export function steerMessage(text: string): string {
-  return `${STEER_PREFIX}\n${text}`
+export function steerMessage(text: string, source?: SteerMessage['source']): string {
+  return `${source ? `[the ${source} sent this while you were working]` : STEER_PREFIX}\n${text}`
 }
 
 /** True when a history entry came from the steering inbox. */
 export function isSteerMessage(content: string): boolean {
-  return content.startsWith(`${STEER_PREFIX}\n`)
+  return /^\[the (?:user|orchestrator|worker) sent this while you were working\]\n/.test(content)
 }
 
 /** The user's text of a history entry, without the marker. */
 export function steerText(content: string): string {
-  return isSteerMessage(content) ? content.slice(STEER_PREFIX.length + 1) : content
+  return isSteerMessage(content) ? content.slice(content.indexOf('\n') + 1) : content
 }
 
 /**
@@ -45,6 +49,7 @@ export interface SteerInbox {
   drain(): SteerMessage[]
   /** How many messages are waiting. */
   size(): number
+  hasInterrupt(): boolean
 }
 
 export function createSteerInbox(): SteerInbox {
@@ -59,6 +64,9 @@ export function createSteerInbox(): SteerInbox {
     },
     size() {
       return queue.length
+    },
+    hasInterrupt() {
+      return queue.some((message) => message.interrupt !== false)
     },
   }
 }

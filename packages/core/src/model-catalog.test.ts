@@ -1,46 +1,63 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { MODEL_CATALOG, catalogForRole, catalogVision, effortWithToolsFor, findModel, temperatureAllowedFor, tokenFieldFor } from './model-catalog.js'
+import { catalogForRole, catalogVision, effortWithToolsFor, findModel, reasoningEchoFor, setModelRegistry, temperatureAllowedFor, tokenFieldFor } from './model-catalog.js'
 import { roleSupportsImages } from './config.js'
 
-test('the catalog is well formed and searchable', () => {
-  assert.ok(MODEL_CATALOG.length >= 5)
-  const ids = new Set(MODEL_CATALOG.map((entry) => entry.id))
-  assert.equal(ids.size, MODEL_CATALOG.length, 'no duplicate ids')
-  for (const entry of MODEL_CATALOG) {
-    assert.equal(entry.id, `${entry.provider}:${entry.model}`)
-    assert.ok(entry.contextWindowTokens > 0)
-    assert.ok(entry.maxOutputTokens > 0)
-    assert.ok(entry.maxOutputTokens <= entry.contextWindowTokens)
-    assert.ok(entry.label.length > 0)
-  }
-  const sonnet = findModel('anthropic', 'claude-sonnet-4-5')
-  assert.ok(sonnet)
-  assert.equal(sonnet.capabilities.vision, true)
-  assert.equal(findModel('anthropic', 'nope'), undefined)
-  assert.equal(catalogForRole({ provider: 'mock', model: 'mock', contextWindowTokens: 1, maxOutputTokens: 1 })?.id, 'mock:mock')
+test('the registry holds exactly what the user registered', () => {
+  setModelRegistry([
+    {
+      id: 'ignored',
+      provider: 'openai-compatible',
+      model: ' my-model ',
+      label: 'My model',
+      contextWindowTokens: 32_768,
+      maxOutputTokens: 8_192,
+      pricing: { inputPerMTokUsd: 1, outputPerMTokUsd: 2 },
+      capabilities: { vision: true },
+      compat: { tokenField: 'max_completion_tokens', effortWithTools: false, temperature: false, reasoningEcho: true },
+    },
+  ])
+  const entry = findModel('openai-compatible', 'my-model')
+  assert.ok(entry)
+  // The id is derived from provider:model, not taken from the input.
+  assert.equal(entry.id, 'openai-compatible:my-model')
+  assert.equal(findModel('openai-compatible', 'nope'), undefined)
+  assert.equal(catalogForRole({ provider: 'openai-compatible', model: 'my-model', contextWindowTokens: 1, maxOutputTokens: 1 })?.label, 'My model')
+  setModelRegistry([])
 })
 
-test('compat flags come from the catalog and fall back to the heuristic', () => {
-  // Catalog entry wins: the Responses adapter uses max_tokens for gpt-4.1-mini.
-  assert.equal(tokenFieldFor('openai-responses', 'gpt-4.1-mini'), 'max_tokens')
-  // Unknown model keeps the historical heuristic.
-  assert.equal(tokenFieldFor('openai-compatible', 'gpt-4.1-mini'), 'max_tokens')
-  assert.equal(tokenFieldFor('openai-compatible', 'o4-mini'), 'max_completion_tokens')
-  assert.equal(tokenFieldFor('openai-compatible', 'gpt-5.2'), 'max_completion_tokens')
-  assert.equal(tokenFieldFor('ollama', 'qwen2.5:3b'), 'max_tokens')
-  // Reasoning effort with tools: the catalog entry says gpt-6.1-terra cannot.
-  assert.equal(effortWithToolsFor('openai-compatible', 'anything'), true)
-  assert.equal(effortWithToolsFor('openai-compatible', 'gpt-6.1-terra'), false)
-  // Temperature: only the default for reasoning-style models.
-  assert.equal(temperatureAllowedFor('openai-compatible', 'gpt-4.1-mini'), true)
-  assert.equal(temperatureAllowedFor('openai-compatible', 'o4-mini'), false)
-  assert.equal(temperatureAllowedFor('openai-responses', 'gpt-4.1-mini'), false)
-  // Vision capability is reported only for listed models.
-  assert.equal(catalogVision('anthropic', 'claude-sonnet-4-5'), true)
-  assert.equal(catalogVision('ollama', 'qwen2.5:3b'), false)
+test('unregistered models use the generic request shape', () => {
+  setModelRegistry([])
+  assert.equal(tokenFieldFor('openai-compatible', 'o4-mini'), 'max_tokens')
+  assert.equal(tokenFieldFor('openai-compatible', 'gpt-5.2'), 'max_tokens')
+  assert.equal(effortWithToolsFor('openai-compatible', 'gpt-6.1-terra'), true)
+  assert.equal(temperatureAllowedFor('openai-compatible', 'o4-mini'), true)
   assert.equal(catalogVision('ollama', 'unknown-model'), undefined)
-  const opencode = { provider: 'opencode' as const, model: 'deepseek-v4.1-flash', contextWindowTokens: 1_000_000, maxOutputTokens: 131_072 }
-  assert.equal(roleSupportsImages(opencode), true, 'OpenCode DeepSeek accepts image tools')
-  assert.equal(roleSupportsImages({ ...opencode, vision: false }), false, 'an explicit user override still wins')
+  assert.equal(reasoningEchoFor('openai-compatible', 'anything'), undefined)
+})
+
+test('registered compat flags win over the generic defaults', () => {
+  setModelRegistry([
+    { id: 'x', provider: 'openai-compatible', model: 'reasoner', label: 'R', compat: { tokenField: 'max_completion_tokens', effortWithTools: false, temperature: false, reasoningEcho: true } },
+    { id: 'y', provider: 'ollama', model: 'llava', label: 'L', capabilities: { vision: true } },
+  ])
+  assert.equal(tokenFieldFor('openai-compatible', 'reasoner'), 'max_completion_tokens')
+  assert.equal(effortWithToolsFor('openai-compatible', 'reasoner'), false)
+  assert.equal(temperatureAllowedFor('openai-compatible', 'reasoner'), false)
+  assert.equal(reasoningEchoFor('openai-compatible', 'reasoner'), true)
+  assert.equal(catalogVision('ollama', 'llava'), true)
+  assert.equal(roleSupportsImages({ provider: 'ollama', model: 'llava', contextWindowTokens: 1, maxOutputTokens: 1 }), true)
+  assert.equal(roleSupportsImages({ provider: 'ollama', model: 'llava', contextWindowTokens: 1, maxOutputTokens: 1, vision: false }), false, 'an explicit role value wins')
+  setModelRegistry([])
+})
+
+test('image support follows the adapter, not the provider name', () => {
+  setModelRegistry([])
+  const role = (provider: 'gemini' | 'openai-compatible' | 'opencode' | 'mock', model: string) => ({ provider, model, contextWindowTokens: 1, maxOutputTokens: 1 })
+  // The Gemini adapter rejects image messages, so it must not advertise them.
+  assert.equal(roleSupportsImages(role('gemini', 'gemini-3.8-flash')), false)
+  assert.equal(roleSupportsImages(role('openai-compatible', 'any')), true)
+  assert.equal(roleSupportsImages(role('opencode', 'deepseek-v4.1-flash')), true)
+  assert.equal(roleSupportsImages(role('mock', 'mock')), true)
+  assert.equal(roleSupportsImages({ ...role('openai-compatible', 'any'), vision: false }), false)
 })

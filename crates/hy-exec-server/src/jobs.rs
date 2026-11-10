@@ -8,7 +8,7 @@
 //! inside their Job Object from the first instruction. Both get an allowlisted
 //! environment and `stdin = NUL`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -27,18 +27,33 @@ use crate::job_object::JobHandle;
 /// Windows tools (cmd.exe / Windows PowerShell 5.1) often emit CP932/ANSI
 /// bytes when their stdout is a pipe. Prefer UTF-8 and fall back to the local
 /// Japanese ANSI code page; non-Windows keeps lossy UTF-8.
+///
+/// The fallback is per line: one invalid byte (a CP932 line inside UTF-8
+/// output, or a retained range that starts mid-character) must not turn every
+/// other line into Shift_JIS mojibake.
 fn decode_output(bytes: &[u8]) -> String {
     if let Ok(text) = std::str::from_utf8(bytes) {
         return text.to_owned();
     }
+    let mut out = String::with_capacity(bytes.len());
+    for line in bytes.split_inclusive(|b| *b == b'\n') {
+        out.push_str(&decode_line(line));
+    }
+    out
+}
+
+fn decode_line(line: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(line) {
+        return text.to_owned();
+    }
     #[cfg(windows)]
     {
-        let (text, _, _) = encoding_rs::SHIFT_JIS.decode(bytes);
+        let (text, _, _) = encoding_rs::SHIFT_JIS.decode(line);
         text.into_owned()
     }
     #[cfg(not(windows))]
     {
-        String::from_utf8_lossy(bytes).into_owned()
+        String::from_utf8_lossy(line).into_owned()
     }
 }
 
@@ -138,11 +153,110 @@ const RESULT_HEAD: usize = 10_000;
 const RESULT_TAIL: usize = 20_000;
 const MEM_CAP: usize = 4 * 1024 * 1024;
 
+/// One stream's retained output: the first `RESULT_HEAD` bytes plus a ring of
+/// the most recent `MEM_CAP` bytes.
+///
+/// A single capped `Vec` kept only the *first* `MEM_CAP` bytes, so a command
+/// that printed more lost its end — exactly what `clip` shows after the
+/// truncation marker (`job/output` still pages the whole log). Memory stays
+/// bounded because the ring drops the oldest bytes.
+#[derive(Default)]
+struct StreamBuffer {
+    /// The first `RESULT_HEAD` bytes, kept verbatim.
+    head: Vec<u8>,
+    /// The most recent bytes; over `MEM_CAP`, the oldest are dropped.
+    tail: VecDeque<u8>,
+    /// True when bytes were dropped from the front of the ring.
+    dropped: bool,
+}
+
+impl StreamBuffer {
+    fn push(&mut self, data: &[u8]) {
+        let mut rest = data;
+        if self.head.len() < RESULT_HEAD {
+            let take = rest.len().min(RESULT_HEAD - self.head.len());
+            self.head.extend_from_slice(&rest[..take]);
+            rest = &rest[take..];
+        }
+        if rest.is_empty() {
+            return;
+        }
+        if self.tail.is_empty() && self.head.len() == RESULT_HEAD {
+            // The head/tail split can land inside a character; the head cut it
+            // away too (`complete_prefix_len`), so drop the rest of it here.
+            // A clean front is what lets `align_tail_start` recognise a UTF-8
+            // tail as UTF-8 instead of guessing CP932.
+            let mut skipped = 0;
+            while skipped < 3 && rest.first().is_some_and(|b| (b & 0xC0) == 0x80) {
+                rest = &rest[1..];
+                skipped += 1;
+            }
+            if rest.is_empty() {
+                return;
+            }
+        }
+        if rest.len() >= MEM_CAP {
+            // One read larger than the ring: only its end can be kept.
+            self.dropped |= !self.tail.is_empty();
+            self.tail.clear();
+            self.tail.extend(rest[rest.len() - MEM_CAP..].iter().copied());
+            return;
+        }
+        let room = MEM_CAP - rest.len();
+        if self.tail.len() > room {
+            self.evict_front(self.tail.len() - room);
+        }
+        self.tail.extend(rest.iter().copied());
+    }
+
+    /// Drops `count` bytes from the front of the ring, then finishes the
+    /// character that was cut so the retained range starts on a boundary:
+    /// `align_tail_start` and `decode_output` read the ring from its front.
+    fn evict_front(&mut self, count: usize) {
+        let mut last = None;
+        for _ in 0..count {
+            if let Some(byte) = self.tail.pop_front() {
+                last = Some(byte);
+            }
+        }
+        let Some(last) = last else { return };
+        self.dropped = true;
+        if last >= 0xC0 {
+            // A UTF-8 lead byte: its continuation bytes follow. (A CP932 lead
+            // byte looks the same here; dropping one off-screen character is
+            // harmless and keeps the ring clean for UTF-8 output.)
+            let mut skipped = 0;
+            while skipped < 3 && self.tail.front().is_some_and(|b| (b & 0xC0) == 0x80) {
+                self.tail.pop_front();
+                skipped += 1;
+            }
+        } else if (last & 0xC0) == 0x80 {
+            // A continuation byte: skip to the start of the next character.
+            while self.tail.front().is_some_and(|b| (b & 0xC0) == 0x80) {
+                self.tail.pop_front();
+            }
+        }
+    }
+
+    fn retained_len(&self) -> usize {
+        self.head.len() + self.tail.len()
+    }
+
+    fn retained_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.retained_len());
+        out.extend_from_slice(&self.head);
+        out.extend(self.tail.iter().copied());
+        out
+    }
+}
+
 #[derive(Default)]
 struct Captured {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+    stdout: StreamBuffer,
+    stderr: StreamBuffer,
     total: u64,
+    /// True when output was received but is not held in memory; the full text
+    /// is still in the job's log file (`job/output`).
     truncated: bool,
 }
 
@@ -153,15 +267,8 @@ impl Captured {
             Stream::Stdout => &mut self.stdout,
             Stream::Stderr => &mut self.stderr,
         };
-        if buf.len() >= MEM_CAP {
-            self.truncated = true;
-            return;
-        }
-        let take = data.len().min(MEM_CAP - buf.len());
-        buf.extend_from_slice(&data[..take]);
-        if take < data.len() {
-            self.truncated = true;
-        }
+        buf.push(data);
+        self.truncated |= buf.dropped;
     }
 }
 
@@ -269,11 +376,12 @@ impl Job {
     pub fn result(&self, status: ExecStatus, timed_out: bool) -> ExecResult {
         let (state, exit_code) = self.state.borrow().unwrap_or((JobState::Running, None));
         let _ = state;
-        let (stdout, so_trunc, stderr, se_trunc) = {
-            let c = self.captured.lock();
-            let (a, t1) = clip(&c.stdout);
-            let (b, t2) = clip(&c.stderr);
-            (a, t1, b, t2)
+        let (stdout, so_trunc, stderr, se_trunc, dropped) = {
+            let mut c = self.captured.lock();
+            let dropped = c.truncated;
+            let (a, t1) = clip(&mut c.stdout);
+            let (b, t2) = clip(&mut c.stderr);
+            (a, t1, b, t2, dropped)
         };
         ExecResult {
             status,
@@ -286,7 +394,7 @@ impl Job {
             stderr,
             job_id: Some(self.id.clone()),
             sandbox: self.sandbox,
-            truncated: so_trunc || se_trunc,
+            truncated: so_trunc || se_trunc || dropped,
             timed_out,
             duration_ms: self.started.elapsed().as_millis() as u64,
         }
@@ -344,15 +452,18 @@ fn page_bytes(data: &[u8], at_authoritative_end: bool) -> usize {
     if valid > 0 { valid } else { data.len() }
 }
 
-fn clip(bytes: &[u8]) -> (String, bool) {
-    if bytes.len() <= RESULT_HEAD + RESULT_TAIL {
-        return (decode_output(bytes), false);
+fn clip(stream: &mut StreamBuffer) -> (String, bool) {
+    if stream.retained_len() <= RESULT_HEAD + RESULT_TAIL {
+        return (decode_output(&stream.retained_bytes()), false);
     }
-    let head_len = complete_prefix_len(&bytes[..RESULT_HEAD]);
-    let mut out = decode_output(&bytes[..head_len]);
+    let head_len = complete_prefix_len(&stream.head);
+    let mut out = decode_output(&stream.head[..head_len]);
     out.push_str("\n… [truncated] …\n");
-    let tail_start = align_tail_start(bytes, bytes.len() - RESULT_TAIL);
-    out.push_str(&decode_output(&bytes[tail_start..]));
+    // Make the ring contiguous in place: copying up to 4 MiB per result is
+    // wasted work, and the cut needs one slice to align.
+    let tail = stream.tail.make_contiguous();
+    let tail_start = align_tail_start(tail, tail.len().saturating_sub(RESULT_TAIL));
+    out.push_str(&decode_output(&tail[tail_start..]));
     (out, true)
 }
 
@@ -800,8 +911,9 @@ mod tests {
     fn clip_keeps_utf8_when_the_cut_lands_inside_a_character() {
         // 60,000 bytes of 3-byte characters: 10,000 and 60,000 - 20,000 are not
         // multiples of 3, so a byte-wise cut splits a character at both ends.
-        let bytes = "あ".repeat(20_000).into_bytes();
-        let (out, truncated) = clip(&bytes);
+        let mut stream = StreamBuffer::default();
+        stream.push(&"あ".repeat(20_000).into_bytes());
+        let (out, truncated) = clip(&mut stream);
         assert!(truncated);
         let Some((head, tail)) = out.split_once("[truncated]") else {
             panic!("no truncation marker in {} bytes of output", out.len());
@@ -816,6 +928,33 @@ mod tests {
                     .collect::<String>()
             );
         }
+    }
+
+    #[test]
+    fn clip_keeps_the_end_of_output_over_the_memory_cap() {
+        // 5 MiB through the readers' 8 KiB chunks: more than the 4 MiB ring.
+        let mut stream = StreamBuffer::default();
+        let mut chunk = Vec::new();
+        let mut total = 0usize;
+        let mut last = String::new();
+        while total < 5 * 1024 * 1024 {
+            last = format!("line {total:09}\n");
+            chunk.extend_from_slice(last.as_bytes());
+            total += last.len();
+            if chunk.len() >= 8 * 1024 {
+                stream.push(&chunk);
+                chunk.clear();
+            }
+        }
+        stream.push(&chunk);
+        assert!(stream.dropped, "the middle of the output is gone");
+        assert_eq!(stream.retained_len(), RESULT_HEAD + MEM_CAP);
+
+        let (out, truncated) = clip(&mut stream);
+        assert!(truncated);
+        assert!(out.starts_with("line 000000000\n"), "the head is kept");
+        assert!(out.ends_with(&last), "the end of the output survives");
+        assert!(out.len() < 40_000, "only the head and the tail are returned");
     }
 
     #[test]
@@ -849,6 +988,19 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn decode_output_falls_back_to_cp932_per_line() {
+        // One CP932 line between UTF-8 lines: the UTF-8 lines must survive.
+        let mut bytes = "first 日本語\n".as_bytes().to_vec();
+        bytes.extend_from_slice(&[0x93, 0xFA, 0x96, 0x7B, 0x8C, 0xEA, b'\n']);
+        bytes.extend_from_slice("last 日本語\n".as_bytes());
+        assert_eq!(
+            decode_output(&bytes),
+            "first 日本語\n日本語\nlast 日本語\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn clip_keeps_cp932_when_the_cut_lands_inside_a_character() {
         // "あ" in CP932 is [0x82, 0xA0] (2 bytes).
         // Prepending 1 byte of ASCII 'x' makes odd byte indices cut through characters.
@@ -856,7 +1008,9 @@ mod tests {
         for _ in 0..30_000 {
             bytes.extend_from_slice(&[0x82, 0xA0]);
         }
-        let (out, truncated) = clip(&bytes);
+        let mut stream = StreamBuffer::default();
+        stream.push(&bytes);
+        let (out, truncated) = clip(&mut stream);
         assert!(truncated);
         let Some((head, tail)) = out.split_once("[truncated]") else {
             panic!("no truncation marker");

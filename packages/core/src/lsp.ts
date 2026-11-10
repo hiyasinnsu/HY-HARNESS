@@ -11,6 +11,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
+import { stdioCommand } from './mcp.js'
 
 export interface LspServerConfig {
   command: string[]
@@ -186,8 +187,24 @@ export class LspManager {
       c = (async () => {
         const [exe, ...args] = config.command
         if (!exe) throw new Error(`lsp server ${name} has an empty command`)
-        const child = spawn(exe, args, { cwd: this.workspaceRoot, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
-        child.stderr.resume()
+        // The same Windows shim handling as MCP stdio servers: `npx`/`pnpm` are
+        // `.cmd` files that Node cannot spawn without cmd.exe.
+        const target = stdioCommand(exe, args)
+        const child = spawn(target.file, target.args, {
+          cwd: this.workspaceRoot,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
+          ...(target.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+        })
+        // Keep the tail of stderr so a server that exits explains itself.
+        let stderrTail = ''
+        child.stderr.setEncoding('utf8')
+        child.stderr.on('data', (chunk: string) => {
+          stderrTail = (stderrTail + chunk).slice(-2_000)
+        })
+        child.on('exit', (code) => {
+          if (code !== 0 && stderrTail.trim()) process.stderr.write(`[lsp ${name}] ${stderrTail.trim()}\n`)
+        })
         const conn = new LspConnection(child, config.timeoutMs ?? 30_000)
         const rootUri = pathToFileURL(this.workspaceRoot).href
         await conn.request('initialize', {

@@ -146,6 +146,7 @@ test('K9: the initial tool set is fixed, deferred tools stay out of it, and SDK-
     'current_time',
     'delegate',
     'get_context_remaining',
+    'git_status',
     'read_file',
     'request_permissions',
     'run_code',
@@ -156,13 +157,22 @@ test('K9: the initial tool set is fixed, deferred tools stay out of it, and SDK-
     'sleep',
     'tool_search',
     'update_plan',
+    'verify_file',
     'write_stdin',
   ])
   for (const spec of core.TOOL_SPECS.filter((s) => s.exposure === 'deferred')) {
     assert.equal(spec.wire, true, `${spec.name}: a deferred tool is a wire tool once loaded`)
     assert.equal(initial.includes(spec.name), false, `${spec.name} must not be in the initial prompt`)
   }
-  for (const name of ['job_status', 'job_output', 'job_wait', 'job_kill', 'rationale_upsert', 'rationale_supersede', 'rationale_remove']) {
+  // Job control became a wire tool when the session has a shell: a command
+  // that outlives the foreground wait must stay controllable without run_code.
+  for (const name of ['job_status', 'job_output', 'job_wait', 'job_kill']) {
+    const spec = core.TOOLS_BY_NAME.get(name)
+    assert.ok(spec, `${name} must still exist`)
+    assert.equal(spec.wire, true, `${name} is a wire tool when a shell is offered`)
+    assert.equal(spec.wireRequires, 'shell', `${name} needs a shell session`)
+  }
+  for (const name of ['rationale_upsert', 'rationale_supersede', 'rationale_remove']) {
     const spec = core.TOOLS_BY_NAME.get(name)
     assert.ok(spec, `${name} must still exist`)
     assert.equal(spec.wire, false, `${name} must stay SDK-only`)

@@ -230,10 +230,8 @@ export function applyOnboardingDefaults(
     // The catalog knows the limits of a listed model; an unlisted one keeps the
     // role's own limits (never guess a smaller context window for it).
     const listed = findModel(config.role.provider, config.role.model)
-    if (listed) {
-      config.role.contextWindowTokens = listed.contextWindowTokens
-      config.role.maxOutputTokens = listed.maxOutputTokens
-    }
+    if (listed?.contextWindowTokens !== undefined) config.role.contextWindowTokens = listed.contextWindowTokens
+    if (listed?.maxOutputTokens !== undefined) config.role.maxOutputTokens = listed.maxOutputTokens
     applied.push(`model=${config.role.provider}:${config.role.model}`)
   }
   return { state, applied }

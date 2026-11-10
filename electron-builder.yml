@@ -25,6 +25,7 @@ files:
   - packages/hy-cli/dist/**/*
   - packages/hy-cli/prompts/**/*
   - packages/hy-cli/web/**/*
+  - bin/**/*
   - "!**/*.test.*"
   - "!**/*.map"
 
@@ -64,3 +65,5 @@ win:
 # directly through makensis instead, so packaging needs no 7z child process.
 portable:
   useZip: true
+  # In electron-builder 26.18, true selects the per-launch NSIS plugin directory.
+  unpackDirName: true

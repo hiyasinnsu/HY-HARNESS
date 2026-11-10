@@ -577,6 +577,22 @@
     },
     {
       "method": "POST",
+      "path": "/api/sessions/:id/advisor",
+      "summary": "Turn advisor guidance on or off.",
+      "errors": [
+        409
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
       "path": "/api/sessions/:id/sandbox",
       "summary": "Switch this session sandbox mode (grants when confined).",
       "errors": [
@@ -655,7 +671,7 @@
     {
       "method": "POST",
       "path": "/api/sessions/:id/model",
-      "summary": "Switch the session model.",
+      "summary": "Switch the session model and optionally save the default for its role.",
       "errors": [
         400
       ],
@@ -670,6 +686,9 @@
           },
           "baseUrl": {
             "type": "string"
+          },
+          "save": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -1328,6 +1347,11 @@
           "objective"
         ]
       }
+    },
+    {
+      "method": "POST",
+      "path": "/api/github/detect-token",
+      "summary": "Detect stored GitHub token from Windows Git Credential Manager."
     },
     {
       "method": "POST",

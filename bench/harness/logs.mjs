@@ -13,13 +13,18 @@ import zlib from 'node:zlib'
 function summarize(steps, toolCalls, turns, modelWaitMs, extra = {}) {
   const input = steps.every((s) => typeof s.input === 'number') ? steps.reduce((a, s) => a + s.input, 0) : null
   const reported = steps.filter((s) => typeof s.hit === 'number').length
+  // `hit` stays null unless every step reported, so runs stay comparable; the
+  // sum over the steps that did report is exposed for partial analyses.
   const hit = steps.length > 0 && reported === steps.length ? steps.reduce((a, s) => a + s.hit, 0) : null
+  const hitReported = steps.reduce((a, s) => a + (typeof s.hit === 'number' ? s.hit : 0), 0)
   const output = steps.reduce((a, s) => a + s.output, 0)
   const activeMs = turns.reduce((a, t) => a + Math.max(0, t.end - t.start), 0)
   return {
     requests: steps.length,
     input,
     hit,
+    hitReported,
+    hitComplete: steps.length > 0 && reported === steps.length,
     miss: input !== null && hit !== null ? input - hit : null,
     output,
     hitRate: input !== null && input > 0 && hit !== null ? Math.round((hit / input) * 10_000) / 100 : null,
@@ -65,8 +70,12 @@ export function readHySession(stateDir) {
       }
     })
     .filter(Boolean)
+  // Subagent (`*.sub`) work is reported separately: its requests and tools are
+  // not the main session's, and mixing them skewed per-turn and cache numbers.
   const steps = []
+  const subSteps = []
   let toolCalls = 0
+  let subToolCalls = 0
   const turns = []
   const open = new Map()
   let modelWaitMs = 0
@@ -78,11 +87,14 @@ export function readHySession(stateDir) {
     const main = !String(e.runId ?? '').includes('.sub')
     if (e.type === 'step/end') {
       const u = e.payload?.usage ?? {}
-      steps.push({ input: u.inputTokens ?? 0, hit: typeof u.cacheHitTokens === 'number' ? u.cacheHitTokens : null, output: u.outputTokens ?? 0 })
+      const row = { input: u.inputTokens ?? 0, hit: typeof u.cacheHitTokens === 'number' ? u.cacheHitTokens : null, output: u.outputTokens ?? 0 }
+      if (main) steps.push(row)
+      else subSteps.push(row)
       // latencyMs is logged since 2026-11-07; older logs: since the previous event.
       if (main) modelWaitMs += typeof e.payload?.latencyMs === 'number' ? e.payload.latencyMs : Math.max(0, e.ts - lastTs)
     } else if (e.type === 'tool/result') {
-      toolCalls++
+      if (main) toolCalls++
+      else subToolCalls++
       if (e.payload?.isError === true && /does not exist|ENOENT|not found/i.test(String(e.payload?.output ?? '')) && /read|search/.test(String(e.payload?.name))) notFound++
     } else if (e.type === 'turn/retry' && e.payload?.reason === 'broken-tool-call') brokenCalls++
     else if (e.type === 'turn/start' && !String(e.runId ?? '').includes('.sub')) open.set(e.runId, e.ts)
@@ -94,7 +106,16 @@ export function readHySession(stateDir) {
     // must not count as the request start in the old-log estimate.
     if (main && !['step/end', 'assistant/thinking', 'token/estimate'].includes(e.type)) lastTs = e.ts
   }
-  return summarize(steps, toolCalls, turns, modelWaitMs, { logFile: file, brokenCalls, notFound })
+  return summarize(steps, toolCalls, turns, modelWaitMs, {
+    logFile: file,
+    brokenCalls,
+    notFound,
+    // Subagent work, reported separately (not part of the main session's totals).
+    subRequests: subSteps.length,
+    subInput: subSteps.every((s) => typeof s.input === 'number') ? subSteps.reduce((a, s) => a + s.input, 0) : null,
+    subOutput: subSteps.reduce((a, s) => a + s.output, 0),
+    subToolCalls,
+  })
 }
 
 // --- DSH: appended zstd frames of JSONL ---

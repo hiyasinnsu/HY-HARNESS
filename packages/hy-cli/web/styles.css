@@ -694,6 +694,50 @@ code, pre { font-family: var(--mono); }
 /* ---------- Composer ---------- */
 .composer-wrap { flex: none; padding: 12px 32px 16px; background: var(--bg); }
 .composer { max-width: 880px; margin: 0 auto; }
+.composer-question-dock { max-width: 880px; margin: 0 auto 10px; }
+.composer-question-popup {
+  border: 1px solid color-mix(in srgb, var(--purple) 50%, var(--border));
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
+  padding: 12px 14px;
+}
+.composer-question-popup .question-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--purple);
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.composer-question-popup .question-head strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.composer-question-popup p {
+  margin: 0 0 10px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.composer-question-popup .question-form {
+  display: flex;
+  gap: 8px;
+}
+.composer-question-popup .question-form input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-soft);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.composer-question-popup .question-form input:focus {
+  border-color: var(--accent);
+}
 .composer-box {
   position: relative;
   border: 1px solid var(--border);
@@ -1248,7 +1292,7 @@ code, pre { font-family: var(--mono); }
 .thinking-title { flex: none; }
 .thinking-summary-inline { min-width: 0; overflow: hidden; color: var(--text-2); font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .thinking-summary-inline.provisional { opacity: 0.65; }
-.thinking-block pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 10.5px; line-height: 1.5; max-height: calc(1.5em * 4); overflow: auto; }
+.thinking-block pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 10.5px; line-height: 1.5; max-height: calc(1.5em * 6); overflow: auto; }
 
 [hidden] { display: none !important; }
 
@@ -1503,10 +1547,15 @@ code, pre { font-family: var(--mono); }
 .transcript-host > .transcript { flex: 1; min-width: 0; }
 .jump-rail { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 3px; max-height: 70%; border: 1px solid var(--border-soft); border-radius: 999px; background: var(--panel); box-shadow: var(--shadow); z-index: 5; }
 .jump-rail[hidden] { display: none; }
+/* The rail re-renders with the transcript; a transition on every mark made the
+   active one appear to blink while messages streamed in. Only opacity moves. */
+.jump-mark, .jump-mark span, .jump-step { transition: opacity 120ms linear; }
 .jump-marks { display: flex; flex-direction: column; gap: 3px; overflow-y: auto; scrollbar-width: none; padding: 2px 0; }
 .jump-marks::-webkit-scrollbar { display: none; }
 .jump-mark { display: flex; align-items: center; justify-content: center; width: 18px; height: 12px; padding: 0; border: 0; background: none; cursor: pointer; }
-.jump-mark span { display: block; width: 8px; height: 3px; border-radius: 2px; background: var(--faint); transition: width 120ms var(--ease), background 120ms var(--ease); }
+.jump-mark span { display: block; width: 8px; height: 3px; border-radius: 2px; background: var(--faint); transition: opacity 120ms linear; }
+/* Width and colour change instantly: animating them made the active mark flash
+   on every scroll step. */
 .jump-mark:hover span, .jump-mark:focus-visible span { width: 14px; background: var(--accent); }
 .jump-mark.active span { width: 14px; background: var(--accent); }
 .jump-step { display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--muted); cursor: pointer; }

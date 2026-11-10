@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
 import { fileURLToPath } from 'node:url'
+import { withoutGitHubCredentials } from './github.js'
 import type {
   CheckpointCreateResult,
   CheckpointDiffResult,
@@ -33,6 +34,25 @@ import type {
 
 /** Walking a very large workspace for the ACL grant can take minutes. */
 const GRANT_TIMEOUT_MS = 30 * 60_000
+
+/**
+ * How far the client deadline stays past the daemon's own. The daemon enforces
+ * `hardTimeoutMs` itself (it kills the job and answers with `timedOut`), so the
+ * client must not give up first: that would cancel a job the server was about
+ * to finish, and report a timeout instead of the real result.
+ */
+const EXEC_TIMEOUT_MARGIN_MS = 30_000
+
+/** The daemon kills a gate job after this long when `hardTimeoutMs` is absent. */
+const GATE_HARD_TIMEOUT_MS = 600_000
+
+/** Client-side deadline for `exec/command`; always past every daemon deadline. */
+function execTimeoutMs(params: ExecCommandParams): number {
+  const hard = params.hardTimeoutMs ?? (params.mode === 'gate' ? GATE_HARD_TIMEOUT_MS : undefined)
+  const deadlines = [(params.foregroundWaitMs ?? 5_000) + EXEC_TIMEOUT_MARGIN_MS]
+  if (hard !== undefined) deadlines.push(hard + EXEC_TIMEOUT_MARGIN_MS)
+  return Math.max(120_000, ...deadlines)
+}
 
 export class ExecRpcError extends Error {
   constructor(
@@ -66,9 +86,45 @@ export function findRepoRoot(start = process.cwd()): string {
   }
 }
 
-export function resolveServerPath(explicit?: string): string {
-  if (explicit) return path.resolve(explicit)
-  if (process.env.HY_EXEC_SERVER) return path.resolve(process.env.HY_EXEC_SERVER)
+/** Where the exec server binary is, and whether any file was actually found. */
+export interface ServerPathResolution {
+  /** The path to spawn. */
+  path: string
+  /**
+   * False when nothing exists at `path`: `path` is then only the name the
+   * caller asked for (`ExecRpcClient.start` refuses to spawn it).
+   */
+  resolved: boolean
+}
+
+/** Looks a bare command name up on `PATH` (plus `PATHEXT` on Windows). */
+function findOnPath(name: string): string | undefined {
+  const exts =
+    process.platform === 'win32'
+      ? (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter((ext) => ext !== '')
+      : ['']
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+    if (dir === '') continue
+    for (const ext of exts) {
+      const candidate = path.join(dir, `${name}${ext}`)
+      if (fs.existsSync(candidate)) return candidate
+    }
+  }
+  return undefined
+}
+
+/**
+ * T-2: resolves the exec server binary without failing when it is absent, so
+ * `start` can say what to do instead of spawning a name that cannot be found.
+ * An explicit path is used as given, even when it does not exist.
+ */
+export function resolveServerPathInfo(explicit?: string): ServerPathResolution {
+  // An empty `--exec-server ""` means "not given", as before.
+  const given = explicit || process.env.HY_EXEC_SERVER
+  if (given) {
+    const resolvedPath = path.resolve(given)
+    return { path: resolvedPath, resolved: fs.existsSync(resolvedPath) }
+  }
   const root = findRepoRoot(path.dirname(fileURLToPath(import.meta.url)))
   for (const candidate of [
     path.join(root, 'target', 'debug', 'hy-exec-server.exe'),
@@ -76,9 +132,24 @@ export function resolveServerPath(explicit?: string): string {
     path.join(root, 'target', 'debug', 'hy-exec-server'),
     path.join(root, 'target', 'release', 'hy-exec-server'),
   ]) {
-    if (fs.existsSync(candidate)) return candidate
+    if (fs.existsSync(candidate)) return { path: candidate, resolved: true }
   }
-  return 'hy-exec-server'
+  // A binary installed elsewhere is still reachable through PATH; keep it
+  // usable, but report the plain name when nothing exists (T-2).
+  const onPath = findOnPath('hy-exec-server')
+  return onPath !== undefined ? { path: onPath, resolved: true } : { path: 'hy-exec-server', resolved: false }
+}
+
+export function resolveServerPath(explicit?: string): string {
+  return resolveServerPathInfo(explicit).path
+}
+
+/** A `start` argument: an existing file, a bare name on `PATH`, or unresolved. */
+function resolveSpawnTarget(given: string): ServerPathResolution {
+  if (fs.existsSync(given)) return { path: given, resolved: true }
+  if (/[\\/]/.test(given)) return { path: path.resolve(given), resolved: false }
+  const onPath = findOnPath(given)
+  return onPath !== undefined ? { path: onPath, resolved: true } : { path: given, resolved: false }
 }
 
 /**
@@ -101,11 +172,23 @@ function childTransport(child: ChildProcessWithoutNullStreams, onLine: (line: st
     const text = chunk.toString('utf8').trimEnd()
     if (text) process.stderr.write(`[exec] ${text}\n`)
   })
-  const done = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+  const done = new Promise<void>((resolve) => {
+    child.once('exit', () => resolve())
+    // A spawn that fails emits 'error' and may never emit 'exit'.
+    child.once('error', () => resolve())
+  })
   child.on('exit', (code, signal) => onExit(`hy-exec-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`))
+  // T-2: without a listener a failed spawn (ENOENT, EACCES) is an unhandled
+  // exception. It takes the exit path instead, so the pending `initialize`
+  // rejects and the caller can report what to build.
+  child.on('error', (error) => onExit(`could not start hy-exec-server: ${error.message}`))
+  // A failed spawn leaves stdin unusable or absent; the 'error' listener reports it.
+  const stdin = child.stdin as typeof child.stdin | null
   return {
-    write: (line) => child.stdin.write(`${line}\n`),
-    end: () => child.stdin.end(),
+    write: (line) => {
+      if (stdin !== null && stdin.writable) stdin.write(`${line}\n`)
+    },
+    end: () => stdin?.end(),
     kill: () => child.kill(),
     exited: () => done,
   }
@@ -178,7 +261,18 @@ export class ExecRpcClient {
     return client
   }
 
-  static async start(serverPath: string, initParams: InitializeParams): Promise<ExecRpcClient> {
+  /**
+   * Starts the daemon. A `string` is resolved like `resolveServerPath`; a
+   * `ServerPathResolution` is used as given. A binary that does not exist is
+   * reported in one line (T-2), not as a spawn failure.
+   */
+  static async start(serverPath: string | ServerPathResolution, initParams: InitializeParams): Promise<ExecRpcClient> {
+    const server = typeof serverPath === 'string' ? resolveSpawnTarget(serverPath) : serverPath
+    if (!server.resolved) {
+      throw new Error(
+        `hy-exec-server not found (${server.path}): run \`cargo build -p hy-exec-server\` or pass \`--exec-server <path>\``,
+      )
+    }
     // The daemon copies the worker into an AppContainer-readable runtime
     // directory and runs it with this Node (design §2).
     const params: InitializeParams = {
@@ -186,12 +280,20 @@ export class ExecRpcClient {
       ptcNodePath: process.execPath,
       ...initParams,
     }
-    const child = spawn(serverPath, [], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-      env: process.env,
-    })
-    const client = ExecRpcClient.withChild(child)
+    let client: ExecRpcClient
+    try {
+      const child = spawn(server.path, [], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+        env: withoutGitHubCredentials(),
+      })
+      client = ExecRpcClient.withChild(child)
+    } catch (error) {
+      // Some spawn failures are reported synchronously (Windows refuses a file
+      // that is not an image, or the stdio pipes cannot be created); the
+      // asynchronous ones arrive as 'error' in `childTransport`.
+      throw new Error(`could not start hy-exec-server: ${error instanceof Error ? error.message : String(error)}`)
+    }
     // A confined session grants the workspace here: one walk of the tree (ADR 0001 S-1).
     await client.request<InitializeResult>('initialize', params, GRANT_TIMEOUT_MS)
     return client
@@ -260,6 +362,16 @@ export class ExecRpcClient {
     }
   }
 
+  /**
+   * Tells the daemon to stop working on `id`. A client that gave up (abort or
+   * timeout) will not read the answer, and an `exec/command` left running keeps
+   * its job — and the session's shell lock — for nothing.
+   */
+  private notifyCancel(id: number): void {
+    if (this.closed) return
+    this.transport.write(JSON.stringify({ jsonrpc: '2.0', method: '$/cancelRequest', params: { id } }))
+  }
+
   request<T>(method: string, params: unknown, timeoutMs = 120_000, signal?: AbortSignal): Promise<T> {
     if (this.closed) return Promise.reject(new Error('hy-exec-server is closed'))
     if (signal?.aborted) {
@@ -271,15 +383,16 @@ export class ExecRpcClient {
         if (!this.pending.has(id)) return
         this.pending.delete(id)
         clearTimeout(timer)
-        if (!this.closed) {
-          this.transport.write(JSON.stringify({ jsonrpc: '2.0', method: '$/cancelRequest', params: { id } }))
-        }
+        this.notifyCancel(id)
         reject(new ExecRpcError(-32005, 'request cancelled'))
       }
       signal?.addEventListener('abort', onAbort, { once: true })
       const timer = setTimeout(() => {
         signal?.removeEventListener('abort', onAbort)
         this.pending.delete(id)
+        // The daemon may still be running this (a request without its own
+        // deadline); stopping it keeps `push`/`exec` from outliving the caller.
+        this.notifyCancel(id)
         reject(new Error(`RPC timeout after ${timeoutMs}ms: ${method}`))
       }, timeoutMs)
       this.pending.set(id, {
@@ -297,7 +410,7 @@ export class ExecRpcClient {
     })
   }
 
-  exec(params: ExecCommandParams, signal?: AbortSignal, timeoutMs = Math.max(120_000, (params.foregroundWaitMs ?? 5_000) + 30_000)): Promise<ExecResult> {
+  exec(params: ExecCommandParams, signal?: AbortSignal, timeoutMs = execTimeoutMs(params)): Promise<ExecResult> {
     return this.request<ExecResult>('exec/command', params, timeoutMs, signal)
   }
 

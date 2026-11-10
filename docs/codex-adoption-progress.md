@@ -744,7 +744,7 @@
 
 - レポートは**注入した事実**から組み立てる純関数。CLI が exec-server・config・パスを渡すため、テストでプロセスを起動せずに検証できる。
 - sandbox が取得できない場合は `warn`（`fail` にしない）。ワークスペースや exec-server の不在は `fail` にして終了コード 1。
-- 検査項目: `node`, `workspace`, `config`, `exec-server`, `sandbox`, `denyRead`, `readOnly`, `role:worker/grader/compactor`, `mcp`, `hy-secret`, `update-feed`。
+- 検査項目: `node`, `workspace`, `config`, `exec-server`, `sandbox`, `denyRead`, `readOnly`, `role:<name>`（設定済みの全ロール: worker / orchestrator / subagent / grader / compactor / summarizer / advisor / guardian）, `mcp`, `hy-secret`, `update-feed`。2026-11-11 に 3 ロールから全ロールへ拡張し、鍵の環境変数名は `roleApiKeyEnv` に一本化した。
 
 ### 次ラウンド
 

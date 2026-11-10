@@ -73,11 +73,12 @@ export const API_ROUTES: readonly RouteContract[] = [
   { method: 'POST', path: '/api/sessions/:id/undo', summary: 'Roll the last turn back, or every turn from toTurn on (rewind); keepFiles rewinds only the conversation.', request: { toTurn: { type: 'number' }, keepFiles: { type: 'boolean' } }, errors: [400, 409] },
   { method: 'POST', path: '/api/sessions/:id/compact', summary: 'Compact the conversation now.' },
   { method: 'POST', path: '/api/sessions/:id/plan-mode', summary: 'Turn plan mode on or off.', request: { on: { type: 'boolean' } }, errors: [409] },
+  { method: 'POST', path: '/api/sessions/:id/advisor', summary: 'Turn advisor guidance on or off.', request: { enabled: { type: 'boolean' } }, errors: [409] },
   { method: 'POST', path: '/api/sessions/:id/sandbox', summary: 'Switch this session sandbox mode (grants when confined).', request: { mode: { type: 'string', required: true } }, errors: [400, 403, 409] },
   { method: 'POST', path: '/api/sessions/:id/effort', summary: 'Set reasoning effort.', request: { effort: { type: 'string' } }, errors: [400] },
   { method: 'POST', path: '/api/sessions/:id/work-mode', summary: 'Set the session work mode.', request: { mode: { type: 'string', required: true } }, errors: [400, 409] },
   { method: 'POST', path: '/api/sessions/:id/interaction-mode', summary: 'Set how the agent involves the user (autonomous or collaborative).', request: { mode: { type: 'string', required: true } }, errors: [400, 409] },
-  { method: 'POST', path: '/api/sessions/:id/model', summary: 'Switch the session model.', request: { model: { type: 'string', required: true }, provider: { type: 'string' }, baseUrl: { type: 'string' } }, errors: [400] },
+  { method: 'POST', path: '/api/sessions/:id/model', summary: 'Switch the session model and optionally save the default for its role.', request: { model: { type: 'string', required: true }, provider: { type: 'string' }, baseUrl: { type: 'string' }, save: { type: 'boolean' } }, errors: [400] },
   { method: 'POST', path: '/api/sessions/:id/title', summary: 'Rename a chat.', request: { title: { type: 'string', required: true } }, errors: [400] },
   { method: 'POST', path: '/api/sessions/:id/title/generate', summary: 'Generate a chat name with the model (heuristic fallback).', request: { from: { type: 'string' } }, response: 'GeneratedTitle', errors: [409] },
   { method: 'POST', path: '/api/sessions/:id/pin', summary: 'Pin or unpin a chat.', request: { pinned: { type: 'boolean' } } },
@@ -135,6 +136,7 @@ export const API_ROUTES: readonly RouteContract[] = [
   { method: 'GET', path: '/api/automation', summary: 'Schedules, webhooks and runs.', response: 'AutomationData' },
   { method: 'POST', path: '/api/automation/schedules', summary: 'Create a schedule.', request: { objective: { type: 'string', required: true }, cron: { type: 'string' }, cwd: { type: 'string' }, name: { type: 'string' } }, errors: [400] },
   { method: 'POST', path: '/api/automation/webhooks', summary: 'Create a webhook.', request: { objective: { type: 'string', required: true }, cwd: { type: 'string' }, name: { type: 'string' } }, errors: [400] },
+  { method: 'POST', path: '/api/github/detect-token', summary: 'Detect stored GitHub token from Windows Git Credential Manager.' },
   { method: 'POST', path: '/api/ralph', summary: 'Start a ralph job.', request: { objective: { type: 'string', required: true }, verifyCmds: { type: 'array' }, cwd: { type: 'string' } }, errors: [400] },
 
   // ----- workspace · files · settings -----

@@ -55,6 +55,25 @@ const roleConfig = {
       required: ['inputPerMTokUsd', 'outputPerMTokUsd'],
     },
     nativeTools: { type: 'boolean' },
+    headers: {
+      type: 'object',
+      additionalProperties: { type: 'string' },
+      description: 'Extra HTTP headers (a value may contain ${apiKey}).',
+    },
+    extraBody: {
+      type: 'object',
+      additionalProperties: true,
+      description: 'Extra fields merged into the request body (provider-specific).',
+    },
+    apiPath: {
+      type: 'string',
+      description: 'Path appended to baseUrl (default: the adapter own, e.g. /chat/completions).',
+    },
+    reasoningEcho: {
+      type: 'boolean',
+      description: 'Return earlier assistant reasoning to the endpoint. Unset: from the model registry, else from what the endpoint returned.',
+    },
+    requestTimeoutMs: { type: 'integer', minimum: 1000, description: 'Per-request timeout (default 600000).' },
     vision: {
       type: 'boolean',
       description: 'Whether the model accepts image input (read_image). Defaults to a provider/model heuristic.',
@@ -365,6 +384,23 @@ export const userConfigJsonSchema = {
           additionalProperties: false,
           properties: { enabled: { type: 'boolean' } },
         },
+        search: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            enabled: { type: 'boolean' },
+            binPath: { type: 'string' },
+          },
+        },
+        github: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            enabled: { type: 'boolean' },
+            token: { type: 'string' },
+            tokenSecret: { type: 'string' },
+          },
+        },
       },
     },
     autoApprove: { type: 'boolean' },
@@ -379,9 +415,18 @@ export const userConfigJsonSchema = {
       enum: ['none', 'full'],
       description: 'full: keep the model reasoning in the conversation and send it back (DeepSeek reasoning_content); the default. none: send only replies and tool calls.',
     },
+    richToolDocs: {
+      type: 'boolean',
+      description: 'Send the detailed tool descriptions (default true). Previously tied to promptVariant lean4.',
+    },
+    announcePatterns: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Extra regular expressions that recognize a reply announcing its own next step (Japanese and English are built in).',
+    },
     models: {
       type: 'array',
-      description: 'Reusable model presets shown in Settings.',
+      description: 'Models registered by the user: presets shown in Settings, plus the pricing and request-shape flags the harness cannot know by itself.',
       items: {
         type: 'object',
         additionalProperties: false,
@@ -394,6 +439,36 @@ export const userConfigJsonSchema = {
           apiKeyEnv: { type: 'string' },
           contextWindowTokens: { type: 'integer', minimum: 1 },
           maxOutputTokens: { type: 'integer', minimum: 1 },
+          pricing: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              inputPerMTokUsd: { type: 'number', minimum: 0 },
+              cachedInputPerMTokUsd: { type: 'number', minimum: 0 },
+              outputPerMTokUsd: { type: 'number', minimum: 0 },
+            },
+            required: ['inputPerMTokUsd', 'outputPerMTokUsd'],
+          },
+          compat: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              tokenField: { type: 'string', enum: ['max_tokens', 'max_completion_tokens'] },
+              effortWithTools: { type: 'boolean' },
+              temperature: { type: 'boolean' },
+              reasoningEcho: { type: 'boolean' },
+            },
+          },
+          capabilities: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              tools: { type: 'boolean' },
+              vision: { type: 'boolean' },
+              reasoning: { type: 'boolean' },
+              cache: { type: 'boolean' },
+            },
+          },
         },
         required: ['id', 'name', 'provider', 'model'],
       },

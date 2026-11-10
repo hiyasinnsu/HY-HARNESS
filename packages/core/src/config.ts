@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { catalogVision } from './model-catalog.js'
+import { catalogVision, setModelRegistry } from './model-catalog.js'
 import { resolveBundles, type ResolvedBundles } from './bundles.js'
 import type { SandboxMode } from './protocol.js'
 import type { McpServerConfig } from './mcp.js'
@@ -75,12 +75,25 @@ export interface RoleConfig {
    * provider/model heuristic; set it explicitly when the guess is wrong.
    */
   vision?: boolean
+  /** Extra HTTP headers for this role (a value may contain `${apiKey}`). */
+  headers?: Record<string, string>
+  /** Extra fields merged into the request body (provider-specific). */
+  extraBody?: Record<string, unknown>
+  /** Path appended to `baseUrl` (default: the adapter's own, e.g. `/chat/completions`). */
+  apiPath?: string
+  /**
+   * Return earlier assistant reasoning to the endpoint. Unset means "decide
+   * from the model registry, else from what the endpoint returned".
+   */
+  reasoningEcho?: boolean
+  /** Per-request timeout (default 600000 ms). */
+  requestTimeoutMs?: number
 }
 
 /** Whether a role offers tools through native function calling. */
 export function usesNativeTools(role: RoleConfig): boolean {
   if (role.nativeTools !== undefined) return role.nativeTools
-  return role.provider === 'ollama' || role.provider === 'openai-compatible' || role.provider === 'openai-responses' || role.provider === 'deepseek' || role.provider === 'opencode' || role.provider === 'anthropic'
+  return role.provider === 'ollama' || role.provider === 'openai-compatible' || role.provider === 'openai-responses' || role.provider === 'deepseek' || role.provider === 'opencode' || role.provider === 'anthropic' || role.provider === 'gemini'
 }
 
 /**
@@ -94,11 +107,13 @@ export function roleSupportsImages(role: RoleConfig): boolean {
   const listed = catalogVision(role.provider, role.model)
   if (listed !== undefined) return listed
   if (role.provider === 'mock') return true
-  if (role.provider === 'gemini' || role.provider === 'openai-compatible' || role.provider === 'deepseek' || role.provider === 'anthropic' || role.provider === 'openai-responses') return true
-  if (role.provider === 'ollama' || role.provider === 'opencode') {
-    return /(llava|vision|-vl\b|vl:|gemma3|minicpm-v|pixtral|qwen2?\.?5-vl)/i.test(role.model)
-  }
-  return false
+  // The Gemini adapter rejects image messages (it does not send them yet).
+  if (role.provider === 'gemini') return false
+  // A local model's name is the only signal before the first request.
+  if (role.provider === 'ollama') return /(llava|vision|-vl\b|vl:|gemma3|minicpm-v|pixtral|qwen2?\.?5-vl)/i.test(role.model)
+  // Every other adapter sends image parts; an endpoint that refuses them says
+  // so on the request, which is clearer than guessing per model.
+  return true
 }
 
 /** Budget4D (design §7): rounds, tokens, USD (undefined = no cap), wall-clock. */
@@ -181,6 +196,8 @@ export interface HarnessConfig {
   compactorRole: RoleConfig
   /** Summarizes visible thinking in Japanese; defaults to the worker. */
   summarizerRole: RoleConfig
+  /** Model used by advisor when enabled; defaults to worker role. */
+  advisorRole?: RoleConfig
   /** `--rule` texts, pinned next to AGENTS.md (design §8). */
   rules: string[]
   limits: ContextLimits
@@ -204,6 +221,18 @@ export interface HarnessConfig {
    * `lean` was the default before; `legacy` is the opening used until 2026-11-07.
    */
   promptVariant: 'lean' | 'legacy' | 'lean2' | 'lean3' | 'lean4'
+  /**
+   * Send the detailed tool descriptions (`tool-docs.ts`) with the native tool
+   * definitions. Default true; previously this was tied to `promptVariant:
+   * lean4`. The text protocol keeps the short registry descriptions, because
+   * the older prompt variants are reproduced with them.
+   */
+  richToolDocs: boolean
+  /**
+   * Extra regular expressions for "announced the next step and stopped". The
+   * built-in detection is Japanese and English; users add their language here.
+   */
+  announcePatterns: string[]
   ptc: boolean
   projectTrusted: boolean
   protectedPaths: string[]
@@ -238,6 +267,8 @@ export interface HarnessConfig {
   bundles: ResolvedBundles
   /** The signed desktop release feed (WP-53); unset means updates are manual. */
   update?: UpdateConfig
+  /** Automation presets configuration (browser / desktop / search / github). */
+  automation?: AutomationConfig
 }
 
 /** The signed release feed and the key that signs it (WP-53). */
@@ -252,7 +283,7 @@ export interface UpdateConfig {
   autoCheck?: boolean
 }
 
-/** Optional first-party automation MCP presets (Playwright / agent-desktop). */
+/** Optional first-party automation MCP presets (Playwright / agent-desktop / RustXNG). */
 export interface AutomationConfig {
   browser?: {
     enabled?: boolean
@@ -262,6 +293,16 @@ export interface AutomationConfig {
   }
   desktop?: {
     enabled?: boolean
+  }
+  search?: {
+    enabled?: boolean
+    binPath?: string
+  }
+  github?: {
+    enabled?: boolean
+    token?: string
+    /** `secrets.<name>` with a DPAPI reference (CP-08). */
+    tokenSecret?: string
   }
 }
 
@@ -324,6 +365,7 @@ interface UserConfigFile {
     grader?: Partial<RoleConfig>
     compactor?: Partial<RoleConfig>
     summarizer?: Partial<RoleConfig>
+    advisor?: Partial<RoleConfig>
     guardian?: Partial<RoleConfig>
   }
   guardian?: {
@@ -387,7 +429,20 @@ interface UserConfigFile {
   reasoningHistory?: ReasoningHistory
   /** See HarnessConfig.promptVariant. */
   promptVariant?: 'lean' | 'legacy' | 'lean2' | 'lean3' | 'lean4'
-  /** Reusable model definitions shown in Settings. */
+  /** See HarnessConfig.richToolDocs. */
+  richToolDocs?: boolean
+  /**
+   * Extra regular expressions that recognize a reply announcing its own next
+   * step (the built-in detection covers Japanese and English).
+   */
+  announcePatterns?: string[]
+  /**
+   * Models the user registered. The harness ships no per-model facts (context
+   * window, price, API quirks): they change over time. Entries here supply the
+   * pricing used by the USD budget and the compatibility flags used when a
+   * request is built; anything not registered falls back to the role's values
+   * and to runtime negotiation.
+   */
   models?: Array<{
     id: string
     name: string
@@ -397,6 +452,16 @@ interface UserConfigFile {
     apiKeyEnv?: string
     contextWindowTokens?: number
     maxOutputTokens?: number
+    /** USD per million tokens; required for a USD budget with this model. */
+    pricing?: { inputPerMTokUsd: number; cachedInputPerMTokUsd?: number; outputPerMTokUsd: number }
+    /** Request-shape flags (the registry wins over the role's defaults). */
+    compat?: {
+      tokenField?: 'max_tokens' | 'max_completion_tokens'
+      effortWithTools?: boolean
+      temperature?: boolean
+      reasoningEcho?: boolean
+    }
+    capabilities?: { tools?: boolean; vision?: boolean; reasoning?: boolean; cache?: boolean }
   }>
 }
 
@@ -536,6 +601,11 @@ function isOpenCodeBaseUrl(baseUrl: string | undefined): boolean {
   }
 }
 
+export function isUnavailableOpenCodeGoModel(baseUrl: string | undefined, model: string): boolean {
+  return model === 'gemini-3.8-flash' && baseUrl !== undefined && isOpenCodeBaseUrl(baseUrl) &&
+    new URL(baseUrl).pathname.startsWith('/inference/go/')
+}
+
 function normalizeOpenCodeRole(role: RoleConfig): void {
   if (role.provider !== 'opencode' && !isOpenCodeBaseUrl(role.baseUrl)) return
   role.model = OPENCODE_MODEL_ALIASES[role.model] ?? role.model
@@ -640,6 +710,23 @@ function envProvider(): ProviderKind | undefined {
   return kinds.find((kind) => kind === v)
 }
 
+export function findRustxngBinary(harnessRoot: string, customPath?: string): string | undefined {
+  if (customPath && fs.existsSync(customPath)) return customPath
+  const isWin = process.platform === 'win32'
+  const exeName = isWin ? 'rustxng.exe' : 'rustxng'
+  const bundled = path.join(harnessRoot, 'bin', exeName)
+  if (fs.existsSync(bundled)) return bundled
+  const userBin = path.join(userConfigDir(), 'bin', exeName)
+  if (fs.existsSync(userBin)) return userBin
+  const pathDirs = (process.env.PATH ?? '').split(path.delimiter)
+  for (const dir of pathDirs) {
+    if (!dir) continue
+    const candidate = path.join(dir, exeName)
+    if (fs.existsSync(candidate)) return candidate
+  }
+  return undefined
+}
+
 /** First-party automation presets are ordinary MCP servers, opt-in from the user config. */
 function automationServers(user: UserConfigFile | undefined): Record<string, McpServerConfig> {
   const out: Record<string, McpServerConfig> = {}
@@ -686,6 +773,19 @@ function automationServers(user: UserConfigFile | undefined): Record<string, Mcp
       trusted: false,
     }
   }
+
+  if (automation.search?.enabled === true) {
+    const rustxng = findRustxngBinary(harnessRoot, automation.search?.binPath)
+    if (rustxng) {
+      out.rustxng = {
+        command: rustxng,
+        args: ['mcp'],
+        timeoutMs: 60_000,
+        trusted: true,
+      }
+    }
+  }
+
   return out
 }
 
@@ -693,6 +793,22 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
   const workspaceRoot = canonicalWorkspace(overrides.cwd)
   const userConfigPath = path.join(userConfigDir(), 'config.json')
   const user = applyProfile(readJson<UserConfigFile>(userConfigPath), overrides.profile)
+  // Model facts are user data (`models[]`): the harness keeps no per-model
+  // context windows, prices or API quirks of its own, because they change and
+  // cannot be kept current inside a released binary.
+  setModelRegistry(
+    (user?.models ?? []).map((entry) => ({
+      id: `${entry.provider}:${entry.model}`,
+      provider: entry.provider,
+      model: entry.model,
+      label: entry.name,
+      ...(entry.contextWindowTokens !== undefined ? { contextWindowTokens: entry.contextWindowTokens } : {}),
+      ...(entry.maxOutputTokens !== undefined ? { maxOutputTokens: entry.maxOutputTokens } : {}),
+      ...(entry.pricing !== undefined ? { pricing: entry.pricing } : {}),
+      ...(entry.compat !== undefined ? { compat: entry.compat } : {}),
+      ...(entry.capabilities !== undefined ? { capabilities: entry.capabilities } : {}),
+    })),
+  )
   const workspaceRoots = workspaceRootsFor(workspaceRoot, configuredExtraRoots(user, workspaceRoot))
   const projectConfigPath = path.join(workspaceRoot, '.hy-harness', 'config.json')
   const project = readJson<ProjectConfigFile>(projectConfigPath)
@@ -763,7 +879,18 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
     ...(overrides.mock === true ? {} : user?.roles?.summarizer ?? {}),
   }
   summarizerRole.provider = summarizerProvider
-  for (const roleConfig of [role, graderRole, orchestratorRole, subagentRole, guardianRole, compactorRole, summarizerRole]) {
+
+  const advisorProvider: ProviderKind = overrides.mock === true ? 'mock' : user?.roles?.advisor?.provider ?? provider
+  const advisorRole: RoleConfig =
+    overrides.mock === true || user?.roles?.advisor === undefined
+      ? role
+      : {
+          ...(advisorProvider === provider ? role : defaultRole(advisorProvider)),
+          ...user.roles.advisor,
+          provider: advisorProvider,
+        }
+
+  for (const roleConfig of [role, graderRole, orchestratorRole, subagentRole, guardianRole, compactorRole, summarizerRole, advisorRole]) {
     if (roleConfig) normalizeOpenCodeRole(roleConfig)
   }
 
@@ -791,7 +918,18 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
   resolveRoleSecrets(subagentRole, 'subagent')
   resolveRoleSecrets(compactorRole, 'compactor')
   resolveRoleSecrets(summarizerRole, 'summarizer')
+  resolveRoleSecrets(advisorRole, 'advisor')
   if (guardianRole !== undefined) resolveRoleSecrets(guardianRole, 'guardian')
+
+  const automationConfig: AutomationConfig | undefined = user?.automation ? { ...user.automation } : undefined
+  if (automationConfig?.github?.tokenSecret !== undefined) {
+    const ref = namedSecrets[automationConfig.github.tokenSecret]
+    if (ref !== undefined) {
+      automationConfig.github.token = resolveSecretRef(ref, undefined, `github secret ${automationConfig.github.tokenSecret}`)
+    }
+  } else if (automationConfig?.github?.token !== undefined && isSecretRef(automationConfig.github.token)) {
+    automationConfig.github.token = resolveSecretRef(automationConfig.github.token, undefined, 'github token')
+  }
 
   const trustedProject =
     overrides.projectTrusted === true || (user?.trustedProjects ?? []).some((t) => path.resolve(t.path) === workspaceRoot)
@@ -807,11 +945,14 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
     keepRecentTurns: tighten(pl.keepRecentTurns, 2, Math.max),
   }
   const pb = project?.budget4D ?? {}
-  const projectCost = tighten(pb.maxCostUsd, 2, Math.min)
+  const projectCost =
+    pb.maxCostUsd !== undefined && Number.isFinite(pb.maxCostUsd)
+      ? tighten(pb.maxCostUsd, 2, Math.min)
+      : undefined
   const budget: BudgetLimits = {
     maxRounds: overrides.maxRounds ?? tighten(pb.maxRounds, 5, Math.min),
     maxTotalTokens: overrides.maxTotalTokens ?? tighten(pb.maxTotalTokens, 500_000, Math.min),
-    maxCostUsd: overrides.maxCostUsd === 'off' ? undefined : overrides.maxCostUsd ?? projectCost,
+    maxCostUsd: overrides.maxCostUsd === 'off' ? undefined : (overrides.maxCostUsd ?? projectCost),
     maxWallClockMs: overrides.maxWallClockMs ?? tighten(pb.maxWallClockMs, 30 * 60_000, Math.min),
   }
 
@@ -875,6 +1016,7 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
     guardianApproveBelow: user?.guardian?.approveBelow ?? 80,
     compactorRole,
     summarizerRole,
+    ...(advisorRole !== undefined ? { advisorRole } : {}),
     rules: overrides.rules ?? [],
     limits,
     budget,
@@ -886,6 +1028,8 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
     reasoningHistory: user?.reasoningHistory === 'none' ? 'none' : 'full',
     // lean is the default since 2026-11-07 (no measurable difference, shorter).
     promptVariant: user?.promptVariant === 'lean' || user?.promptVariant === 'legacy' || user?.promptVariant === 'lean2' || user?.promptVariant === 'lean3' ? user.promptVariant : 'lean4',
+    richToolDocs: user?.richToolDocs !== false,
+    announcePatterns: (user?.announcePatterns ?? []).filter((pattern) => typeof pattern === 'string' && pattern.trim().length > 0),
     ptc: overrides.ptc ?? process.env.HY_PTC === '1',
     projectTrusted: trusted,
     protectedPaths: project?.protectedPaths ?? [],
@@ -905,6 +1049,7 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
     ...(overrides.sessionQuery === true || user?.sessionQuery?.enabled === true ? { sessionQuery: true } : {}),
     ...(overrides.persistentShell === true || user?.persistentShell?.enabled === true ? { persistentShell: true } : {}),
     ...(user?.update ? { update: { ...user.update } } : {}),
+    ...(automationConfig ? { automation: automationConfig } : {}),
     bundles,
   }
 }
@@ -1013,18 +1158,30 @@ function mergeHooks(a: HooksConfig = {}, b: HooksConfig = {}): HooksConfig {
 export function roleApiKey(role: RoleConfig): string | undefined {
   if (role.provider === 'ollama' || role.provider === 'mock') return undefined
   if (role.apiKey?.trim()) return role.apiKey.trim()
-  const env =
-    role.apiKeyEnv ??
-    (role.provider === 'deepseek'
-      ? 'DEEPSEEK_API_KEY'
-      : role.provider === 'gemini'
-        ? 'GEMINI_API_KEY'
-        : role.provider === 'opencode'
-          ? 'OPENCODE_API_KEY'
-          : role.provider === 'anthropic'
-            ? 'ANTHROPIC_API_KEY'
-            : 'OPENAI_API_KEY')
-  return process.env[env]
+  const env = roleApiKeyEnv(role)
+  return env === undefined ? undefined : process.env[env]
+}
+
+/**
+ * The environment variable a role's key comes from (undefined when the
+ * provider needs none). The single place that knows the provider default, so
+ * `hy doctor` and role construction cannot drift apart.
+ */
+export function roleApiKeyEnv(role: RoleConfig): string | undefined {
+  if (role.provider === 'ollama' || role.provider === 'mock') return undefined
+  if (role.apiKeyEnv !== undefined) return role.apiKeyEnv
+  switch (role.provider) {
+    case 'deepseek':
+      return 'DEEPSEEK_API_KEY'
+    case 'gemini':
+      return 'GEMINI_API_KEY'
+    case 'opencode':
+      return 'OPENCODE_API_KEY'
+    case 'anthropic':
+      return 'ANTHROPIC_API_KEY'
+    default:
+      return 'OPENAI_API_KEY'
+  }
 }
 
 /** CP-37: every path a config layer can come from, for `hy config paths`. */

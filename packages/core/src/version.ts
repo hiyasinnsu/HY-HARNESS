@@ -5,4 +5,4 @@
  * the release feed comparison and `bootstrap.version` can never drift from the
  * version that was actually built.
  */
-export const HARNESS_VERSION = '0.5.0'
+export const HARNESS_VERSION = '0.5.55'

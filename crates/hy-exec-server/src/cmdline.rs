@@ -116,7 +116,15 @@ pub fn shell_invocation(shell: &Shell, command: &str) -> Invocation {
         ShellDialect::Pwsh | ShellDialect::Powershell => {
             // With redirected output, PowerShell serializes progress records
             // (e.g. first-time module loading) to stderr as `#< CLIXML` noise.
-            let command = format!("$ProgressPreference = 'SilentlyContinue'; {command}");
+            // The encodings match the persistent shell (`shell.rs`): without
+            // them a non-Japanese code page emits ANSI bytes that `jobs.rs`
+            // decodes as Shift_JIS (T-3).
+            let command = format!(
+                "$ProgressPreference = 'SilentlyContinue'; \
+                 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+                 $OutputEncoding = [System.Text.Encoding]::UTF8; \
+                 {command}"
+            );
             let utf16: Vec<u8> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
             let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
             Invocation::Shell {
@@ -185,6 +193,37 @@ mod tests {
                 None
             );
             assert!(resolve_program(".\\zz-planted-tool", "", pathext, dir.path()).is_some());
+        }
+    }
+
+    /// The one-shot PowerShell prefix: no CLIXML progress noise, and UTF-8
+    /// output like the persistent shell (`shell.rs`), so `jobs.rs` stops
+    /// reading ANSI bytes from a non-Japanese code page as Shift_JIS (T-3).
+    #[test]
+    fn powershell_prefix_sets_progress_and_utf8_output() {
+        for dialect in [ShellDialect::Pwsh, ShellDialect::Powershell] {
+            let shell = Shell {
+                dialect,
+                executable: PathBuf::from("powershell.exe"),
+            };
+            let Invocation::Shell { args, .. } = shell_invocation(&shell, "Get-ChildItem -Name")
+            else {
+                panic!("a PowerShell dialect must use the shell invocation");
+            };
+            assert_eq!(args[args.len() - 2], "-EncodedCommand");
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&args[args.len() - 1])
+                .expect("the command is base64 UTF-16LE");
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            let command = String::from_utf16(&units).expect("valid UTF-16");
+            let prefix = "$ProgressPreference = 'SilentlyContinue'; \
+                          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+                          $OutputEncoding = [System.Text.Encoding]::UTF8; ";
+            assert!(command.starts_with(prefix), "prefix mismatch: {command}");
+            assert_eq!(&command[prefix.len()..], "Get-ChildItem -Name");
         }
     }
 

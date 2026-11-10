@@ -612,12 +612,22 @@ impl Server {
             )
             .with_data(json!({ "decision": "deny", "sandbox": "read-only" })));
         }
+        let encoding = match p.encoding.as_deref() {
+            None => None,
+            Some(name) => Some(patch::Encoding::parse(name).ok_or_else(|| {
+                RpcError::new(
+                    error_code::INVALID_PARAMS,
+                    format!("patch/apply: unknown encoding {name:?}; use utf8, utf16le or utf16be"),
+                )
+            })?),
+        };
         let apply = || {
             patch::apply(
                 &state.fs_guard,
                 &p.patch,
                 p.dry_run,
                 p.enforce_protected_paths,
+                encoding,
             )
         };
         // Writes run as the workspace-write token when the sandbox is available,
@@ -992,6 +1002,21 @@ fn build_env(state: &State, private_temp: Option<&Path>) -> Vec<(String, String)
     keys.extend(state.env_passthrough.iter().cloned());
     let mut env = Vec::new();
     for key in keys {
+        let upper = key.to_ascii_uppercase();
+        if matches!(
+            upper.as_str(),
+            "GH_TOKEN"
+                | "GITHUB_TOKEN"
+                | "GH_ENTERPRISE_TOKEN"
+                | "GITHUB_ENTERPRISE_TOKEN"
+                | "GITHUB_PAT"
+                | "GIT_CONFIG_PARAMETERS"
+                | "GIT_CONFIG_COUNT"
+        ) || upper.starts_with("GIT_CONFIG_KEY_")
+            || upper.starts_with("GIT_CONFIG_VALUE_")
+        {
+            continue;
+        }
         if let Ok(v) = std::env::var(&key) {
             env.push((key, v));
         }

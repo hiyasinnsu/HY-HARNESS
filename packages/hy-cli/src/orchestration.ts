@@ -41,6 +41,19 @@ export interface WorkerRecord {
   /** One-line reason from BLOCKED_BY, or the approval that stopped the turn. */
   blocker?: string | undefined
   closedAt?: number
+  /** Closing releases ownership, not the conversation or its cached history. */
+  pendingMessages?: { id: string; text: string; createdAt: number }[]
+  lastInstruction?: { id: string; receivedAt: number; appliedAt?: number }
+  briefRevision?: number
+}
+
+export interface ProjectBrief {
+  revision: number
+  objective: string
+  successCriteria: string
+  constraints: string
+  decisions: string
+  evidence: string
 }
 
 export interface OrchestrationRecord {
@@ -51,6 +64,18 @@ export interface OrchestrationRecord {
   updatedAt: number
   maxWorkers: number
   workers: WorkerRecord[]
+  brief?: ProjectBrief
+  /** Durable report queue; remove only after its control turn completes. */
+  inbox?: { id: string; text: string; interrupt?: boolean }[]
+  directScope?: string[]
+  /**
+   * USD reserved for turns that are running right now. It is released when
+   * each turn settles, so a stuck turn cannot block the orchestration for
+   * good; it is not a record of what was spent.
+   */
+  reservedCostUsd?: number
+  /** USD already spent by finished turns of this orchestration (0 when unset). */
+  spentCostUsd?: number
 }
 
 export interface OrchestrationState {
@@ -104,9 +129,54 @@ export function loadOrchestrationState(file: string): OrchestrationState {
       updatedAt: typeof a.updatedAt === 'number' ? a.updatedAt : Date.now(),
       maxWorkers: typeof a.maxWorkers === 'number' ? Math.max(1, Math.min(MAX_WORKERS_CEILING, Math.floor(a.maxWorkers))) : DEFAULT_MAX_WORKERS,
       workers,
+      // Files written before the split carry the cumulative spend in
+      // `reservedCostUsd` and nothing is running across an upgrade, so that
+      // value becomes the spend and the reservation starts empty (counting it
+      // as both would reserve the same dollars twice).
+      ...(typeof a.spentCostUsd === 'number' && Number.isFinite(a.spentCostUsd) && a.spentCostUsd >= 0
+        ? {
+            spentCostUsd: a.spentCostUsd,
+            ...(typeof a.reservedCostUsd === 'number' && Number.isFinite(a.reservedCostUsd) && a.reservedCostUsd >= 0
+              ? { reservedCostUsd: a.reservedCostUsd }
+              : {}),
+          }
+        : typeof a.reservedCostUsd === 'number' && Number.isFinite(a.reservedCostUsd) && a.reservedCostUsd >= 0
+          ? { spentCostUsd: a.reservedCostUsd, reservedCostUsd: 0 }
+          : {}),
+      ...(validBrief(a.brief) ? { brief: a.brief } : {}),
+      ...(Array.isArray(a.inbox) ? { inbox: a.inbox.filter((v): v is NonNullable<OrchestrationRecord['inbox']>[number] => !!v && typeof v.id === 'string' && typeof v.text === 'string') } : {}),
     },
   }
 }
+
+function validBrief(value: unknown): value is ProjectBrief {
+  if (!value || typeof value !== 'object') return false
+  const b = value as Record<string, unknown>
+  return Number.isSafeInteger(b.revision) && Number(b.revision) >= 1 &&
+    ['objective', 'successCriteria', 'constraints', 'decisions', 'evidence'].every((key) => typeof b[key] === 'string')
+}
+
+export function renderProjectBrief(record: OrchestrationRecord | undefined): string {
+  const b = record?.brief
+  return b ? `[project brief revision ${b.revision}]\nObjective: ${b.objective}\nSuccess: ${b.successCriteria}\nConstraints: ${b.constraints}\nDecisions: ${b.decisions}\nEvidence: ${b.evidence}\n[/project brief]` : record ? '[project brief revision 0]\nNo shared brief has been recorded yet.\n[/project brief]' : ''
+}
+
+/** Shared by fresh workers, resumed workers and the orchestrator's direct edits. */
+export function assertScopeAvailable(record: OrchestrationRecord, scope: readonly string[], workerId?: string): void {
+  const owners = scopeOwners(record).filter((worker) => worker.runId !== workerId)
+  for (const next of scope) {
+    for (const owner of owners) {
+      const current = owner.scope.find((held) => scopesOverlap(next, held))
+      if (current) throw new Error(`scope ${next} overlaps ${current} owned by ${owner.title} (${owner.runId}); continue that worker or review and release its scope first`)
+    }
+    if (record.directScope?.some((held) => scopesOverlap(next, held))) {
+      throw new Error(`scope ${next} is owned by the orchestrator; release it before delegating`)
+    }
+  }
+}
+
+export const WORKER_REPORT_MISSING =
+  'Worker report is missing a valid STATUS line. Request the remaining work, verification and a complete report.'
 
 function sanitizeWorker(raw: Record<string, unknown>): WorkerRecord | undefined {
   if (
@@ -117,7 +187,9 @@ function sanitizeWorker(raw: Record<string, unknown>): WorkerRecord | undefined 
   ) {
     return undefined
   }
-  const status = raw.status
+  const legacyMissingReport = raw.status === 'waiting' && raw.lastReportStatus === undefined
+  const legacyReport = legacyMissingReport && typeof raw.lastSummary === 'string' ? parseWorkerReport(raw.lastSummary) : undefined
+  const status = legacyMissingReport ? legacyReport?.status === 'done' ? 'waiting' : legacyReport?.status ?? 'partial' : raw.status
   const allowed: readonly WorkerStatus[] = [
     'queued',
     'running',
@@ -129,7 +201,8 @@ function sanitizeWorker(raw: Record<string, unknown>): WorkerRecord | undefined 
     'interrupted',
     'done',
   ]
-  const reportStatus = raw.lastReportStatus
+  const reportStatus = raw.lastReportStatus ?? legacyReport?.status
+  const blocker = legacyMissingReport && !legacyReport ? WORKER_REPORT_MISSING : raw.blocker ?? legacyReport?.reason
   const allowedReports: readonly WorkerReportStatus[] = ['done', 'partial', 'blocked']
   return {
     runId: raw.runId,
@@ -146,8 +219,15 @@ function sanitizeWorker(raw: Record<string, unknown>): WorkerRecord | undefined 
     ...(typeof reportStatus === 'string' && (allowedReports as readonly string[]).includes(reportStatus)
       ? { lastReportStatus: reportStatus as WorkerReportStatus }
       : {}),
-    ...(typeof raw.blocker === 'string' && raw.blocker.trim() ? { blocker: raw.blocker.trim().slice(0, 4_000) } : {}),
+    ...(typeof blocker === 'string' && blocker.trim() ? { blocker: blocker.trim().slice(0, 4_000) } : {}),
     ...(typeof raw.closedAt === 'number' ? { closedAt: raw.closedAt } : {}),
+    ...(Number.isSafeInteger(raw.briefRevision) && Number(raw.briefRevision) >= 0 ? { briefRevision: Number(raw.briefRevision) } : {}),
+    ...(Array.isArray(raw.pendingMessages) ? {
+      pendingMessages: raw.pendingMessages.filter((m): m is { id: string; text: string; createdAt: number } =>
+        !!m && typeof m === 'object' && typeof m.id === 'string' && typeof m.text === 'string' && typeof m.createdAt === 'number'),
+    } : {}),
+    ...(raw.lastInstruction && typeof raw.lastInstruction === 'object' && typeof (raw.lastInstruction as Record<string, unknown>).id === 'string' && typeof (raw.lastInstruction as Record<string, unknown>).receivedAt === 'number'
+      ? { lastInstruction: raw.lastInstruction as NonNullable<WorkerRecord['lastInstruction']> } : {}),
   }
 }
 
@@ -194,7 +274,10 @@ export function normalizeScopes(raw: readonly string[]): string[] {
 /** True when two directory/file scopes overlap. A `file:` scope owns one path. */
 export function scopesOverlap(a: string, b: string): boolean {
   const file = (scope: string) => scope.startsWith('file:')
-  const pathOf = (scope: string) => (file(scope) ? scope.slice(5) : scope).replace(/\/+$/, '')
+  const pathOf = (scope: string) => {
+    const value = (file(scope) ? scope.slice(5) : scope).replace(/\/+$/, '')
+    return process.platform === 'win32' ? value.toLowerCase() : value
+  }
   const af = file(a)
   const bf = file(b)
   if (af && bf) return pathOf(a) === pathOf(b)
@@ -207,10 +290,7 @@ export function scopesOverlap(a: string, b: string): boolean {
 
 export function workerOwnsScope(worker: WorkerRecord, rel: string): boolean {
   if (!workerHoldsScope(worker)) return false
-  const value = rel.replace(/\\/g, '/').replace(/^\/+/, '')
-  return worker.scope.some((scope) =>
-    scope.startsWith('file:') ? value === scope.slice(5) : value === scope || value.startsWith(`${scope}/`),
-  )
+  return worker.scope.some((scope) => scopesOverlap(scope, `file:${rel.replace(/\\/g, '/').replace(/^\/+/, '')}`))
 }
 
 /** True while the worker still reserves its scope. Only closing releases it. */
@@ -262,11 +342,10 @@ export function canSpawnWorker(record: OrchestrationRecord): boolean {
 }
 
 /**
- * Parses the machine-readable status lines required by the worker prompt. If
- * an older worker omits them, the caller keeps the legacy "waiting" state.
+ * Parses the machine-readable status lines required by the worker prompt.
  */
 export function parseWorkerReport(text: string): { status: WorkerReportStatus; reason?: string } | undefined {
-  const status = /^\s*(?:\*\*)?STATUS(?:\*\*)?\s*:\s*(?:\*\*)?\s*(done|partial|blocked)\b/im.exec(text)
+  const status = /^[ \t]*(?:\*\*)?STATUS(?:\*\*)?[ \t]*:[ \t]*(?:\*\*)?[ \t]*(done|partial|blocked)(?:\*\*)?[ \t]*$/im.exec(text)
   if (!status) return undefined
   const reason = /^\s*(?:\*\*)?BLOCKED_BY(?:\*\*)?\s*:\s*(?:\*\*)?\s*(.+?)\s*$/im.exec(text)?.[1]?.replace(/\*\*$/, '').trim()
   return {

@@ -8,7 +8,10 @@
 // approval chain unless the server is marked `trusted` or the tool says it is
 // read-only (`annotations.readOnlyHint`).
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
 import { jsonSchemaToTs, type Schema } from './tool-registry.js'
+import { withoutGitHubCredentials } from './github.js'
 
 export interface McpServerConfig {
   /** CP-11: remote MCP endpoint (Streamable HTTP). Takes precedence over command. */
@@ -40,11 +43,81 @@ export interface McpTool {
   name: string
   description: string
   inputSchema: Schema
+  /**
+   * The server's `annotations.readOnlyHint`, and only when it is exactly
+   * `true`: an absent or false hint keeps the tool on the serial,
+   * approval-gated path (5-4). `needsApproval` and the tool spec built from
+   * this list both read it.
+   */
   readOnly: boolean
 }
 
 export const MCP_PROTOCOL_VERSION = '2025-06-18'
 const MAX_CATALOG_TOOLS = 40
+
+/** The environment entries the stdio spawn looks at (`process.env` by default). */
+type WindowsSpawnEnv = { PATH?: string | undefined; PATHEXT?: string | undefined; ComSpec?: string | undefined }
+
+/**
+ * Resolves a bare command name on `PATH` + `PATHEXT` (T-5): `npx`, `uvx` and
+ * `pnpm` are `.cmd` shims on Windows. A name with a path separator or an
+ * extension is not resolved here — the caller spawns it as written.
+ */
+export function resolveWindowsCommand(command: string, env: WindowsSpawnEnv = process.env): string | undefined {
+  if (/[\\/]/.test(command) || path.extname(command) !== '') return undefined
+  const exts = (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter((ext) => ext !== '')
+  for (const dir of (env.PATH ?? '').split(';')) {
+    if (dir === '') continue
+    for (const ext of exts) {
+      const candidate = path.join(dir, `${command}${ext}`)
+      if (fs.statSync(candidate, { throwIfNoEntry: false })?.isFile() !== true) continue
+      // Report the file's own spelling (PATHEXT is usually upper-case, the
+      // shim is not): the same command line must match what cmd.exe sees.
+      try {
+        return fs.realpathSync.native(candidate)
+      } catch {
+        return candidate
+      }
+    }
+  }
+  return undefined
+}
+
+/**
+ * Quotes one argument for a `cmd.exe` command line (the `CommandLineToArgvW`
+ * rules). Arguments come from the user's own configuration, like the server
+ * command itself; cmd still expands `%VAR%` inside quotes, which is cmd's
+ * behavior rather than ours.
+ */
+export function quoteForCmd(arg: string): string {
+  if (arg !== '' && !/[\s"&|<>^()%,;=!]/.test(arg)) return arg
+  return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
+}
+
+/**
+ * T-5: what to spawn for a stdio server. POSIX spawns the command as
+ * configured. On Windows a resolved `.cmd`/`.bat` shim (or one named with that
+ * extension) runs through `cmd.exe` with one quoted command line, because Node
+ * refuses to spawn batch files directly; a real executable is spawned as is.
+ */
+export function stdioCommand(
+  command: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  env: WindowsSpawnEnv = process.env,
+): { file: string; args: string[]; windowsVerbatimArguments?: boolean } {
+  if (platform !== 'win32') return { file: command, args }
+  const resolved = resolveWindowsCommand(command, env) ?? command
+  if (!/\.(cmd|bat)$/i.test(resolved)) return { file: resolved, args }
+  // `cmd /d /s /c "<line>"`: /s makes cmd strip the outer quotes and run the
+  // rest verbatim, so each argument keeps its own quoting.
+  const line = [resolved, ...args].map(quoteForCmd).join(' ')
+  return {
+    file: env.ComSpec ?? 'cmd.exe',
+    args: ['/d', '/s', '/c', `"${line}"`],
+    windowsVerbatimArguments: true,
+  }
+}
 
 interface Pending {
   resolve: (value: unknown) => void
@@ -77,11 +150,14 @@ export class McpClient implements McpTransport {
 
   static async start(name: string, config: McpServerConfig): Promise<McpClient> {
     if (!config.command) throw new Error(`MCP server ${name}: command is required for stdio`)
-    const child = spawn(config.command, config.args ?? [], {
+    const env = { ...withoutGitHubCredentials(), ...(config.env ?? {}) }
+    const invocation = stdioCommand(config.command, config.args ?? [], process.platform, env)
+    const child = spawn(invocation.file, invocation.args, {
       cwd: config.cwd,
-      env: { ...process.env, ...(config.env ?? {}) },
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
     })
     const client = new McpClient(name, child, config.timeoutMs ?? 60_000)
     await client.request('initialize', {

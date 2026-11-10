@@ -17,6 +17,7 @@ export interface Schema {
   enum?: readonly (string | number | boolean)[]
   anyOf?: Schema[]
   minimum?: number
+  additionalProperties?: boolean | Schema
   /** Rendered once as a named type in the SDK (`type Job = …`) and referenced. */
   title?: string
 }
@@ -24,6 +25,8 @@ export interface Schema {
 export interface ToolSpec {
   /** Name the agent and the dispatcher use (`search_grep`). */
   name: string
+  /** An existing capability that authorizes this generated tool. */
+  permission?: string
   /** Dotted path inside `run_code` (`search.grep`), when exposed there. */
   sdk?: string
   /** Offered to the model as a top-level tool. */
@@ -33,10 +36,25 @@ export interface ToolSpec {
   description: string
   input: Schema
   output: Schema
+  /**
+   * G-12: other spellings a model may use for an argument the schema already
+   * declares (`{ old_str: … }` for `old`). `normalizeToolArgs` rewrites them
+   * once, generically, before validation. An alias must not name a declared
+   * property, or it would move a real argument.
+   */
+  aliases?: Readonly<Record<string, string>>
   /** Only in objective (`hy ralph`) sessions, where it is also a wire tool (OQ-4). */
   objectiveOnly?: boolean
   /** Advertised only when the session has this feature (e.g. skills were found). */
-  requires?: 'skills' | 'mcp' | 'delegate' | 'web' | 'ask' | 'search' | 'lsp' | 'memory' | 'deferred'
+  requires?: 'skills' | 'mcp' | 'delegate' | 'background-agents' | 'web' | 'ask' | 'search' | 'lsp' | 'memory' | 'deferred' | 'github' | 'git-write' | 'github-write'
+  /**
+   * Offered as a top-level wire tool only when the session has this feature,
+   * while the SDK declaration stays unconditional: `renderSdk` is the fixed
+   * `run_code` surface (snapshotted), and a session inside `run_code` may use
+   * `tools.jobs.*` even when the shell is not a wire tool. `job_*` uses this:
+   * the shell backgrounds a command, so the job tools travel beside it.
+   */
+  wireRequires?: 'shell'
   /**
    * CP-10: deferred tools stay out of the initial prompt; `tool_search`
    * loads them (and they are callable only after loading).
@@ -78,7 +96,16 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     readOnly: true,
     description: 'Read a workspace file (read before editing). Added roots use root:path.',
     input: obj({ path: str(), startLine: int(), endLine: int() }, ['path']),
+    aliases: { file: 'path' },
     output: obj({ content: str(), totalLines: { type: 'integer' }, truncated: bool }, ['content', 'totalLines', 'truncated']),
+  },
+  {
+    name: 'verify_file',
+    wire: true,
+    readOnly: true,
+    description: 'Run a static check on one workspace file without running its code. Use check=json to validate JSON or check=contains with text to look for a literal string. During orchestration the file must be outside active workers’ edit scopes. Use shell for tests with broader dependencies.',
+    input: obj({ path: str(), check: { type: 'string', enum: ['json', 'contains'] }, text: str() }, ['path', 'check']),
+    output: obj({ path: str(), passed: bool, detail: str(), sha256: str() }),
   },
   {
     name: 'apply_patch',
@@ -86,6 +113,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     wire: true,
     readOnly: false,
     description: 'Unified diff with ---/+++ file headers and numbered @@ hunks, or file + content. The *** Begin Patch format is not supported. Read existing files first. Split large edits into smaller calls. Added roots: whole-file content with root.',
+    aliases: { path: 'file' },
     input: {
       anyOf: [
         obj({ patch: str() }, ['patch']),
@@ -106,7 +134,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     readOnly: false,
     description:
       'Run a command in the platform shell. On Windows use PowerShell, not Bash; avoid Unix grep/head/find and Bash heredocs. Write multiline Python to a .py file. Format mixed tables separately with Format-Table -AutoSize or ConvertTo-Json. ' +
-      'The default cwd is the workspace root (or the persistent session cwd); pass cwd within the selected root and quote paths with spaces. Read an existing file before changing it. Inspect exitCode and output: chained commands may report only the last command\'s status. After foregroundWaitMs it becomes a job. root selects the workspace root (default main).',
+      'The default cwd is the workspace root (or the persistent session cwd); pass cwd within the selected root and quote paths with spaces. Read an existing file before changing it. For Git use git_status, git_prepare, git_commit and git_push when offered. Inspect exitCode and output: chained commands may report only the last command\'s status. After foregroundWaitMs it becomes a job. root selects the workspace root (default main).',
     input: obj(
       { command: str(), root: str(), cwd: str(), foregroundWaitMs: int(), hardTimeoutMs: int(), persistent: bool, stdinPipe: bool, tty: bool },
       ['command'],
@@ -152,6 +180,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     readOnly: true,
     description: 'Regex lines; optional path glob; same skips. root:* = all roots.',
     input: obj({ pattern: str(), root: str(), glob: str(), ignoreCase: bool, maxResults: int() }, ['pattern']),
+    aliases: { path: 'glob' },
     output: obj(
       {
         matches: arr(obj({ path: str(), line: { type: 'integer' }, text: str() }, ['path', 'line', 'text'])),
@@ -162,11 +191,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       ['matches', 'truncated', 'filesSearched'],
     ),
   },
-  { name: 'job_status', sdk: 'jobs.status', wire: false, readOnly: true, description: 'State of a background job.', input: jobId, output: jobInfo },
+  // 5-2: a `shell` that backgrounds a command returns a jobId the model must be
+  // able to operate, also when PTC is off. `wireRequires` keeps them out of
+  // sessions without shell (read-only subagents) without moving the SDK.
+  { name: 'job_status', sdk: 'jobs.status', wire: true, wireRequires: 'shell', readOnly: true, description: 'State of a background job.', input: jobId, output: jobInfo },
   {
     name: 'job_output',
     sdk: 'jobs.output',
-    wire: false,
+    wire: true,
+    wireRequires: 'shell',
     readOnly: true,
     description: 'A page of a job\'s output from offset.',
     input: obj({ jobId: str(), offset: int(), maxBytes: int() }, ['jobId']),
@@ -180,13 +213,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'job_wait',
     sdk: 'jobs.wait',
-    wire: false,
+    wire: true,
+    wireRequires: 'shell',
     readOnly: true,
     description: 'Wait up to timeoutMs for a job to finish.',
     input: obj({ jobId: str(), timeoutMs: int() }, ['jobId']),
     output: jobInfo,
   },
-  { name: 'job_kill', sdk: 'jobs.kill', wire: false, readOnly: false, description: 'Kill a job and its process tree.', input: jobId, output: jobInfo },
+  { name: 'job_kill', sdk: 'jobs.kill', wire: true, wireRequires: 'shell', readOnly: false, description: 'Kill a job and its process tree.', input: jobId, output: jobInfo },
   {
     name: 'rationale_upsert',
     sdk: 'rationale.upsert',
@@ -288,7 +322,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     readOnly: false,
     exposure: 'deferred',
     requires: 'mcp',
-    description: 'Call a listed MCP tool.',
+    description: 'Call a listed MCP tool. Pass server and tool at the top level of the arguments. Put only the selected MCP tool\'s input fields inside args.',
     input: obj({ server: str(), tool: str(), args: { type: 'object' } }, ['server', 'tool']),
     output: obj({ text: str(), structured: {} }, ['text']),
   },
@@ -300,8 +334,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     readOnly: false,
     requires: 'delegate',
     description:
-      'Subagent for one subtask; readOnly (default true) = reading only; background = return its agentId.',
-    input: obj({ task: str(), readOnly: bool, background: bool }, ['task']),
+      'Subagent for one subtask. Set requires to the capabilities needed. readOnly (default true) only supports read. Set readOnly=false for edits or shell. background returns its agentId.',
+    input: obj({ task: str(), readOnly: bool, background: bool, requires: arr({ type: 'string', enum: ['read', 'edit', 'shell'] }) }, ['task']),
     output: obj({ final: str(), steps: { type: 'integer' }, agentId: str() }, ['final', 'steps']),
   },
   {
@@ -375,9 +409,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     wire: true,
     readOnly: false,
     exposure: 'deferred',
-    requires: 'delegate',
-    description: 'Start a background subagent for one task; returns its agentId.',
-    input: obj({ task: str(), readOnly: bool }, ['task']),
+    requires: 'background-agents',
+    description: 'Start a background subagent for one task; returns its agentId. Set requires to the needed capabilities. Edits or shell require readOnly=false.',
+    input: obj({ task: str(), readOnly: bool, requires: arr({ type: 'string', enum: ['read', 'edit', 'shell'] }) }, ['task']),
     output: obj({ agentId: str(), status: str() }, ['agentId', 'status']),
   },
   {
@@ -385,8 +419,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     wire: true,
     readOnly: true,
     exposure: 'deferred',
-    requires: 'delegate',
-    description: 'Wait for a background subagent (default 30 s) and return its answer.',
+    requires: 'background-agents',
+    description: 'Wait for a background subagent ID returned by spawn_agent. Orchestration workers send completion reports automatically and use a different ID.',
     input: obj({ agentId: str(), timeoutMs: int() }, ['agentId']),
     output: obj({ final: str(), status: str(), timedOut: bool }, ['final', 'status', 'timedOut']),
   },
@@ -395,7 +429,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     wire: true,
     readOnly: true,
     exposure: 'deferred',
-    requires: 'delegate',
+    requires: 'background-agents',
     description: 'List this session\'s background subagents and their status.',
     input: obj({}),
     output: obj({ agents: arr(obj({ agentId: str(), task: str(), status: str() }, ['agentId', 'task', 'status'])) }, [
@@ -407,7 +441,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     wire: true,
     readOnly: false,
     exposure: 'deferred',
-    requires: 'delegate',
+    requires: 'background-agents',
     description: 'Close a finished background subagent.',
     input: obj({ agentId: str() }, ['agentId']),
     output: obj({ agentId: str(), status: str() }, ['agentId', 'status']),
@@ -498,6 +532,146 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     input: obj({ question: str() }, ['question']),
     output: obj({ answer: str() }, ['answer']),
   },
+  {
+    name: 'git_status',
+    wire: true,
+    readOnly: true,
+    description: 'Read the primary workspace Git status, current branch, GitHub origin and exact changed paths. githubCredentialConfigured reports setup without exposing a value. Use this before preparing, committing or pushing. If false, connect GitHub in Settings before publishing.',
+    input: obj({}),
+    output: obj({}),
+  },
+  {
+    name: 'git_prepare',
+    wire: true,
+    readOnly: false,
+    requires: 'git-write',
+    description: 'Attach the requested GitHub repository to this workspace. In a fresh workspace, initialize Git and check out the remote branch if it exists. Existing work is preserved. Use owner and repo from the user; omit branch to use the repository default.',
+    input: obj({ owner: str(), repo: str(), branch: str() }, ['owner', 'repo']),
+    output: obj({}),
+  },
+  {
+    name: 'git_commit',
+    wire: true,
+    readOnly: false,
+    requires: 'git-write',
+    description: 'Stage and commit only the listed individual files. Use exact repository-relative paths from git_status, including both paths of a rename. Omit scratch files, diagnostic logs, screenshots and secrets. Other staged changes stay staged.',
+    input: obj({ paths: arr(str()), message: str() }, ['paths', 'message']),
+    output: obj({}),
+  },
+  {
+    name: 'git_push',
+    wire: true,
+    readOnly: false,
+    requires: 'github-write',
+    description: 'Push the current commit to this workspace’s GitHub origin over HTTPS. Omit branch to push the current branch. The host handles credentials and TLS. No force push. On a non-fast-forward failure, inspect the remote history before retrying.',
+    input: obj({ branch: str() }),
+    output: obj({}),
+  },
+  {
+    name: 'github_repo_info',
+    sdk: 'github.repoInfo',
+    wire: true,
+    readOnly: true,
+    requires: 'github',
+    description: 'Get GitHub repository metadata (owner, repo, private, defaultBranch, hasPages, description, htmlUrl). Omitting owner/repo auto-detects from the local git remote.',
+    input: obj({ owner: str(), repo: str() }),
+    output: obj(
+      {
+        name: str(),
+        fullName: str(),
+        owner: str(),
+        private: bool,
+        htmlUrl: str(),
+        defaultBranch: str(),
+        hasPages: bool,
+        description: nullable(str()),
+      },
+      ['name', 'fullName', 'owner', 'private', 'htmlUrl', 'defaultBranch', 'hasPages'],
+    ),
+  },
+  {
+    name: 'github_pages_enable',
+    sdk: 'github.enablePages',
+    wire: true,
+    readOnly: false,
+    requires: 'github-write',
+    description: 'Enable or configure GitHub Pages for the repository (default buildType: "workflow"). Omitting owner/repo auto-detects from the local git remote.',
+    input: obj({
+      owner: str(),
+      repo: str(),
+      buildType: { type: 'string', enum: ['workflow', 'legacy'] },
+    }),
+    output: obj(
+      {
+        url: str(),
+        htmlUrl: str(),
+        status: nullable(str()),
+        buildType: str(),
+        httpsEnforced: bool,
+      },
+      ['url', 'htmlUrl', 'buildType', 'httpsEnforced'],
+    ),
+  },
+  {
+    name: 'github_actions_status',
+    sdk: 'github.actionsStatus',
+    wire: true,
+    readOnly: true,
+    requires: 'github',
+    description: 'Get the latest GitHub Actions workflow runs for the repository (status, conclusion, branch, htmlUrl). Omitting owner/repo auto-detects from local git remote.',
+    input: obj({ owner: str(), repo: str(), limit: int() }),
+    output: obj(
+      {
+        runs: arr(
+          obj(
+            {
+              id: { type: 'integer' },
+              name: str(),
+              status: str(),
+              conclusion: nullable(str()),
+              htmlUrl: str(),
+              headBranch: str(),
+              createdAt: str(),
+              updatedAt: str(),
+            },
+            ['id', 'name', 'status', 'htmlUrl', 'headBranch'],
+          ),
+        ),
+      },
+      ['runs'],
+    ),
+  },
+  {
+    name: 'github_create_pr',
+    sdk: 'github.createPr',
+    wire: true,
+    readOnly: false,
+    requires: 'github-write',
+    description: 'Create a pull request on GitHub. Omitting owner/repo auto-detects from local git remote. Omitting base defaults to repository default branch.',
+    input: obj(
+      {
+        owner: str(),
+        repo: str(),
+        title: str(),
+        head: str(),
+        base: str(),
+        body: str(),
+      },
+      ['title', 'head'],
+    ),
+    output: obj(
+      {
+        id: { type: 'integer' },
+        number: { type: 'integer' },
+        title: str(),
+        htmlUrl: str(),
+        state: str(),
+        head: str(),
+        base: str(),
+      },
+      ['id', 'number', 'title', 'htmlUrl', 'state', 'head', 'base'],
+    ),
+  },
 ]
 
 /** Tools a read-only subagent (and `hy review`) may use. */
@@ -514,6 +688,9 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   'web_fetch',
   'web_search',
   'lsp',
+  'github_repo_info',
+  'github_actions_status',
+  'git_status',
 ])
 
 export const TOOLS_BY_NAME: ReadonlyMap<string, ToolSpec> = new Map(TOOL_SPECS.map((t) => [t.name, t]))
@@ -561,6 +738,13 @@ export function validate(schema: Schema, value: unknown, at = 'args'): string[] 
     }
     for (const [k, s] of Object.entries(schema.properties ?? {})) {
       if (o[k] !== undefined) errors.push(...validate(s, o[k], `${at}.${k}`))
+    }
+    if (schema.additionalProperties !== undefined) {
+      for (const [k, v] of Object.entries(o)) {
+        if (Object.hasOwn(schema.properties ?? {}, k)) continue
+        if (schema.additionalProperties === false) errors.push(`${at}.${k} is not allowed`)
+        else if (typeof schema.additionalProperties === 'object') errors.push(...validate(schema.additionalProperties, v, `${at}.${k}`))
+      }
     }
   }
   if (schema.type === 'array' && Array.isArray(value) && schema.items) {
@@ -679,11 +863,15 @@ export function deferredTools(
 ): ToolSpec[] {
   return specs.filter(
     (t) =>
-      t.wire &&
+      wireVisible(t, features) &&
       t.exposure === 'deferred' &&
       (!t.requires || features.has(t.requires)) &&
       (!allow || allow.has(t.name)),
   )
+}
+/** A wire tool the session may see: `wire` alone, plus its family feature. */
+function wireVisible(t: ToolSpec, features: ReadonlySet<string>): boolean {
+  return t.wire && (t.wireRequires === undefined || features.has(t.wireRequires))
 }
 /** The wire tools a session offers. */
 export function offeredTools(
@@ -696,11 +884,11 @@ export function offeredTools(
 ): ToolSpec[] {
   return specs.filter(
     (t) =>
-      t.wire &&
+      wireVisible(t, features) &&
       (ptc || t.name !== 'run_code') &&
       (objective || !t.objectiveOnly) &&
       (!t.requires || features.has(t.requires)) &&
-      (!allow || allow.has(t.name)) &&
+      (!allow || allow.has(t.permission ?? t.name)) &&
       (t.exposure !== 'deferred' || active?.has(t.name) === true),
   )
 }

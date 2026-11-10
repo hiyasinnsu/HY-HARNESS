@@ -328,6 +328,15 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
   },
   {
     method: "POST",
+    path: "/api/sessions/:id/advisor",
+    summary: "Turn advisor guidance on or off.",
+    errors: [409],
+    request: {
+    enabled: { type: "boolean" },
+    },
+  },
+  {
+    method: "POST",
     path: "/api/sessions/:id/sandbox",
     summary: "Switch this session sandbox mode (grants when confined).",
     errors: [400, 403, 409],
@@ -365,12 +374,13 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
   {
     method: "POST",
     path: "/api/sessions/:id/model",
-    summary: "Switch the session model.",
+    summary: "Switch the session model and optionally save the default for its role.",
     errors: [400],
     request: {
     model: { type: "string", required: true },
     provider: { type: "string" },
     baseUrl: { type: "string" },
+    save: { type: "boolean" },
     },
   },
   {
@@ -759,6 +769,11 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
     cwd: { type: "string" },
     name: { type: "string" },
     },
+  },
+  {
+    method: "POST",
+    path: "/api/github/detect-token",
+    summary: "Detect stored GitHub token from Windows Git Credential Manager.",
   },
   {
     method: "POST",

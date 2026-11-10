@@ -125,6 +125,7 @@ export interface ConfigSummary {
   worker: RoleSummary
   orchestrator: RoleSummary
   subagent: RoleSummary
+  advisor?: RoleSummary | null
   guardian: RoleSummary | null
   grader: RoleSummary
   compactor: RoleSummary
@@ -333,6 +334,7 @@ export interface SessionState {
   busy: boolean
   turns: number
   planMode: boolean
+  advisorEnabled?: boolean
   workMode?: WorkMode
   interactionMode?: InteractionMode
   /** WP-12: the session's live sandbox mode. */
@@ -566,6 +568,8 @@ export interface SettingsResponse {
     automation?: {
       browser?: { enabled?: boolean; browser?: string; headless?: boolean; isolated?: boolean }
       desktop?: { enabled?: boolean }
+      search?: { enabled?: boolean; binPath?: string }
+      github?: { enabled?: boolean; token?: string; tokenSet?: boolean }
     }
   }
   active: ConfigSummary

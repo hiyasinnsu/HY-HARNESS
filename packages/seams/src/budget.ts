@@ -31,7 +31,6 @@ export interface Budget4DLimits {
 export const DEFAULT_BUDGET: Budget4DLimits = {
   maxRounds: 5,
   maxTotalTokens: 500_000,
-  maxCostUsd: 2,
   maxWallClockMs: 30 * 60_000,
 }
 
@@ -144,10 +143,19 @@ export class Budget4D {
     return maxTokens
   }
 
-  record(role: string, usage: { inputTokens: number; outputTokens: number }): void {
+  /**
+   * Adds one response's usage. `cachedInputTokens` is the prompt-cache hit part
+   * of `inputTokens`; with `cachedInputPerMTokUsd` set on the role's pricing it
+   * is charged at that (usually much lower) rate. The field is optional so
+   * callers that only have totals keep working.
+   */
+  record(role: string, usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number }): void {
     this.tokensUsed += usage.inputTokens + usage.outputTokens
     const p = this.pricing[role]
-    if (p) this.costUsd += (usage.inputTokens * p.inputPerMTokUsd + usage.outputTokens * p.outputPerMTokUsd) / 1e6
+    if (!p) return
+    const cached = Math.min(usage.inputTokens, Math.max(0, usage.cachedInputTokens ?? 0))
+    const cachedRate = p.cachedInputPerMTokUsd ?? p.inputPerMTokUsd
+    this.costUsd += ((usage.inputTokens - cached) * p.inputPerMTokUsd + cached * cachedRate + usage.outputTokens * p.outputPerMTokUsd) / 1e6
   }
 
   /** Wraps a role's provider so every call is admitted and recorded. */
@@ -171,7 +179,13 @@ export class Budget4D {
           }
           throw error
         }
-        this.record(role, completion.usage)
+        // `cacheHitTokens` is the prompt-cache part of the input; `record`
+        // prices it at `cachedInputPerMTokUsd` when the role sets one.
+        this.record(role, {
+          inputTokens: completion.usage.inputTokens,
+          outputTokens: completion.usage.outputTokens,
+          ...(completion.usage.cacheHitTokens === undefined ? {} : { cachedInputTokens: completion.usage.cacheHitTokens }),
+        })
         return completion
       },
     }

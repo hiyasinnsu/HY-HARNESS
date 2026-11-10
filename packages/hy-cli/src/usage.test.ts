@@ -46,3 +46,14 @@ test('usageOf marks missing cache data as incomplete', () => {
   assert.equal(usage.cacheMissTokens, 42)
   assert.equal(usage.cacheUsageComplete, false)
 })
+
+test('both execution and conversation count towards the visible usage', async () => {
+  const { combineUsage } = await import('./usage.js')
+  const primary = usageOf([ev(1, 'step/end', { usage: { inputTokens: 100, outputTokens: 10, cacheHitTokens: 80, cacheMissTokens: 20 } })], 'run-test')
+  const dialogue = usageOf([ev(2, 'step/end', { usage: { inputTokens: 50, outputTokens: 5 } })], 'run-test')
+  const total = combineUsage(primary, dialogue)
+  assert.equal(total.inputTokens, 150)
+  assert.equal(total.outputTokens, 15)
+  assert.equal(total.cacheUsageComplete, false)
+  assert.equal(total.lastInputTokens, primary.lastInputTokens, 'context usage still describes the execution lane')
+})

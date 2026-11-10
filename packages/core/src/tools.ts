@@ -11,10 +11,22 @@ import { loadSkill, type SkillInfo } from './skills.js'
 import type { McpManager } from './mcp.js'
 import type { Hooks } from './hooks.js'
 import { hostAllowed, webFetch, webSearch, type WebConfig } from './web.js'
+import { parseLooseJsonObject } from './llm.js'
+import { FOREGROUND_SHELL_DEFAULT_MS } from './tool-docs.js'
 import type { LspManager, LspOp } from './lsp.js'
 import type { LoadedPlugins } from './plugins.js'
 import type { MemoryStore } from './memory.js'
 import type { WorkspaceRootConfig } from './config.js'
+import { gitCommit, gitPrepare, gitPush, gitStatus } from './git.js'
+import {
+  resolveGitHubToken,
+  detectLocalGitHubRepo,
+  githubGetRepo,
+  githubEnablePages,
+  githubListWorkflowRuns,
+  githubCreatePullRequest,
+  redactGitHubSecrets,
+} from './github.js'
 
 /** True when a tool schema itself declares an `args` property (e.g. mcp_call). */
 function schemaAllowsArg(schema: ToolSpec['input'], key: string): boolean {
@@ -23,20 +35,61 @@ function schemaAllowsArg(schema: ToolSpec['input'], key: string): boolean {
 }
 
 /**
+ * Aliases for the edit tools, whose specs `@hy/cli` (`session-app.ts`) builds
+ * outside this registry. Registry tools declare `aliases` on their spec;
+ * `normalizeToolArgs` reads `spec.aliases ?? FILE_TOOL_ALIASES[spec.name]`.
+ * Drop an entry once the host passes the aliases on the spec itself.
+ */
+export const FILE_TOOL_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  edit_file: { path: 'file', old_str: 'old', old_string: 'old', new_str: 'new', new_string: 'new' },
+  write_file: { path: 'file' },
+}
+
+/**
+ * G-12: rewrites alternate argument spellings (`old_str` for `old`) with one
+ * generic pass. A canonical key the call already set wins, and an alias that
+ * names a declared property is skipped, so a real argument is never moved.
+ */
+function applyArgumentAliases(spec: ToolSpec, args: Record<string, unknown>): void {
+  const aliases = spec.aliases ?? FILE_TOOL_ALIASES[spec.name]
+  if (!aliases) return
+  const filled = new Set<string>()
+  for (const [alias, canonical] of Object.entries(aliases)) {
+    if (args[canonical] !== undefined || schemaAllowsArg(spec.input, alias)) continue
+    if (typeof args[alias] !== 'string') continue
+    args[canonical] = args[alias]
+    filled.add(canonical)
+  }
+  // Every spelling that fed the same key goes, as the per-tool code did.
+  for (const [alias, canonical] of Object.entries(aliases)) {
+    if (filled.has(canonical) && !schemaAllowsArg(spec.input, alias)) delete args[alias]
+  }
+}
+
+/**
  * Some models wrap the argument object twice (`{ args: { command } }`) or send
  * it as a JSON string. Unwrap that shape for tools that do not declare a real
- * `args` field. `mcp_call` is left alone because `args` is meaningful there.
+ * `args` field. MCP routing fields can also be misplaced inside its payload.
  */
-export function normalizeToolArgs(spec: ToolSpec, input: Record<string, unknown>): Record<string, unknown> {
-  let args = { ...input }
+export function normalizeToolArgs(spec: ToolSpec, input: Record<string, unknown> | unknown): Record<string, unknown> {
+  const baseInput =
+    typeof input === 'string'
+      ? (parseLooseJsonObject(input) ?? {})
+      : input && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : {}
+  let args = { ...baseInput }
   for (let depth = 0; depth < 3; depth += 1) {
-    if (args.args === undefined || schemaAllowsArg(spec.input, 'args')) break
-    let inner: unknown = args.args
+    const wrapper = args.args !== undefined ? 'args' : 'arguments'
+    if (args[wrapper] === undefined || schemaAllowsArg(spec.input, wrapper)) break
+    let inner: unknown = args[wrapper]
     if (typeof inner === 'string') {
+      const rawInner = inner
       try {
-        inner = JSON.parse(inner)
+        inner = JSON.parse(rawInner)
       } catch {
-        break
+        inner = parseLooseJsonObject(rawInner)
+        if (!inner) break
       }
     }
     if (!inner || typeof inner !== 'object' || Array.isArray(inner)) break
@@ -44,9 +97,35 @@ export function normalizeToolArgs(spec: ToolSpec, input: Record<string, unknown>
     for (const [key, value] of Object.entries(args)) {
       // Keep outer options such as root/cwd/foregroundWaitMs; the inner object
       // carries the actual command/path/patch.
-      if (key !== 'args' && value !== undefined) merged[key] = value
+      if (key !== wrapper && value !== undefined) merged[key] = value
     }
     args = merged
+  }
+  applyArgumentAliases(spec, args)
+  // Two tools need more than a rename, so they keep a step after the generic
+  // aliasing: mcp_call recovers routing metadata buried in its payload, and
+  // todo_write accepts the older `plan` list (`step` instead of `content`).
+  if (spec.name === 'mcp_call' && args.server === undefined && args.args && typeof args.args === 'object' && !Array.isArray(args.args)) {
+    const { server, tool, args: payload, ...inlinePayload } = args.args as Record<string, unknown>
+    const routeTool = args.tool === undefined ? tool : args.tool
+    // Recover only unambiguous routing metadata. A valid outer route owns its payload as-is.
+    if (typeof server === 'string' && typeof routeTool === 'string' &&
+        (tool === undefined || tool === routeTool) && (payload === undefined || Object.keys(inlinePayload).length === 0)) {
+      args = { ...args, server, tool: routeTool, args: payload === undefined ? inlinePayload : payload }
+    }
+  } else if (spec.name === 'todo_write' && args.todos === undefined) {
+    let plan = args.plan
+    if (typeof plan === 'string') {
+      try { plan = JSON.parse(plan) } catch { /* validation reports the required todos */ }
+    }
+    if (Array.isArray(plan)) {
+      args.todos = plan.map((item: unknown) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item) || !('step' in item) || 'content' in item) return item
+        const { step, ...rest } = item
+        return { ...rest, content: step }
+      })
+      delete args.plan
+    }
   }
   return args
 }
@@ -97,6 +176,36 @@ export function pipeChildGap(
     /\bnode(\.exe)?\s+--test\b|\b(npm|pnpm|yarn)(\.cmd)?\s+(run\s+)?(test|t)\b|\b(vitest|jest)\b/i.test(command)
   if (!seen && !likely) return undefined
   return 'named-pipe-children: Node child processes with pipes are blocked in this sandbox (spawn EPERM). Run the test command on its own, with no pipe or redirect (for example `npm test` or `node --test`): plain test-runner commands run in a sandbox where they work. Filter the output afterwards instead of piping it.'
+}
+
+/**
+ * True when a finished command failed because the confined token could not
+ * start a child process that needs pipes (`spawn EPERM`) or a console
+ * (`0xC0000142`). Stricter than `pipeChildGap`: a finished, non-zero command in
+ * a confined mode, so the escalation offer cannot fire on a command that merely
+ * printed such a string.
+ */
+export function sandboxPipeFailure(
+  result: { stdout?: unknown; stderr?: unknown; exitCode?: unknown; sandbox?: unknown },
+  command = '',
+): boolean {
+  if (typeof result.exitCode !== 'number' || result.exitCode === 0) return false
+  const text = `${typeof result.stdout === 'string' ? result.stdout : ''}\n${typeof result.stderr === 'string' ? result.stderr : ''}`
+  // The Node error line itself, not a program that merely mentions the words.
+  if (/(?:^|\n)\s*(?:Error:\s*)?spawn(?:Sync)?\b[^\n]*\bEPERM\b/i.test(text)) return true
+  if (/\bcode: 'EPERM'[^\n]*syscall: 'spawn'|syscall: 'spawn'[^\n]*code: 'EPERM'/i.test(text)) return true
+  if (/0xC0000142/.test(text)) return true
+  // A pipe or redirect hid the error line: a confined Node test runner failed.
+  return (
+    result.sandbox === 'workspace-write' &&
+    /[|>;&]/.test(command) &&
+    /\bnode(\.exe)?\s+--test\b|\b(npm|pnpm|yarn)(\.cmd)?\s+(run\s+)?(test|t)\b|\b(vitest|jest)\b/i.test(command)
+  )
+}
+
+/** The part of a command that identifies it for a one-time escalation ("pnpm desktop:package:next"). */
+export function commandShape(command: string): string {
+  return command.trim().split(/\s+/).slice(0, 2).join(' ').toLowerCase()
 }
 
 /**
@@ -184,6 +293,11 @@ export interface ToolRuntimeOptions {
   closeAgent?: (agentId: string) => { agentId: string; status: string }
   /** Worker scope: `apply_patch` may only touch these repository-relative directories. */
   writeScope?: readonly string[]
+  /** Live ownership checks for a shared workspace (also used by write_file/edit_file). */
+  writeGuard?: (path: string) => void
+  verifyGuard?: (path: string) => void
+  /** Rechecked before dispatch and after waiting for the shared shell. */
+  beforeTool?: () => void
   /** Primary (`main`) plus explicitly added roots for this session. */
   roots?: readonly WorkspaceRootConfig[]
   /** Extra command check for orchestration workers (git and harness-state commands). */
@@ -192,10 +306,15 @@ export interface ToolRuntimeOptions {
   shellLock?: { acquire(): Promise<() => void> }
   /** Long-running worker commands stay in the foreground so the shell lock is held. */
   noBackgroundShell?: boolean
-  minForegroundWaitMs?: number
   shellTimeoutMs?: number
   /** Aborts in-flight `exec/command`, `ptc/run`, and `job/wait` RPCs on round timeout or Ctrl-C. */
   signal?: AbortSignal
+  /** GitHub Personal Access Token or App token for GitHub API & Git operations. */
+  githubToken?: string
+  /** Shared-workspace workers may inspect Git while the owner owns mutations. */
+  gitReadOnly?: boolean
+  /** Host Git cannot read or publish paths the exec sandbox denies. */
+  gitDenyRead?: readonly string[]
 }
 
 export interface PlanStep {
@@ -368,6 +487,12 @@ export const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 // High-resolution document scans fit without an agent-created thumbnail; bytes stay capped at 8 MiB.
 export const MAX_IMAGE_PX = 8192
 
+/**
+ * 5-4: an MCP server's description travels in every prompt and in each native
+ * tool definition, so a long one is cut. The server/tool prefix stays intact.
+ */
+export const MAX_MCP_TOOL_DESCRIPTION = 400
+
 /** PNG / JPEG / WebP / GIF by magic bytes, or undefined. */
 export function imageMimeType(bytes: Buffer): string | undefined {
   if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png'
@@ -431,6 +556,26 @@ export function countOccurrences(haystack: string, needle: string): number {
     at = haystack.indexOf(needle, at + needle.length)
   }
   return count
+}
+
+/**
+ * T-4: `edit_file` matches with LF line endings. `read_file` returns LF, so a
+ * CRLF file (Windows with `core.autocrlf=true`) never matched the text the
+ * model copied from the read. `source`, `oldText` and `newText` are compared
+ * and joined as LF; the result gets the file's dominant EOL back (the same
+ * rule the patch daemon uses), while an LF-only file stays LF. `count` is the
+ * number of non-overlapping matches in the LF form.
+ */
+export function replaceIgnoringEol(source: string, oldText: string, newText: string): { count: number; text: string } {
+  const before = source.replace(/\r\n/g, '\n')
+  const needle = oldText.replace(/\r\n/g, '\n')
+  const count = countOccurrences(before, needle)
+  if (count === 0) return { count, text: source }
+  const replaced = before.split(needle).join(newText.replace(/\r\n/g, '\n'))
+  const crlf = countOccurrences(source, '\r\n')
+  const lf = countOccurrences(source, '\n')
+  const dominantCrlf = crlf > 0 && crlf * 2 > lf
+  return { count, text: dominantCrlf ? replaced.replace(/\n/g, '\r\n') : replaced }
 }
 
 /**
@@ -543,6 +688,7 @@ export class AsyncRwLock {
 }
 
 export class ToolRuntime {
+  private mcpRoutes = new Map<string, { server: string; tool: string; spec: ToolSpec }>()
   private readonly readHashes = new Map<string, string>()
   private readonly subCallLock = new AsyncRwLock()
   private claim: string | undefined
@@ -555,6 +701,8 @@ export class ToolRuntime {
   private shellHandle: { id?: string; gap?: string; mode?: string } | undefined
   /** Why the persistent shell was unavailable, reported once on the one-shot path. */
   private persistentGap: string | undefined
+  /** Command shapes already offered the low-integrity token (asked at most once each). */
+  private readonly escalationAsked = new Set<string>()
   /** Plan mode's read-only set, over `options.allowTools`. */
   private allowOverride: ReadonlySet<string> | undefined
   /** Per-turn cancellation, set by the conversation before each turn. */
@@ -608,7 +756,7 @@ export class ToolRuntime {
     // WP-30: a session working directory prefixes unqualified paths in the
     // primary root. Explicit `root:` paths and `spill://` are never rewritten.
     const clean =
-      this.cwd && root.id === 'main' && raw && !path.posix.isAbsolute(raw) && !raw.split('/').includes('..')
+      this.cwd && root.id === 'main' && input === rel && raw && !path.posix.isAbsolute(raw) && !raw.split('/').includes('..')
         ? path.posix.join(this.cwd, raw)
         : raw
     if (!clean || path.posix.isAbsolute(clean) || clean.split('/').includes('..')) {
@@ -675,16 +823,28 @@ export class ToolRuntime {
   }
 
   /** The optional tool families this session offers (mirrors the prompt). */
-  private toolFeatures(): Set<string> {
+  toolFeatures(): Set<string> {
     const features = new Set<string>()
     if ((this.options.skills ?? []).length > 0) features.add('skills')
     if (this.options.mcp && this.options.mcp.tools.length > 0) features.add('mcp')
     if (this.options.delegate) features.add('delegate')
+    if (this.options.backgroundDelegate) features.add('background-agents')
     if (this.options.web) features.add('web')
     if (this.options.web?.searchUrl) features.add('search')
     if (this.options.lsp?.configured) features.add('lsp')
     if (this.options.memory) features.add('memory')
     if (this.options.askUser) features.add('ask')
+    if (!this.options.gitReadOnly) features.add('git-write')
+    if (this.resolveGitHubToken()) {
+      features.add('github')
+      if (!this.options.gitReadOnly) features.add('github-write')
+    }
+    // 5-2: `job_*` is offered beside `shell`, the tool that backgrounds a
+    // command. A read-only session (no shell in `allowTools`) has no jobs, and
+    // a foreground-only shell (`noBackgroundShell`) never leaves one running.
+    if (!this.options.noBackgroundShell && (!this.options.allowTools || this.options.allowTools.has('shell'))) {
+      features.add('shell')
+    }
     return features
   }
 
@@ -717,9 +877,13 @@ export class ToolRuntime {
     if (this.signal?.aborted) throw new AbortRunError('round aborted')
     const run = async () => {
       try {
-        return await this.dispatch(name, args, viaSdk)
+        const result = await this.dispatch(name, args, viaSdk)
+        const text = JSON.stringify(result)
+        const redacted = redactGitHubSecrets(text, this.options.githubToken)
+        return text === redacted ? result : JSON.parse(redacted) as ToolResult
       } catch (error) {
         if (this.signal?.aborted) throw new AbortRunError('round aborted')
+        if (error instanceof Error) error.message = redactGitHubSecrets(error.message, this.options.githubToken)
         throw error
       }
     }
@@ -762,19 +926,40 @@ export class ToolRuntime {
     if (!oldText) throw new Error('edit_file needs the text to replace (old)')
     if (newText === undefined) throw new Error('edit_file needs the replacement (new)')
     const rootArg = typeof args.root === 'string' ? args.root.trim() : ''
-    const root = rootArg ? this.root(rootArg) : undefined
-    if (root && root.id !== 'main') throw new Error(`edit_file is only available in the primary root; use write_file for ${root.id}`)
-    const full = resolveInside(this.workspaceRoot, file)
+    if (rootArg) {
+      const root = this.root(rootArg)
+      if (root.id !== 'main') throw new Error(`edit_file is only available in the primary root; use write_file for ${root.id}`)
+    }
+    // 5-3: resolve like `read_file` / `write_file`, so the session's
+    // `working_directory` prefixes an unqualified path and a `root:` prefix is
+    // understood. `allowMissing` keeps the "does not exist" wording below.
+    const alreadyQualified = this.roots.some((root) => file.startsWith(`${root.id}:`))
+    const input = rootArg && !alreadyQualified ? `${rootArg}:${file}` : file
+    const resolved = this.resolveRootPath(input, true)
+    if (resolved.root.id !== 'main') {
+      throw new Error(`edit_file is only available in the primary root; use write_file for ${resolved.root.id}`)
+    }
+    const full = resolved.full
     if (!fs.existsSync(full) || !fs.statSync(full).isFile()) throw new Error(`${file} does not exist`)
-    const before = fs.readFileSync(full, 'utf8')
-    const occurrences = countOccurrences(before, oldText)
+    // 5-3: decode with the same rules as `read_file` and keep the encoding for
+    // the write-back; a UTF-16LE file (PowerShell `>` / `Out-File`) used to be
+    // read as UTF-8 and the patch daemon then rejected the result.
+    const decoded = decodeTextFile(fs.readFileSync(full))
+    if (!decoded) throw new Error(`edit_file: ${file} is not a text file`)
+    const before = decoded.text
+    const { count: occurrences, text: after } = replaceIgnoringEol(before, oldText, newText)
     const want = args.count === undefined ? 1 : Number(args.count)
     if (occurrences === 0) throw new Error(`edit_file: the text to replace was not found in ${file}.${nearbyLines(before, oldText)}`)
     if (occurrences !== want) {
       throw new Error(`edit_file: the text occurs ${occurrences} times in ${file} but count=${want}.${nearbyLines(before, oldText)}`)
     }
-    const after = before.split(oldText).join(newText)
-    return this.applyPatch({ file, content: after })
+    // The daemon re-adds the BOM from `encoding`, so it must not be in the text
+    // (a UTF-8 BOM stayed in `before`; UTF-16 decoding already removed it).
+    const content = decoded.encoding === 'utf8bom' && after.startsWith('\uFEFF') ? after.slice(1) : after
+    // The resolved, root-qualified path is passed on: `applyPatch` resolves
+    // diff paths from the root (not the session cwd), so the raw path would
+    // name a different file when `working_directory` is set.
+    return this.applyPatch({ file: this.qualified(resolved.root, resolved.rel), content }, decoded.encoding)
   }
 
   /**
@@ -940,7 +1125,34 @@ export class ToolRuntime {
 
   /** A built-in or plugin tool's spec. */
   spec(name: string): ToolSpec | undefined {
-    return TOOLS_BY_NAME.get(name) ?? this.options.plugins?.get(name)?.spec
+    return TOOLS_BY_NAME.get(name) ?? this.options.plugins?.get(name)?.spec ?? this.mcpRoutes.get(name)?.spec
+  }
+
+  mcpToolSpecs(): ToolSpec[] {
+    for (const tool of this.options.mcp?.tools ?? []) {
+      const label = `${tool.server}_${tool.name}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 43)
+      const suffix = createHash('sha256').update(JSON.stringify([tool.server, tool.name])).digest('hex').slice(0, 12)
+      const name = `mcp_${label}_${suffix}`
+      if (this.spec(name)) continue
+      const description = `${tool.server}/${tool.name}. ${tool.description}`
+      this.mcpRoutes.set(name, {
+        server: tool.server,
+        tool: tool.name,
+        spec: {
+          name, permission: 'mcp_call', wire: true, requires: 'mcp',
+          // 5-4: the server's `annotations.readOnlyHint` is captured as
+          // `McpTool.readOnly`; only an explicit `true` counts (a missing or
+          // false hint stays on the serial, approval-gated path). Read-only
+          // tools then run in parallel inside `run_code` (`isReadOnly`).
+          readOnly: tool.readOnly === true,
+          description: description.length > MAX_MCP_TOOL_DESCRIPTION
+            ? `${description.slice(0, MAX_MCP_TOOL_DESCRIPTION - 1)}…`
+            : description,
+          input: tool.inputSchema, output: {},
+        },
+      })
+    }
+    return [...this.mcpRoutes.values()].map(({ spec }) => spec)
   }
 
   isReadOnly(name: string): boolean {
@@ -948,8 +1160,10 @@ export class ToolRuntime {
   }
 
   private async dispatch(name: string, args: unknown, viaSdk: boolean): Promise<ToolResult> {
+    this.options.beforeTool?.()
     const spec = this.spec(name)
     if (!spec) throw new Error(`unknown tool: ${name}`)
+    const permission = spec.permission ?? name
     if (spec.objectiveOnly && !this.options.objective) throw new Error(`${name} is only available in hy ralph sessions`)
     if (!spec.wire && !viaSdk) throw new Error(`${name} is only available inside run_code as tools.${spec.sdk}`)
     if (spec.requires === 'skills' && !this.options.skills?.length) throw new Error(`${name}: this session has no skills`)
@@ -960,17 +1174,24 @@ export class ToolRuntime {
     if (spec.requires === 'search' && !this.options.web?.searchUrl) throw new Error(`${name}: no search endpoint (web.searchUrl) is configured`)
     if (spec.requires === 'web' && !this.options.web) throw new Error(`${name}: web access is off (hy --web or web.enabled)`)
     if (spec.requires === 'delegate' && !this.options.delegate) throw new Error(`${name} is not available here (subagents cannot delegate)`)
+    if (spec.requires === 'background-agents' && !this.options.backgroundDelegate) throw new Error(`${name} needs a background subagent from spawn_agent. Orchestration workers report automatically.`)
+    if ((spec.requires === 'git-write' || spec.requires === 'github-write') && this.options.gitReadOnly) {
+      throw new Error('Repository changes belong to the orchestrator. Use git_status to inspect it.')
+    }
+    if (spec.requires === 'github-write' && !this.resolveGitHubToken()) {
+      throw new Error('Connect GitHub in Settings before publishing.')
+    }
     // CP-10: a deferred tool must be loaded before it can be called.
     if (spec.exposure === 'deferred' && !this.activated.has(name)) {
       throw new Error(`${name} is not loaded; call tool_search with words from its description first`)
     }
-    if (this.allowOverride && !this.allowOverride.has(name)) {
+    if (this.allowOverride && !this.allowOverride.has(permission)) {
       // Plan mode keeps every tool in the prompt (a stable, cached prefix) and
       // refuses the changing ones here.
       throw new Error(`${name} is not available while plan mode is on: only reading and planning tools run. Propose the change in your plan instead.`)
     }
     const allow = this.options.allowTools
-    if (allow && !allow.has(name)) {
+    if (allow && !allow.has(permission)) {
       // A bundle narrows the session's tools; say so, because "read-only" would
       // be misleading when another tool could still write.
       throw new Error(
@@ -979,7 +1200,10 @@ export class ToolRuntime {
           : `${name} is not allowed in this read-only session`,
       )
     }
-    const a = normalizeToolArgs(spec, (args ?? {}) as Record<string, unknown>)
+    const route = this.mcpRoutes.get(name)
+    const a = route && args !== null && typeof args === 'object' && !Array.isArray(args)
+      ? args as Record<string, unknown>
+      : normalizeToolArgs(spec, (args ?? {}) as Record<string, unknown>)
     // Accepted alias, kept out of the schema to save prompt tokens.
     if (name === 'apply_patch' && a.file === undefined && typeof a.path === 'string') a.file = a.path
     const problems = validate(spec.input, a)
@@ -987,9 +1211,12 @@ export class ToolRuntime {
       const hint =
         name === 'shell' && problems.some((problem) => problem.includes('command'))
           ? ' (expected {"tool":"shell","args":{"command":"..."}}; do not nest args)'
-          : ` Expected arguments: ${jsonSchemaToTs(spec.input)}. In JSON tool calls, put arguments inside "args", not beside "tool".`
+          : name === 'mcp_call'
+            ? ' Pass server and tool alongside args, for example {"server":"playwright","tool":"browser_navigate","args":{"url":"http://localhost:3000"}}.'
+            : ` Expected arguments: ${jsonSchemaToTs(spec.input)}. In JSON tool calls, put arguments inside "args", not beside "tool".`
       throw new Error(`invalid arguments for ${name}: ${problems.join('; ')}${hint}`)
     }
+    if (route) return this.mcpCall(route.server, route.tool, a)
     const plugin = this.options.plugins?.get(name)
     if (plugin) {
       const value = await plugin.run(a, { workspaceRoot: this.workspaceRoot })
@@ -998,6 +1225,8 @@ export class ToolRuntime {
     switch (name) {
       case 'read_file':
         return this.readFile(a)
+      case 'verify_file':
+        return this.verifyFile(a)
       case 'apply_patch':
         return this.applyPatch(a)
       case 'shell':
@@ -1083,6 +1312,7 @@ export class ToolRuntime {
         return { ok: true, remaining: plan.filter((s) => s.status !== 'completed').length }
       }
       case 'delegate': {
+        this.checkSubagentCapabilities(a)
         if (a.background === true) {
           if (!this.options.backgroundDelegate) throw new Error('background subagents are only available in the web session')
           const agentId = this.options.backgroundDelegate(String(a.task), a.readOnly !== false)
@@ -1092,6 +1322,7 @@ export class ToolRuntime {
         return { final: r.final, steps: r.steps }
       }
       case 'spawn_agent': {
+        this.checkSubagentCapabilities(a)
         if (!this.options.backgroundDelegate) throw new Error('spawn_agent is only available in the web session')
         const agentId = this.options.backgroundDelegate(String(a.task), a.readOnly !== false)
         return { agentId, status: 'running' }
@@ -1228,8 +1459,27 @@ export class ToolRuntime {
           a.column === undefined ? undefined : Number(a.column),
         )
       }
-      case 'web_search':
-        return webSearch(String(a.query), this.options.web!, a.maxResults === undefined ? undefined : Number(a.maxResults))
+      case 'web_search': {
+        const query = String(a.query)
+        const limit = a.maxResults === undefined ? 5 : Number(a.maxResults)
+        if (this.options.web?.searchUrl) {
+          return webSearch(query, this.options.web, limit)
+        }
+        if (this.options.mcp && this.options.mcp.tools.some((t) => t.server === 'rustxng' && t.name === 'search')) {
+          const res = await this.options.mcp.call('rustxng', 'search', { query, limit })
+          if (res.isError) throw new Error(res.text)
+          if (res.structured && typeof res.structured === 'object') return res.structured as ToolResult
+          try {
+            return JSON.parse(res.text) as ToolResult
+          } catch {
+            return { result: res.text }
+          }
+        }
+        if (this.options.web) {
+          return webSearch(query, this.options.web, limit)
+        }
+        throw new Error('web_search requires web.searchUrl or the rustxng MCP server')
+      }
       case 'web_fetch':
         return this.webFetch(String(a.url))
       case 'mcp_call':
@@ -1265,8 +1515,125 @@ export class ToolRuntime {
         this.options.onSkillLoad?.(String(a.name))
         return loaded
       }
+      case 'git_status':
+        return {
+          ...await gitStatus(this.workspaceRoot, this.signal),
+          githubCredentialConfigured: Boolean(this.resolveGitHubToken()),
+        }
+      case 'git_prepare': {
+        const ref = this.resolveRepoRef(a)
+        const token = this.resolveGitHubToken()
+        const branch = typeof a.branch === 'string' ? a.branch : (await githubGetRepo(ref.owner, ref.repo, token)).defaultBranch
+        return this.gitMutation(`Prepare Git workspace for ${ref.owner}/${ref.repo} (${branch})`, () =>
+          gitPrepare(this.workspaceRoot, ref, branch, token, this.signal))
+      }
+      case 'git_commit':
+        return this.gitMutation(`Commit files: ${(a.paths as string[]).join(', ').slice(0, 800)}`, () =>
+          gitCommit(this.workspaceRoot, a.paths as string[], String(a.message), this.resolveGitHubToken(), this.signal))
+      case 'git_push': {
+        const status = await gitStatus(this.workspaceRoot, this.signal)
+        const ref = status.origin
+        if (!ref) throw new Error('This workspace has no GitHub origin. Use git_prepare first.')
+        const branch = typeof a.branch === 'string' ? a.branch : status.branch
+        if (!branch) throw new Error('HEAD is detached; specify the destination branch.')
+        return this.gitMutation(`Push current commit to ${ref.owner}/${ref.repo} (${branch})`, () =>
+          gitPush(this.workspaceRoot, ref, branch, this.resolveGitHubToken()!, this.signal), false)
+      }
+      case 'github_repo_info': {
+        const { owner, repo } = this.resolveRepoRef(a)
+        const token = this.resolveGitHubToken()
+        const res = await githubGetRepo(owner, repo, token)
+        return { ...res }
+      }
+      case 'github_pages_enable': {
+        const { owner, repo } = this.resolveRepoRef(a)
+        const token = this.resolveGitHubToken()
+        if (!token) throw new Error('GitHub token is required to configure GitHub Pages.')
+        const buildType = a.buildType === 'legacy' ? 'legacy' : 'workflow'
+        return this.gitMutation(`Configure GitHub Pages for ${owner}/${repo} (${buildType})`, async () =>
+          ({ ...await githubEnablePages(owner, repo, buildType, token) }), false)
+      }
+      case 'github_actions_status': {
+        const { owner, repo } = this.resolveRepoRef(a)
+        const token = this.resolveGitHubToken()
+        const limit = typeof a.limit === 'number' && a.limit > 0 ? Math.min(20, Math.floor(a.limit)) : 5
+        const runs = await githubListWorkflowRuns(owner, repo, token, limit)
+        return { runs }
+      }
+      case 'github_create_pr': {
+        const { owner, repo } = this.resolveRepoRef(a)
+        const token = this.resolveGitHubToken()
+        if (!token) throw new Error('GitHub token is required to create a pull request.')
+        const title = String(a.title ?? '').trim()
+        const head = String(a.head ?? '').trim()
+        if (!title) throw new Error('title is required for github_create_pr')
+        if (!head) throw new Error('head branch is required for github_create_pr')
+        let base = typeof a.base === 'string' ? a.base.trim() : ''
+        if (!base) {
+          const info = await githubGetRepo(owner, repo, token).catch(() => undefined)
+          base = info?.defaultBranch || 'main'
+        }
+        const body = typeof a.body === 'string' ? a.body : undefined
+        return this.gitMutation(`Create a pull request in ${owner}/${repo} (${head} → ${base})`, async () =>
+          ({ ...await githubCreatePullRequest(owner, repo, { title, head, base, ...(body !== undefined ? { body } : {}) }, token) }), false)
+      }
       default:
         throw new Error(`unknown tool: ${name}`)
+    }
+  }
+
+  private checkSubagentCapabilities(args: Record<string, unknown>): void {
+    const required = args.requires as string[] | undefined
+    if (!required) return
+    if (args.readOnly !== false && required.some((capability) => capability !== 'read')) {
+      throw new Error('This subagent is read-only. Set readOnly=false to request edit or shell capability.')
+    }
+    if (required.includes('edit') && this.options.sandboxMode?.() === 'read-only') {
+      throw new Error('The session sandbox is read-only. This subagent cannot edit.')
+    }
+  }
+
+  private resolveRepoRef(args: Record<string, unknown>): { owner: string; repo: string } {
+    let owner = typeof args.owner === 'string' ? args.owner.trim() : ''
+    let repo = typeof args.repo === 'string' ? args.repo.trim() : ''
+    if (!owner || !repo) {
+      const detected = detectLocalGitHubRepo(this.workspaceRoot)
+      if (detected) {
+        if (!owner) owner = detected.owner
+        if (!repo) repo = detected.repo
+      }
+    }
+    if (!owner || !repo) {
+      throw new Error('Could not determine GitHub owner/repo. Please specify owner and repo explicitly, or configure a git remote origin.')
+    }
+    return { owner, repo }
+  }
+
+  private resolveGitHubToken(): string | undefined {
+    return this.options.githubToken || resolveGitHubToken()
+  }
+
+  private async gitMutation<T extends ToolResult>(command: string, run: () => Promise<T>, local = true): Promise<T> {
+    if (this.options.sandboxMode?.() === 'read-only') throw new Error('Git changes are disabled in the read-only sandbox.')
+    const root = path.resolve(this.workspaceRoot)
+    const overlaps = this.options.gitDenyRead?.some((denied) => {
+      const dir = path.resolve(denied)
+      const inside = (base: string, file: string) => {
+        const rel = path.relative(base, file)
+        return rel === '' || !path.isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${path.sep}`)
+      }
+      return inside(root, dir) || inside(dir, root)
+    })
+    if (overlaps) throw new Error('Native Git changes are disabled because this workspace has paths denied to the session.')
+    const answer = await this.approve?.({ command: redactGitHubSecrets(command, this.options.githubToken), justification: 'Git repository operation', sandbox: 'unconfined' })
+    if (typeof answer === 'boolean' ? !answer : !answer?.approved) throw new Error('Git operation was not approved.')
+    const release = local ? await this.options.shellLock?.acquire() : undefined
+    try {
+      this.options.beforeTool?.()
+      if (this.signal?.aborted) throw new AbortRunError('round aborted')
+      return await run()
+    } finally {
+      release?.()
     }
   }
 
@@ -1420,12 +1787,13 @@ export class ToolRuntime {
         // Checked after the read, so a search always gets through at least
         // the first file however small the budget.
         const stop = budget.spent(bytes.length)
-        if (bytes.subarray(0, 8192).includes(0)) {
+        const decoded = decodeTextBuffer(bytes)
+        if (decoded === undefined) {
           if (stop) return { matches, truncated: true, filesSearched, stoppedEarly: stop, note: budgetNote(stop), ...(tooLarge.length > 0 ? { skippedLarge: tooLarge.slice(0, 20) } : {}) }
           continue
         }
         filesSearched += 1
-        const lines = bytes.toString('utf8').split(/\r?\n/)
+        const lines = decoded.split(/\r?\n/)
         for (let i = 0; i < lines.length; i++) {
           if (!re.test(lines[i]!)) continue
           if (matches.length >= max) return { matches, truncated: true, filesSearched }
@@ -1437,6 +1805,38 @@ export class ToolRuntime {
     const target = matches.length === 0 && typeof args.glob === 'string' ? ignoredTarget(selected, args.glob) : undefined
     const result = withIgnoreNote({ matches, truncated: false, filesSearched }, target)
     return tooLarge.length > 0 ? { ...result, ...skippedLarge(tooLarge) } : result
+  }
+
+  private verifyFile(args: Record<string, unknown>): ToolResult {
+    const { root, rel, full } = this.resolveRootPath(String(args.path))
+    if (root.id !== 'main') throw new Error('verify_file only checks files in the primary workspace.')
+    this.options.verifyGuard?.(rel)
+    const blocked = this.options.gitDenyRead?.some((dir) => {
+      const denied = fs.existsSync(dir) ? fs.realpathSync.native(dir) : path.resolve(dir)
+      const relative = path.relative(denied, full)
+      return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`))
+    })
+    if (blocked) throw new Error('This path is denied to the session.')
+    const stat = fs.statSync(full)
+    if (!stat.isFile() || stat.size > 2 * 1024 * 1024) throw new Error('verify_file requires a regular file of at most 2 MiB.')
+    const bytes = fs.readFileSync(full)
+    const content = decodeTextBuffer(bytes)
+    if (content === undefined) throw new Error('verify_file requires a text file.')
+    let passed: boolean
+    if (args.check === 'json') {
+      try {
+        JSON.parse(content)
+        passed = true
+      } catch {
+        passed = false
+      }
+    } else {
+      if (typeof args.text !== 'string' || !args.text) throw new Error('The contains check requires nonempty text.')
+      passed = content.includes(args.text)
+    }
+    return { path: rel, passed, sha256: sha256(bytes), detail: args.check === 'json'
+      ? (passed ? 'Valid JSON.' : 'Invalid JSON.')
+      : (passed ? 'Text found.' : 'Text not found.') }
   }
 
   private readFile(args: Record<string, unknown>): ToolResult {
@@ -1462,8 +1862,8 @@ export class ToolRuntime {
     const stat = fs.statSync(full)
     if (!stat.isFile()) throw new Error(`not a file: ${input}`)
     const bytes = fs.readFileSync(full)
-    const text = bytes.toString('utf8')
-    if (text.includes('\0')) throw new Error(`binary file: ${input}`)
+    const text = decodeTextBuffer(bytes)
+    if (text === undefined) throw new Error(`binary file: ${input}`)
     const allLines = text.split(/\r?\n/)
     if (text.endsWith('\n')) allLines.pop()
     const totalLines = allLines.length
@@ -1495,6 +1895,7 @@ export class ToolRuntime {
 
   /** Checks a repository-relative path against the worker's scope. */
   private assertWriteScope(rel: string, rootId = 'main'): void {
+    this.options.writeGuard?.(rootId === 'main' ? rel : `${rootId}:${rel}`)
     const scopes = this.options.writeScope
     if (!scopes || scopes.length === 0) return
     const value = rel.replace(/\\/g, '/').replace(/^\.\/+/, '')
@@ -1547,7 +1948,12 @@ export class ToolRuntime {
     }
   }
 
-  private async applyPatch(args: Record<string, unknown>): Promise<ToolResult> {
+  /**
+   * `writeEncoding` is internal to `editFile` (5-3): the file's own encoding,
+   * forwarded to `patch/apply`, which re-encodes its output with it. It is not
+   * a schema argument, so `apply_patch` / `write_file` calls never set it.
+   */
+  private async applyPatch(args: Record<string, unknown>, writeEncoding?: TextEncoding): Promise<ToolResult> {
     // WP-12: a read-only session may read its way around but never write. The
     // daemon enforces the same rule; this keeps the error close to the tool.
     if (this.options.sandboxMode?.() === 'read-only') {
@@ -1566,6 +1972,15 @@ export class ToolRuntime {
       return this.writeExtraFile(root, rel, content)
     }
     let patch = typeof args.patch === 'string' ? args.patch.trim() : ''
+    const canonicalPath = (input: string): string => {
+      const { root, rel } = this.splitRoot(input)
+      if (root.id !== 'main') throw new Error('diff paths must stay in the primary workspace; use file + content for an extra root')
+      return this.resolveRootPath(`main:${rel}`, true).rel
+    }
+    if (patch.startsWith('*** Begin Patch') || /^@@\s*$/m.test(patch)) {
+      const converted = convertNonStandardPatch(this.workspaceRoot, patch, canonicalPath)
+      if (converted !== undefined) patch = converted
+    }
     if (patch.startsWith('*** Begin Patch')) {
       throw new Error('Unsupported patch format: use a unified diff with ---/+++ file headers and numbered @@ hunks, or use file + content. Read existing files first.')
     }
@@ -1576,11 +1991,13 @@ export class ToolRuntime {
       const file = typeof args.file === 'string' ? args.file : typeof args.path === 'string' ? args.path : undefined
       const content = typeof args.content === 'string' ? args.content : undefined
       if (file && content !== undefined) {
-        patch = wholeFilePatch(this.workspaceRoot, file, content)
+        patch = wholeFilePatch(this.workspaceRoot, canonicalPath(file), content)
       }
     }
     if (!patch) throw new Error('patch is empty')
     for (const rel of patchPaths(patch)) {
+      const canonical = canonicalPath(rel)
+      if (canonical !== rel) throw new Error(`use the repository-relative diff path ${canonical} instead of ${rel}`)
       this.assertWriteScope(rel)
       const full = path.resolve(this.workspaceRoot, rel)
       if (!fs.existsSync(full)) continue
@@ -1593,12 +2010,17 @@ export class ToolRuntime {
         throw new Error(`file changed since read_file: ${rel} (read the file again)`)
       }
     }
-    const result = await this.exec.patch({
+    // `encoding` is not in the generated `PatchApplyParams` yet; a variable
+    // keeps the extra field assignable while the daemon type catches up (F4 /
+    // the Rust side add it for 5-3). Absent keeps the daemon's UTF-8 default.
+    const params = {
       patch,
       dryRun: false,
       enforceProtectedPaths: this.enforceProtectedPaths,
       ...(this.options.sandboxMode !== undefined ? { sandboxMode: this.options.sandboxMode() } : {}),
-    })
+      ...(writeEncoding !== undefined ? { encoding: writeEncoding } : {}),
+    }
+    const result = await this.exec.patch(params)
     this.rememberHashes(result)
     return { ...result }
   }
@@ -1627,7 +2049,7 @@ export class ToolRuntime {
     // functions between calls. It is unconfined-only; a confined session gets
     // the one-shot path plus the reason.
     const wanted = args.persistent === undefined ? this.options.persistentShell === true : args.persistent === true
-    if (wanted && (!shellRoot || shellRoot.id === 'main')) {
+    if (wanted && !this.options.shellLock && (!shellRoot || shellRoot.id === 'main')) {
       const persistent = await this.shellPersistent(command, args)
       if (persistent) return persistent
     }
@@ -1654,18 +2076,21 @@ export class ToolRuntime {
           : normalizeShellCwd(this.workspaceRoot, String(args.cwd))
     }
     const requestedWait = args.foregroundWaitMs !== undefined ? Number(args.foregroundWaitMs) : undefined
-    const minWait = this.options.minForegroundWaitMs
-    const foregroundWaitMs =
-      requestedWait !== undefined && minWait !== undefined
-        ? Math.max(requestedWait, minWait)
-        : requestedWait ?? minWait
+    const hardTimeoutMs = args.hardTimeoutMs !== undefined
+      ? Number(args.hardTimeoutMs)
+      : this.options.noBackgroundShell ? FOREGROUND_SHELL_DEFAULT_MS : undefined
+    if (this.options.noBackgroundShell && (!Number.isSafeInteger(hardTimeoutMs) || hardTimeoutMs! < 1 || hardTimeoutMs! > 2_147_448_647)) {
+      throw new Error('hardTimeoutMs must be between 1 and 2147448647 milliseconds')
+    }
+    // Keep the scope lock until the command finishes or the exec server kills it.
+    const foregroundWaitMs = this.options.noBackgroundShell ? hardTimeoutMs! + 5_000 : requestedWait
     const base = {
       command,
       mode: 'agent' as const,
       ...(this.options.runId !== undefined ? { runId: this.options.runId } : {}),
       ...(requestedCwd !== undefined ? { cwd: requestedCwd } : {}),
       ...(foregroundWaitMs !== undefined ? { foregroundWaitMs } : {}),
-      ...(args.hardTimeoutMs !== undefined ? { hardTimeoutMs: Number(args.hardTimeoutMs) } : {}),
+      ...(hardTimeoutMs !== undefined ? { hardTimeoutMs } : {}),
       ...(args.stdinPipe === true ? { stdinPipe: true } : {}),
       // CP-09: a pseudo console for programs that need a terminal.
       ...(args.tty === true ? { tty: true } : {}),
@@ -1674,7 +2099,11 @@ export class ToolRuntime {
     }
     const release = this.options.shellLock ? await this.options.shellLock.acquire() : undefined
     try {
+      this.options.beforeTool?.()
+      this.options.shellGuard?.(command)
       let result: ExecResult
+      /** Set when the command was retried with a looser sandbox token. */
+      let escalated: 'low-integrity' | undefined
       try {
         result = await this.exec.exec(base, this.signal, this.options.shellTimeoutMs)
       } catch (error) {
@@ -1697,6 +2126,8 @@ export class ToolRuntime {
         if (!decision.approved) {
           throw new Error(`command not approved: ${command}${decision.reason ? ` (${decision.by}: ${decision.reason})` : ''}`)
         }
+        this.options.beforeTool?.()
+        this.options.shellGuard?.(command)
         result = await this.exec.exec(
           {
             ...base,
@@ -1706,14 +2137,46 @@ export class ToolRuntime {
           this.options.shellTimeoutMs,
         )
       }
+      // The sandbox, not the command, caused the failure: offer the
+      // low-integrity token once per command shape. Only the user can grant it
+      // (design §5), so a Guardian approval is not enough.
+      if (
+        this.approve &&
+        result.sandbox === 'workspace-write' &&
+        sandboxPipeFailure(result, command) &&
+        !this.escalationAsked.has(commandShape(command))
+      ) {
+        this.escalationAsked.add(commandShape(command))
+        const answer = await this.approve({
+          command,
+          justification:
+            'The confined sandbox could not start a child process that needs pipes (spawn EPERM). Run this command with the low-integrity token instead? It can write to the session\u2019s grant routes and %LOCALAPPDATA%\\LocalLow.',
+          sandbox: 'low-integrity',
+        })
+        const decision: ApprovalDecision = typeof answer === 'boolean' ? { approved: answer, by: 'user' } : answer
+        if (decision.approved && decision.by === 'user') {
+          this.options.beforeTool?.()
+          this.options.shellGuard?.(command)
+          result = await this.exec.exec(
+            { ...base, sandboxMode: 'low-integrity', approval: { by: 'user', callId: `tool-${Date.now()}` } },
+            this.signal,
+            this.options.shellTimeoutMs,
+          )
+          escalated = 'low-integrity'
+        }
+      }
       if (this.options.noBackgroundShell && result.status === 'backgrounded') {
         if (result.jobId) await this.exec.jobKill(result.jobId).catch(() => undefined)
         throw new Error('worker shell commands must finish in the foreground; run a shorter command or ask the orchestrator to split the task')
       }
-      const gap = [this.persistentGap, pipeChildGap(result, command)].filter(Boolean).join('; ')
+      if (this.options.noBackgroundShell && result.exitCode == null) {
+        throw new Error('Shell command ended without an exit code. Check its outputs and hardTimeoutMs before retrying.')
+      }
+      const gap = [this.persistentGap, escalated ? undefined : pipeChildGap(result, command)].filter(Boolean).join('; ')
       this.persistentGap = undefined
       return {
         ...result,
+        ...(escalated ? { escalated } : {}),
         ...(typeof result.stdout === 'string' ? { stdout: cleanPowerShellOutput(result.stdout) } : {}),
         ...(typeof result.stderr === 'string' ? { stderr: cleanPowerShellOutput(result.stderr) } : {}),
         ...(gap ? { gap } : {}),
@@ -1721,6 +2184,10 @@ export class ToolRuntime {
     } finally {
       release?.()
     }
+  }
+
+  foregroundShell(): boolean {
+    return this.options.noBackgroundShell === true
   }
 
   private async webFetch(rawUrl: string): Promise<ToolResult> {
@@ -1756,6 +2223,8 @@ export class ToolRuntime {
     const mcp = this.options.mcp!
     const spec = mcp.find(server, tool)
     if (!spec) throw new Error(`unknown MCP tool ${server}/${tool}; use one from the MCP tools list`)
+    const problems = validate(spec.inputSchema, args)
+    if (problems.length) throw new Error(`invalid input for ${server}/${tool}: ${problems.join('; ')}`)
     if (mcp.needsApproval(spec)) {
       // MCP servers run unconfined as the user, so Guardian never approves them.
       const command = `mcp ${server}/${tool} ${JSON.stringify(args).slice(0, 500)}`
@@ -1802,10 +2271,255 @@ export class ToolRuntime {
   }
 }
 
+/** The encodings `decodeTextFile` reports and `patch/apply` writes back (5-3). */
+export type TextEncoding = 'utf8' | 'utf8bom' | 'utf16le' | 'utf16be'
+
+export interface DecodedText {
+  text: string
+  encoding: TextEncoding
+}
+
+/**
+ * Decodes UTF-8, UTF-16LE, or UTF-16BE text files, returning `undefined` when
+ * the buffer contains binary data. PowerShell 5.1 redirection (`>` /
+ * `Out-File`) writes UTF-16LE with a `0xFF 0xFE` BOM by default.
+ */
+export function decodeTextBuffer(bytes: Buffer): string | undefined {
+  return decodeTextFile(bytes)?.text
+}
+
+/**
+ * `decodeTextBuffer` plus the encoding that produced the text, so `edit_file`
+ * can write the file back in its own encoding (5-3): the patch RPC takes the
+ * encoding and re-adds the BOM. A UTF-8 BOM stays in `text` (what `read_file`
+ * has always returned); the writer drops it so the BOM is not written twice.
+ */
+export function decodeTextFile(bytes: Buffer): DecodedText | undefined {
+  if (bytes.length === 0) return { text: '', encoding: 'utf8' }
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    if (bytes.length >= 4 && bytes[2] === 0x00 && bytes[3] === 0x00) return undefined
+    if ((bytes.length - 2) % 2 !== 0) return undefined
+    const text = bytes.subarray(2).toString('utf16le')
+    return text.includes('\0') ? undefined : { text, encoding: 'utf16le' }
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    if ((bytes.length - 2) % 2 !== 0) return undefined
+    const body = Buffer.from(bytes.subarray(2))
+    body.swap16()
+    const text = body.toString('utf16le')
+    return text.includes('\0') ? undefined : { text, encoding: 'utf16be' }
+  }
+  if (bytes.length >= 4 && bytes.length % 2 === 0 && bytes[1] === 0x00) {
+    const sampleLen = Math.min(bytes.length, 8192) & ~1
+    let asciiUnits = 0
+    let valid = true
+    const totalUnits = sampleLen / 2
+    for (let i = 0; i < sampleLen; i += 2) {
+      const lo = bytes[i]!
+      const hi = bytes[i + 1]!
+      if (lo === 0 && hi === 0) {
+        valid = false
+        break
+      }
+      if (hi === 0) {
+        if (lo === 0x09 || lo === 0x0a || lo === 0x0d || (lo >= 0x20 && lo <= 0x7e)) {
+          asciiUnits += 1
+        } else if (lo < 0x20 || lo === 0x7f) {
+          valid = false
+          break
+        }
+      }
+    }
+    if (valid && totalUnits > 0 && asciiUnits / totalUnits >= 0.8) {
+      const text = bytes.toString('utf16le')
+      return text.includes('\0') ? undefined : { text, encoding: 'utf16le' }
+    }
+  }
+  if (bytes.subarray(0, 8192).includes(0)) return undefined
+  const text = bytes.toString('utf8')
+  if (text.includes('\0')) return undefined
+  const bom = bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
+  return { text, encoding: bom ? 'utf8bom' : 'utf8' }
+}
+
+function applyHunksToFile(fullPath: string, hunks: string[][]): string | undefined {
+  if (!fs.existsSync(fullPath)) return undefined
+  try {
+    if (!fs.statSync(fullPath).isFile()) return undefined
+  } catch {
+    return undefined
+  }
+  const raw = decodeTextBuffer(fs.readFileSync(fullPath))
+  if (raw === undefined) return undefined
+  const clean = raw.replace(/^\uFEFF/, '')
+  const hadTrailingNewline = clean.endsWith('\n')
+  const lines = clean.split(/\r?\n/)
+  if (hadTrailingNewline) lines.pop()
+  let cursor = 0
+  for (const hunk of hunks) {
+    const oldChunk: string[] = []
+    const newChunk: string[] = []
+    for (const line of hunk) {
+      if (line.startsWith('\\ No newline at end of file')) continue
+      if (line.startsWith('-')) oldChunk.push(line.slice(1))
+      else if (line.startsWith('+')) newChunk.push(line.slice(1))
+      else if (line.startsWith(' ')) {
+        oldChunk.push(line.slice(1))
+        newChunk.push(line.slice(1))
+      } else if (line === '') {
+        oldChunk.push('')
+        newChunk.push('')
+      } else {
+        return undefined
+      }
+    }
+    if (oldChunk.length === 0 && newChunk.length === 0) continue
+    if (oldChunk.length === 0) {
+      if (lines.length === 0) {
+        lines.push(...newChunk)
+        cursor = lines.length
+        continue
+      }
+      return undefined
+    }
+    const findMatches = (from: number, trimRight: boolean): number[] => {
+      const out: number[] = []
+      const limit = lines.length - oldChunk.length
+      for (let i = from; i <= limit; i++) {
+        let ok = true
+        for (let j = 0; j < oldChunk.length; j++) {
+          const a = trimRight ? lines[i + j]!.trimEnd() : lines[i + j]!
+          const b = trimRight ? oldChunk[j]!.trimEnd() : oldChunk[j]!
+          if (a !== b) {
+            ok = false
+            break
+          }
+        }
+        if (ok) out.push(i)
+      }
+      return out
+    }
+    let matches = findMatches(cursor, false)
+    if (matches.length === 0) matches = findMatches(0, false)
+    if (matches.length === 0) matches = findMatches(cursor, true)
+    if (matches.length === 0) matches = findMatches(0, true)
+    if (matches.length !== 1) return undefined
+    const at = matches[0]!
+    lines.splice(at, oldChunk.length, ...newChunk)
+    cursor = at + newChunk.length
+  }
+  return `${lines.join('\n')}${hadTrailingNewline || lines.length > 0 ? '\n' : ''}`
+}
+
+/**
+ * Converts `*** Begin Patch` (`*** Update File:` / `*** Add File:`) or unified
+ * diffs with unnumbered `@@` hunks into numbered unified diffs when every
+ * referenced file exists on disk and every hunk matches uniquely. Falls back to
+ * `undefined` when any file is missing or ambiguous so the caller's diagnostic
+ * error still fires.
+ */
+function convertNonStandardPatch(workspaceRoot: string, patch: string, canonicalPath: (input: string) => string): string | undefined {
+  const rawLines = patch.split(/\r?\n/)
+  const outPatches: string[] = []
+  if (patch.startsWith('*** Begin Patch')) {
+    let i = 0
+    if (rawLines[i]?.trim() === '*** Begin Patch') i += 1
+    while (i < rawLines.length) {
+      const header = rawLines[i]!.trim()
+      if (!header || header === '*** End Patch') {
+        i += 1
+        continue
+      }
+      if (header.startsWith('*** Add File:')) {
+        const rel = canonicalPath(header.slice('*** Add File:'.length).trim())
+        if (!rel) return undefined
+        const full = path.resolve(workspaceRoot, rel)
+        if (fs.existsSync(full)) return undefined
+        i += 1
+        const body: string[] = []
+        while (i < rawLines.length && !rawLines[i]!.startsWith('*** ')) {
+          const l = rawLines[i]!
+          body.push(l.startsWith('+') ? l.slice(1) : l)
+          i += 1
+        }
+        outPatches.push(wholeFilePatch(workspaceRoot, rel, `${body.join('\n')}\n`))
+        continue
+      }
+      if (header.startsWith('*** Update File:')) {
+        const rel = canonicalPath(header.slice('*** Update File:'.length).trim())
+        if (!rel) return undefined
+        i += 1
+        if (rawLines[i]?.startsWith('*** Move to:')) return undefined
+        const hunks: string[][] = []
+        let current: string[] = []
+        while (i < rawLines.length && !rawLines[i]!.startsWith('*** ')) {
+          const l = rawLines[i]!
+          if (l.startsWith('@@')) {
+            if (current.length > 0) hunks.push(current)
+            current = []
+          } else {
+            current.push(l)
+          }
+          i += 1
+        }
+        if (current.length > 0) hunks.push(current)
+        if (hunks.length === 0) return undefined
+        const updated = applyHunksToFile(path.resolve(workspaceRoot, rel), hunks)
+        if (updated === undefined) return undefined
+        outPatches.push(wholeFilePatch(workspaceRoot, rel, updated))
+        continue
+      }
+      return undefined
+    }
+    return outPatches.length > 0 ? outPatches.join('') : undefined
+  }
+  if (/^@@\s*$/m.test(patch)) {
+    let i = 0
+    while (i < rawLines.length) {
+      while (i < rawLines.length && !rawLines[i]!.startsWith('--- ')) i += 1
+      if (i >= rawLines.length) break
+      const oldHeader = rawLines[i]!
+      const newHeader = rawLines[i + 1]
+      if (!newHeader || !newHeader.startsWith('+++ ')) return undefined
+      const m = /^\+\+\+ (?:b\/)?(.+)$/.exec(newHeader)
+      if (!m) return undefined
+      const input = m[1]!.split('\t')[0]!.trim().replace(/^"|"$/g, '')
+      if (!input || input === '/dev/null' || oldHeader.includes('/dev/null')) return undefined
+      const rel = canonicalPath(input)
+      i += 2
+      const hunks: string[][] = []
+      let current: string[] = []
+      while (i < rawLines.length && !rawLines[i]!.startsWith('--- ')) {
+        const l = rawLines[i]!
+        if (l.startsWith('@@')) {
+          if (current.length > 0) hunks.push(current)
+          current = []
+        } else if (hunks.length > 0 || l.startsWith(' ') || l.startsWith('-') || l.startsWith('+')) {
+          current.push(l)
+        }
+        i += 1
+      }
+      if (current.length > 0) hunks.push(current)
+      if (hunks.length === 0) return undefined
+      const updated = applyHunksToFile(path.resolve(workspaceRoot, rel), hunks)
+      if (updated === undefined) return undefined
+      outPatches.push(wholeFilePatch(workspaceRoot, rel, updated))
+    }
+    return outPatches.length > 0 ? outPatches.join('') : undefined
+  }
+  return undefined
+}
+
 function wholeFilePatch(root: string, file: string, content: string): string {
   const rel = file.split(path.sep).join('/')
   const full = path.resolve(root, rel)
-  const oldText = fs.existsSync(full) ? fs.readFileSync(full, 'utf8').replace(/^\uFEFF/, '') : undefined
+  // 5-3: decode the old side the way `read_file` does, so a UTF-16 file's
+  // hunks quote its real lines (the daemon decodes and re-encodes it with the
+  // `encoding` the edit passes). The BOM is never part of the lines.
+  const oldBytes = fs.existsSync(full) ? fs.readFileSync(full) : undefined
+  const oldText = oldBytes === undefined
+    ? undefined
+    : (decodeTextFile(oldBytes)?.text ?? oldBytes.toString('utf8')).replace(/^\uFEFF/, '')
   const oldLines = oldText === undefined ? [] : oldText.split(/\r?\n/)
   if (oldText !== undefined && oldText.endsWith('\n')) oldLines.pop()
   const newLines = content.split(/\r?\n/)

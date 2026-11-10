@@ -77,8 +77,11 @@ export async function generateSessionTitle(
     return { title: heuristic, source: 'heuristic', reason: 'mock provider' }
   }
   const provider = options.provider ?? createProvider(config.role, config.workspaceRoot)
-  const effort =
-    config.role.effort ?? (config.role.provider === 'opencode' ? 'none' : undefined)
+  // A helper call like the summarizer and the compactor: no reasoning phase by
+  // default, whatever the provider, because a reasoning phase spends the
+  // 48-token budget before the first title character. An explicit
+  // `role.effort` still wins.
+  const effort = config.role.effort ?? 'none'
   const timeoutMs = options.timeoutMs ?? 20_000
   const controller = new AbortController()
   const onAbort = (): void => controller.abort()

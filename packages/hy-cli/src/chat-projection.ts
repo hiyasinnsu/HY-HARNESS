@@ -212,6 +212,16 @@ export function stripPlanPrefix(text: string): string {
   return out
 }
 
+export function compactionNotice(runId: string, seq: number, ts: number, outcome: unknown): ChatEntry | undefined {
+  const text = outcome === 'summarized' ? 'Context compacted. Earlier messages were summarized.'
+    : outcome === 'shortened' ? 'Context compacted. Older material was shortened.'
+    : outcome === 'partial' ? 'Context partially compacted. Summarization failed.'
+    : outcome === 'failed' ? 'Context compaction failed.'
+    : undefined
+  if (!text) return undefined
+  return { id: `compaction-${seq}`, kind: 'notice', runId, ts, text, level: outcome === 'partial' || outcome === 'failed' ? 'warn' : 'info' }
+}
+
 /**
  * Reconstructs the chat surface from a run's durable session events. This is
  * what the GUI shows after a reload; live updates use the same entry shapes.
@@ -231,10 +241,19 @@ export function projectChat(events: readonly SessionEvent[], runId: string): Cha
   let taggedTurn = 0
 
   for (const e of events) {
-    if (e.runId !== runId) continue
+    if (e.runId !== runId && !(e.runId === `${runId}.dialogue` && e.type === 'compaction/result')) continue
     const p = (e.payload ?? {}) as Record<string, unknown>
     const ts = e.ts
     switch (e.type) {
+      case 'turn/failure': {
+        if (typeof p.nudge === 'string') entries.push({ id: `failure-${e.seq}`, kind: 'notice', runId, text: p.nudge, ts, level: 'warn' })
+        break
+      }
+      case 'orchestration/dialogue': {
+        const text = String(p.content ?? '')
+        if (text) entries.push({ id: `dialogue-${e.seq}`, kind: p.role === 'assistant' ? 'assistant' : 'user', runId, text, ts, ...(Number(p.images) > 0 ? { images: Number(p.images) } : {}) })
+        break
+      }
       case 'turn/start': {
         const turn = Number(p.turn ?? 0)
         pendingCalls.length = 0
@@ -270,7 +289,7 @@ export function projectChat(events: readonly SessionEvent[], runId: string): Cha
         if (!text) break
         entries.push({
           id: `msg-${e.seq}`,
-          kind: 'user',
+          kind: p.source === 'worker' || p.source === 'orchestrator' ? 'notice' : 'user',
           runId,
           text,
           ts,
@@ -372,8 +391,15 @@ export function projectChat(events: readonly SessionEvent[], runId: string): Cha
       case 'turn/retry':
         entries.push({ id: `notice-${e.seq}`, kind: 'notice', runId, text: `retrying (${String(p.reason ?? 'invalid response')})`, ts, level: 'warn' })
         break
+      case 'compaction/result': {
+        const entry = compactionNotice(runId, e.seq, ts, p.outcome)
+        if (entry) entries.push(entry)
+        break
+      }
       case 'compaction/manual':
-        entries.push({ id: `notice-${e.seq}`, kind: 'notice', runId, text: `compacted ${String(p.before ?? '?')} → ${String(p.after ?? '?')} messages`, ts })
+        if (p.noticeHandled !== true) {
+          entries.push({ id: `notice-${e.seq}`, kind: 'notice', runId, text: `compacted ${String(p.before ?? '?')} → ${String(p.after ?? '?')} messages`, ts })
+        }
         break
       case 'plan-mode':
         entries.push({ id: `notice-${e.seq}`, kind: 'notice', runId, text: p.on === true ? 'plan mode on' : 'plan mode off', ts })

@@ -4,7 +4,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import type { HarnessConfig } from '../../core/dist/index.js'
+import { roleApiKeyEnv, type HarnessConfig, type RoleConfig } from '../../core/dist/index.js'
 
 export type CheckStatus = 'ok' | 'warn' | 'fail'
 
@@ -50,14 +50,31 @@ export function doctorSandbox(status: {
   }
 }
 
-const KEYLESS = new Set(['mock', 'ollama'])
-
-/** True when the role can authenticate: a literal key, a set env var, or a keyless provider. */
-export function roleHasCredentials(role: { provider: string; apiKey?: string; apiKeyEnv?: string }): boolean {
-  if (KEYLESS.has(role.provider)) return true
+/**
+ * True when the role can authenticate: a literal key, a set env var, or a
+ * provider that needs no key. The env name comes from `roleApiKeyEnv`, the one
+ * place that knows the provider defaults (`undefined` = keyless), so doctor
+ * cannot drift from the roles it diagnoses.
+ */
+export function roleHasCredentials(role: RoleConfig): boolean {
   if (role.apiKey !== undefined && role.apiKey.length > 0) return true
-  const env = role.apiKeyEnv ?? (role.provider === 'deepseek' ? 'DEEPSEEK_API_KEY' : role.provider === 'opencode' ? 'OPENCODE_API_KEY' : role.provider === 'gemini' ? 'GEMINI_API_KEY' : role.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
-  return (process.env[env] ?? '').length > 0
+  const env = roleApiKeyEnv(role)
+  return env === undefined || (process.env[env] ?? '').length > 0
+}
+
+/** Every role in the configuration, in report order; optional roles may be absent. */
+function configuredRoles(config: HarnessConfig): Array<[string, RoleConfig]> {
+  const roles: Array<[string, RoleConfig | undefined]> = [
+    ['worker', config.role],
+    ['orchestrator', config.orchestratorRole],
+    ['subagent', config.subagentRole],
+    ['grader', config.graderRole],
+    ['compactor', config.compactorRole],
+    ['summarizer', config.summarizerRole],
+    ['advisor', config.advisorRole],
+    ['guardian', config.guardianRole],
+  ]
+  return roles.filter((entry): entry is [string, RoleConfig] => entry[1] !== undefined)
 }
 
 export function buildDoctorReport(input: DoctorInput): { ok: boolean; version: string; checks: DoctorCheck[] } {
@@ -98,15 +115,16 @@ export function buildDoctorReport(input: DoctorInput): { ok: boolean; version: s
       checks.push({ name: 'readOnly', status: 'ok', detail: `${input.sandbox.readOnly!.length} path(s)` })
     }
   }
-  for (const [label, role] of [
-    ['worker', input.config.role],
-    ['grader', input.config.graderRole],
-    ['compactor', input.config.compactorRole],
-  ] as const) {
+  // Every role the configuration carries, not just the three the agent uses
+  // first: the summarizer, advisor, guardian and orchestrator make their own
+  // requests with their own key and model, so a missing key there used to fail
+  // a feature later instead of showing up here. Optional roles are skipped.
+  for (const [label, role] of configuredRoles(input.config)) {
+    const credentialed = roleHasCredentials(role)
     checks.push({
       name: `role:${label}`,
-      status: roleHasCredentials(role) ? 'ok' : 'warn',
-      detail: roleHasCredentials(role) ? `${role.provider}/${role.model}` : `${role.provider}/${role.model} has no API key`,
+      status: credentialed ? 'ok' : 'warn',
+      detail: credentialed ? `${role.provider}/${role.model}` : `${role.provider}/${role.model} has no API key`,
     })
   }
   // CP-38: which feature flags are on (experimental ones are opt-in).

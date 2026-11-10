@@ -5,9 +5,9 @@
 // release build forgotten so hy-secret.exe was missing from the package, and a
 // failed package because the running app locks release/HY-HARNESS.exe):
 //
-//   1. bump the version everywhere `check:version` looks (optional)
+//   1. choose the version bump (patch by default)
 //   2. cargo build --release (hy-exec-server.exe, hy-secret.exe)
-//   3. pnpm build (also writes build-info.json: version, commit, build time)
+//   3. pnpm build (bumps all versions once and writes build-info.json)
 //   4. check:version, then the unit tests (unless --skip-tests)
 //   5. package: into release/next as HY-HARNESS-<version>-<stamp>.exe while the
 //      app is running (it then offers "update ready"), else release/HY-HARNESS.exe
@@ -29,8 +29,8 @@ function run(label, command) {
   execSync(command, { cwd: root, stdio: 'inherit' })
 }
 
-function readText(file) {
-  return fs.readFileSync(path.join(root, file), 'utf8')
+function readText(file, baseRoot = root) {
+  return fs.readFileSync(path.join(baseRoot, file), 'utf8')
 }
 
 function currentVersion() {
@@ -47,21 +47,22 @@ export function bumpVersion(version, kind) {
 }
 
 /** Rewrites the version in place (keeps BOMs, line endings and formatting). */
-function setVersion(next) {
-  const files = ['package.json', ...fs.readdirSync(path.join(root, 'packages')).map((name) => `packages/${name}/package.json`)].filter((file) =>
-    fs.existsSync(path.join(root, file)),
+export function setVersion(next, baseRoot = root) {
+  const files = ['package.json', ...fs.readdirSync(path.join(baseRoot, 'packages')).map((name) => `packages/${name}/package.json`)].filter((file) =>
+    fs.existsSync(path.join(baseRoot, file)),
   )
-  for (const file of files) {
-    const text = readText(file)
+  const updates = files.map((file) => {
+    const text = readText(file, baseRoot)
     const updated = text.replace(/("version"\s*:\s*")[^"]+(")/, `$1${next}$2`)
     if (updated === text) throw new Error(`no "version" field in ${file}`)
-    fs.writeFileSync(path.join(root, file), updated, 'utf8')
-  }
+    return [file, updated]
+  })
   const versionTs = 'packages/core/src/version.ts'
-  const source = readText(versionTs)
+  const source = readText(versionTs, baseRoot)
   const updated = source.replace(/HARNESS_VERSION = '[^']+'/, `HARNESS_VERSION = '${next}'`)
   if (updated === source) throw new Error(`HARNESS_VERSION not found in ${versionTs}`)
-  fs.writeFileSync(path.join(root, versionTs), updated, 'utf8')
+  updates.push([versionTs, updated])
+  for (const [file, text] of updates) fs.writeFileSync(path.join(baseRoot, file), text, 'utf8')
   console.log(`[release] version ${next} written to ${files.length} package.json files and ${versionTs}`)
 }
 
@@ -87,12 +88,13 @@ function newestStaged() {
 
 async function main() {
   const started = Date.now()
-  const bump = option('--bump')
-  if (bump) setVersion(bumpVersion(currentVersion(), bump))
-  const version = currentVersion()
+  const bump = option('--bump') ?? 'patch'
+  bumpVersion(currentVersion(), bump)
 
   run('Rust release build (hy-exec-server.exe, hy-secret.exe)', 'cargo build --release --workspace')
+  process.env.HY_BUILD_VERSION_BUMP = bump
   run('TypeScript build', 'pnpm build')
+  const version = currentVersion()
   run('version check', 'node scripts/check-version.mjs')
   if (!flag('--skip-tests')) run('unit tests', 'pnpm test')
 
@@ -117,7 +119,7 @@ async function main() {
       ? '[release] The running app shows "Update ready" in the sidebar (on focus); click it to restart into this build.'
       : '[release] Start release\\HY-HARNESS.exe.',
   )
-  if (bump) console.log(`[release] The version changed to ${version}; commit the bumped files.`)
+  console.log(`[release] The version changed to ${version}; commit the bumped files.`)
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

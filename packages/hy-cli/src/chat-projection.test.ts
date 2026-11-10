@@ -13,6 +13,20 @@ const ev = (seq: number, type: string, payload: unknown, runId = 'run-test'): Se
   payload,
 })
 
+test('compaction notices survive a reload and manual completion does not duplicate them', () => {
+  const entries = projectChat([
+    ev(1, 'compaction/prune', { pruned: 2 }),
+    ev(2, 'compaction/result', { outcome: 'shortened' }),
+    ev(3, 'compaction/manual', { before: 10, after: 10, noticeHandled: true }),
+    ev(4, 'compaction/summary', { pairs: 5 }),
+    ev(5, 'compaction/result', { outcome: 'summarized' }, 'run-test.dialogue'),
+    ev(6, 'compaction/result', { outcome: 'partial' }),
+    ev(7, 'compaction/result', { outcome: 'failed' }),
+  ], 'run-test')
+  assert.deepEqual(entries.map((entry) => entry.id), ['compaction-2', 'compaction-5', 'compaction-6', 'compaction-7'])
+  assert.deepEqual(entries.map((entry) => entry.kind === 'notice' && entry.level), ['info', 'info', 'warn', 'warn'])
+})
+
 test('projectChat rebuilds users, tool cards, plans and final answers', () => {
   const events: SessionEvent[] = [
     ev(1, 'turn/start', { turn: 1 }),
@@ -273,4 +287,16 @@ test('CP-21: the chat shows the user\'s words, not the skill bodies added for th
   ]
   const user = projectChat(events, 'run-test').find((e) => e.kind === 'user')
   assert.equal(user?.kind === 'user' ? user.text : '', 'Ship it with @skill:release')
+})
+
+test('dialogue remains in the parent transcript and worker steering is a notice, not user speech', () => {
+  const entries = projectChat([
+    ev(1, 'orchestration/dialogue', { role: 'user', content: 'Unrelated small talk' }),
+    ev(2, 'orchestration/dialogue', { role: 'assistant', content: 'A natural reply' }),
+    ev(3, 'user/steer', { source: 'worker', content: 'A worker result' }),
+    ev(4, 'turn/failure', { nudge: 'The task is incomplete.' }),
+  ], 'run-test')
+  assert.deepEqual(entries.map((e) => [e.kind, 'text' in e ? e.text : '']), [
+    ['user', 'Unrelated small talk'], ['assistant', 'A natural reply'], ['notice', 'A worker result'], ['notice', 'The task is incomplete.'],
+  ])
 })

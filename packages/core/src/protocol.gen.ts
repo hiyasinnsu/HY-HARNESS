@@ -387,6 +387,12 @@ export interface NearestMatch {
 export interface PatchApplyParams {
   dryRun?: boolean
   /**
+   * Text encoding of the files in this patch: `utf8` (default, BOM allowed),
+   * `utf16le` or `utf16be`. The control plane sends it when it decoded the
+   * file itself (`edit_file` on a UTF-16 document).
+   */
+  encoding?: string | null
+  /**
    * Set by the control plane in `hy ralph` (protected paths are rejected unless true).
    */
   enforceProtectedPaths?: boolean

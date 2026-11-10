@@ -61,7 +61,7 @@ node packages\hy-cli\dist\main.js ralph "テストを通すように修正して
 - 各ラウンドは新しい子セッションです。ワーカーが終われるのは **`claim_complete` を呼んだときだけ**で（OQ-4）、ツールを呼ばない返事は 1 回促したあと「stalled」になります。
 - 完了の宣言は、**改ざん検査**（`protectedPaths` の変更）→ **Gate 1**（すべての `--verify-cmd`。複数指定可。ユーザーが渡したものなので unconfined で動く、OQ-2）→ **Gate 2**（`grader` ロールが、差分・テスト出力・ワーカーのメモを untrusted として囲った入力で判定）の順に通ったときだけ受け入れます。Gate 2 は既定で実行し、`--no-grader` で省けます（推奨しません）。
 - 失敗すると、次のラウンドに失敗の要約（失敗したコマンドと出力の末尾、満たしていない条件、変更したファイル。2,000 トークンまで）を渡します。中断・タイムアウト・予算切れでは、そのラウンドの開始時点に戻します。`HEAD` が動いていたら戻さずに止まります。
-- **Budget4D**: `--max-rounds`（既定 5）、`--max-total-tokens`（500,000）、`--max-cost-usd`（2.00。`off` で無効。使うロールすべてに `pricing` が必要で、Ollama と mock は 0 円として扱う）、`--max-wall-clock-ms`（30 分）。すべてのロール（worker、grader、guardian、compactor）の使用量を数え、呼び出しの前に `max_tokens` を残りに合わせて絞ります。`--round-timeout-ms` でラウンドごとの時間制限、Ctrl-C で現在のラウンドを戻して止まります。
+- **Budget4D**: `--max-rounds`（既定 5）、`--max-total-tokens`（500,000）、`--max-cost-usd`（既定は上限なし。数値を指定したときだけ有効で、`off` で無効。使うロールすべてに `pricing` が必要で、Ollama と mock は 0 円として扱う。プロジェクト設定の `budget4D.maxCostUsd` は信頼済みプロジェクトでのみ有効）、`--max-wall-clock-ms`（30 分）。すべてのロール（worker、grader、guardian、compactor）の使用量を数え、呼び出しの前に `max_tokens` を残りに合わせて絞ります。`--round-timeout-ms` でラウンドごとの時間制限、Ctrl-C で現在のラウンドを戻して止まります。
 - `hy undo <run-id>` で `base` に戻せます。`hy checkpoint prune <run-id> [--keep base]` で ref を消します。
 
 ### 1.5 サンドボックスの管理

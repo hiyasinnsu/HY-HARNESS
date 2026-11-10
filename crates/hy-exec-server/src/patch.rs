@@ -199,23 +199,77 @@ pub fn parse(text: &str) -> Result<Vec<FilePatch>, PatchError> {
     Ok(files)
 }
 
+/// The text encoding of a patched file. The control plane sends it when it
+/// decoded the file itself (`edit_file` on a UTF-16 document); otherwise the
+/// daemon detects it from a BOM and assumes UTF-8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+}
+
+impl Encoding {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "utf8" | "utf-8" => Some(Self::Utf8),
+            "utf16le" | "utf-16le" => Some(Self::Utf16Le),
+            "utf16be" | "utf-16be" => Some(Self::Utf16Be),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TextFile {
+    encoding: Encoding,
     bom: bool,
     crlf: bool,
     lines: Vec<String>,
     final_newline: bool,
 }
 
-fn decode(bytes: &[u8], file: &str) -> Result<TextFile, PatchError> {
-    let (bom, body) = match bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        Some(rest) => (true, rest),
-        None => (false, bytes),
+fn decode(bytes: &[u8], file: &str, requested: Option<Encoding>) -> Result<TextFile, PatchError> {
+    // An explicit encoding wins; otherwise a BOM tells UTF-16 apart from UTF-8.
+    let (encoding, body) = match requested {
+        Some(Encoding::Utf16Le) => (Encoding::Utf16Le, bytes.strip_prefix(&[0xFF, 0xFE]).unwrap_or(bytes)),
+        Some(Encoding::Utf16Be) => (Encoding::Utf16Be, bytes.strip_prefix(&[0xFE, 0xFF]).unwrap_or(bytes)),
+        Some(Encoding::Utf8) => (Encoding::Utf8, bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)),
+        None if bytes.starts_with(&[0xFF, 0xFE]) => (Encoding::Utf16Le, &bytes[2..]),
+        None if bytes.starts_with(&[0xFE, 0xFF]) => (Encoding::Utf16Be, &bytes[2..]),
+        // A UTF-8 BOM is kept as a flag, not as a character in the first line.
+        None if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) => (Encoding::Utf8, &bytes[3..]),
+        None => (Encoding::Utf8, bytes),
     };
-    let text = std::str::from_utf8(body).map_err(|_| PatchError::Invalid {
-        file: file.into(),
-        message: "file is not valid UTF-8".into(),
-    })?;
+    let bom = matches!(encoding, Encoding::Utf8) && bytes.starts_with(&[0xEF, 0xBB, 0xBF])
+        || matches!(encoding, Encoding::Utf16Le) && bytes.starts_with(&[0xFF, 0xFE])
+        || matches!(encoding, Encoding::Utf16Be) && bytes.starts_with(&[0xFE, 0xFF]);
+    let text = match encoding {
+        Encoding::Utf8 => std::str::from_utf8(body).map_err(|_| PatchError::Invalid {
+            file: file.into(),
+            message: "file is not valid UTF-8".into(),
+        })?.to_string(),
+        Encoding::Utf16Le | Encoding::Utf16Be => {
+            if body.len() % 2 != 0 {
+                return Err(PatchError::Invalid {
+                    file: file.into(),
+                    message: "file is not valid UTF-16 (odd length)".into(),
+                });
+            }
+            let units: Vec<u16> = body
+                .chunks_exact(2)
+                .map(|c| match encoding {
+                    Encoding::Utf16Be => u16::from_be_bytes([c[0], c[1]]),
+                    _ => u16::from_le_bytes([c[0], c[1]]),
+                })
+                .collect();
+            String::from_utf16(&units).map_err(|_| PatchError::Invalid {
+                file: file.into(),
+                message: "file is not valid UTF-16".into(),
+            })?
+        }
+    };
+    let text = text.as_str();
     let crlf_count = text.matches("\r\n").count();
     let lf_count = text.matches('\n').count();
     let crlf = crlf_count * 2 > lf_count && crlf_count > 0;
@@ -228,6 +282,7 @@ fn decode(bytes: &[u8], file: &str) -> Result<TextFile, PatchError> {
         lines.pop();
     }
     Ok(TextFile {
+        encoding,
         bom,
         crlf,
         lines,
@@ -235,17 +290,38 @@ fn decode(bytes: &[u8], file: &str) -> Result<TextFile, PatchError> {
     })
 }
 
-fn encode(t: &TextFile) -> Vec<u8> {
+/// The decoded text as it will be written (line endings and final newline included).
+fn render_text(t: &TextFile) -> String {
     let eol = if t.crlf { "\r\n" } else { "\n" };
     let mut s = t.lines.join(eol);
     if t.final_newline && !t.lines.is_empty() {
         s.push_str(eol);
     }
+    s
+}
+
+fn encode(t: &TextFile) -> Vec<u8> {
+    let s = render_text(t);
     let mut out = Vec::with_capacity(s.len() + 3);
-    if t.bom {
-        out.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    match t.encoding {
+        Encoding::Utf8 => {
+            if t.bom {
+                out.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+            }
+            out.extend_from_slice(s.as_bytes());
+        }
+        Encoding::Utf16Le | Encoding::Utf16Be => {
+            if t.bom {
+                out.extend_from_slice(if t.encoding == Encoding::Utf16Le { &[0xFF, 0xFE] } else { &[0xFE, 0xFF] });
+            }
+            for unit in s.encode_utf16() {
+                out.extend_from_slice(&match t.encoding {
+                    Encoding::Utf16Be => unit.to_be_bytes(),
+                    _ => unit.to_le_bytes(),
+                });
+            }
+        }
     }
-    out.extend_from_slice(s.as_bytes());
     out
 }
 
@@ -318,13 +394,10 @@ fn apply_hunks(file: &str, t: &mut TextFile, hunks: &[Hunk]) -> Result<(), Patch
     Ok(())
 }
 
-fn validate(rel: &str, bytes: &[u8]) -> Result<(), PatchError> {
+fn validate(rel: &str, t: &TextFile) -> Result<(), PatchError> {
     let lower = rel.to_lowercase();
-    let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-    let text = std::str::from_utf8(body).map_err(|_| PatchError::Invalid {
-        file: rel.into(),
-        message: "result is not valid UTF-8".into(),
-    })?;
+    let text = render_text(t);
+    let text = text.as_str();
     if lower.ends_with(".json") {
         serde_json::from_str::<serde_json::Value>(text).map_err(|e| PatchError::Invalid {
             file: rel.into(),
@@ -363,6 +436,7 @@ pub fn apply(
     patch: &str,
     dry_run: bool,
     enforce_protected: bool,
+    encoding: Option<Encoding>,
 ) -> Result<PatchApplyResult, PatchError> {
     let files = parse(patch)?;
     let mut actions: BTreeMap<String, Action> = BTreeMap::new();
@@ -373,6 +447,7 @@ pub fn apply(
             (None, Some(new)) => {
                 let (path, rel) = guard.check(new, enforce_protected)?;
                 let mut t = TextFile {
+                    encoding: encoding.unwrap_or(Encoding::Utf8),
                     bom: false,
                     crlf: false,
                     lines: vec![],
@@ -382,7 +457,7 @@ pub fn apply(
                 };
                 apply_hunks(&rel, &mut t, &fp.hunks)?;
                 let bytes = encode(&t);
-                validate(&rel, &bytes)?;
+                validate(&rel, &t)?;
                 actions.insert(
                     rel.clone(),
                     Action::Write {
@@ -402,10 +477,10 @@ pub fn apply(
                     file: rel.clone(),
                     source: e,
                 })?;
-                let mut t = decode(&bytes, &rel)?;
+                let mut t = decode(&bytes, &rel, encoding)?;
                 apply_hunks(&rel, &mut t, &fp.hunks)?;
                 let out = encode(&t);
-                validate(&rel, &out)?;
+                validate(&rel, &t)?;
                 actions.insert(
                     rel.clone(),
                     Action::Write {
@@ -422,10 +497,10 @@ pub fn apply(
                     file: old_rel.clone(),
                     source: e,
                 })?;
-                let mut t = decode(&bytes, &old_rel)?;
+                let mut t = decode(&bytes, &old_rel, encoding)?;
                 apply_hunks(&new_rel, &mut t, &fp.hunks)?;
                 let out = encode(&t);
-                validate(&new_rel, &out)?;
+                validate(&new_rel, &t)?;
                 actions.insert(old_rel.clone(), Action::Delete { path: old_path });
                 actions.insert(
                     new_rel.clone(),
@@ -624,10 +699,44 @@ mod tests {
     }
 
     fn apply(guard: &FsGuard, patch: &str) -> PatchApplyResult {
-        match super::apply(guard, patch, false, false) {
+        match super::apply(guard, patch, false, false, None) {
             Ok(r) => r,
             Err(e) => panic!("patch failed: {e}"),
         }
+    }
+
+    #[test]
+    fn edits_utf16le_files_in_their_own_encoding() {
+        let (dir, guard) = fixture();
+        let path = dir.path().join("u16.txt");
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "one\ntwo\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, &bytes).unwrap_or_else(|e| panic!("{e}"));
+        let diff = "--- a/u16.txt\n+++ b/u16.txt\n@@ -1,2 +1,2 @@\n-one\n+ONE\n two\n";
+        // The control plane decoded the file itself and names the encoding; a
+        // BOM alone would also be detected.
+        match super::apply(&guard, diff, false, false, Some(Encoding::Utf16Le)) {
+            Ok(r) => assert_eq!(r.applied_files, vec!["u16.txt"]),
+            Err(e) => panic!("patch failed: {e}"),
+        }
+        let out = std::fs::read(&path).unwrap_or_default();
+        assert_eq!(&out[..2], &[0xFF, 0xFE], "exactly one BOM");
+        let units: Vec<u16> = out[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&units).unwrap_or_default(), "ONE\ntwo\n");
+
+        // Without the hint the BOM is enough.
+        std::fs::write(&path, &bytes).unwrap_or_else(|e| panic!("{e}"));
+        match super::apply(&guard, diff, false, false, None) {
+            Ok(r) => assert_eq!(r.applied_files, vec!["u16.txt"]),
+            Err(e) => panic!("patch failed: {e}"),
+        }
+        let out = std::fs::read(&path).unwrap_or_default();
+        assert_eq!(&out[..2], &[0xFF, 0xFE], "exactly one BOM");
     }
 
     #[test]
@@ -697,6 +806,7 @@ mod tests {
             "--- a/c.txt\n+++ b/c.txt\n@@ -1,1 +1,1 @@\n-expected\n+new\n",
             false,
             false,
+            None,
         );
         assert!(matches!(err, Err(PatchError::Conflict { .. })));
     }
@@ -709,6 +819,7 @@ mod tests {
             "--- /dev/null\n+++ b/d.txt\n@@ -0,0 +1,1 @@\n+x\n",
             true,
             false,
+            None,
         )
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(r.created, vec!["d.txt"]);
@@ -754,6 +865,7 @@ mod tests {
             "--- a/sub/new.txt\n+++ b/sub/new.txt\n@@ -1,2 +1,2 @@\n alpha delta\n-wrong_second_line\n+x\n",
             false,
             false,
+            None,
         );
         match conflict {
             Err(PatchError::Conflict { nearest, .. }) => assert!(nearest.is_some()),
@@ -771,6 +883,7 @@ mod tests {
                 "--- a/cfg.json\n+++ b/cfg.json\n@@ -1,1 +1,1 @@\n-{\"ok\":true}\n+{broken\n",
                 false,
                 false,
+                None,
             ),
             Err(PatchError::Invalid { .. })
         ));
@@ -784,6 +897,7 @@ mod tests {
                 "--- a/cfg.toml\n+++ b/cfg.toml\n@@ -1,1 +1,1 @@\n-key = \"val\"\n+key = [unclosed\n",
                 false,
                 false,
+                None,
             ),
             Err(PatchError::Invalid { .. })
         ));
@@ -800,13 +914,14 @@ mod tests {
             "--- a/cfg2.toml\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-key = \"val\"\n",
             true,
             false,
+            None,
         ) else {
             panic!("dry_run delete failed");
         };
         assert_eq!(dry_del.deleted, vec!["cfg2.toml"]);
         assert!(dir.path().join("cfg2.toml").exists());
         assert!(matches!(
-            super::apply(&guard, "not a patch at all", false, false),
+            super::apply(&guard, "not a patch at all", false, false, None),
             Err(PatchError::Parse(_))
         ));
     }

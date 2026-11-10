@@ -9,7 +9,7 @@ const free = { inputPerMTokUsd: 0, outputPerMTokUsd: 0 }
 class Recorder implements LlmProvider {
   readonly name = 'rec'
   readonly options: CompleteOptions[] = []
-  constructor(private readonly usage = { inputTokens: 100, outputTokens: 50 }) {}
+  constructor(private readonly usage: Completion['usage'] = { inputTokens: 100, outputTokens: 50 }) {}
   async complete(_m: ChatMessage[], options: CompleteOptions): Promise<Completion> {
     this.options.push(options)
     return { content: '{}', usage: this.usage }

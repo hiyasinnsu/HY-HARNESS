@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -14,9 +15,10 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 const { startWebServer } = await import(pathToFileURL(path.join(repo, 'packages', 'hy-cli', 'dist', 'web-server.js')).href)
 const { readEvents, sessionLogPath } = await import(pathToFileURL(path.join(repo, 'packages', 'core', 'dist', 'index.js')).href)
 
-function fixture() {
+function fixture(git = true) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-web-'))
   fs.writeFileSync(path.join(dir, 'README.md'), '# Web Fixture\n\nA repository for the GUI test.\n', 'utf8')
+  if (!git) return dir
   for (const args of [['init', '-q'], ['add', '-A'], ['-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'init']]) {
     const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' })
     if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`)
@@ -84,6 +86,49 @@ async function newSession(ctx) {
   assert.equal(created.status, 201, created.text)
   return created.json.runId
 }
+
+test('web GUI: manual compaction posts one durable notice and skips empty chats', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir)
+  try {
+    const runId = await newSession(ctx)
+    const compact = () => ctx.request(`/api/sessions/${encodeURIComponent(runId)}/compact`, { method: 'POST', body: '{}' })
+    const empty = await compact()
+    assert.equal(empty.json.result, 'Context unchanged.')
+    assert.equal((await snapshot(ctx, runId)).entries.filter((entry) => entry.kind === 'notice').length, 0)
+    for (const word of ['one', 'two', 'three', 'four']) await turn(ctx, runId, `SAY ${word}`)
+    const result = await compact()
+    assert.equal(result.status, 200, result.text)
+    const notices = (await snapshot(ctx, runId)).entries.filter((entry) => entry.kind === 'notice' && entry.id.startsWith('compaction-'))
+    assert.equal(notices.length, 1)
+    assert.match(notices[0].text, /Earlier messages were summarized/)
+    const log = readEvents(sessionLogPath(ctx.handle.config.stateDir))
+    assert.equal(log.filter((event) => event.runId === runId && event.type === 'compaction/result').length, 1)
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('web GUI: automatic compaction announces the summary in the live transcript', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const projectConfig = path.join(dir, '.hy-harness')
+  fs.mkdirSync(projectConfig)
+  fs.writeFileSync(path.join(projectConfig, 'config.json'), JSON.stringify({ limits: { compactionTriggerRatio: 0.04 } }))
+  const ctx = await runServer(dir)
+  try {
+    const runId = await newSession(ctx)
+    for (let i = 0; i < 4; i++) await turn(ctx, runId, `SAY ${i} ${'context '.repeat(600)}`)
+    const notices = (await snapshot(ctx, runId)).entries.filter((entry) => entry.kind === 'notice' && entry.id.startsWith('compaction-'))
+    assert.ok(notices.some((entry) => /Earlier messages were summarized/.test(entry.text)))
+    const log = readEvents(sessionLogPath(ctx.handle.config.stateDir))
+    assert.equal(notices.length, log.filter((event) => event.runId === runId && event.type === 'compaction/result').length)
+    assert.equal(log.some((event) => event.runId === runId && event.type === 'compaction/manual'), false)
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 async function snapshot(ctx, runId) {
   const r = await ctx.request(`/api/sessions/${encodeURIComponent(runId)}`)
@@ -317,6 +362,41 @@ test('web GUI: /model applies the model profile context and output limits', { sk
     const written = JSON.parse(fs.readFileSync(settings.json.path, 'utf8'))
     assert.equal(written.roles.worker.contextWindowTokens, 128_000, 'the partial save keeps the profile context')
     assert.equal(written.roles.worker.maxOutputTokens, 8_192, 'the partial save keeps the profile output cap')
+  } finally {
+    if (ctx) await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('web GUI: /model saves the orchestrator default without changing the OpenCode Go worker', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  let ctx
+  try {
+    ctx = await runServer(dir, { mock: false }, {
+      roles: {
+        worker: { provider: 'opencode', model: 'deepseek-v4.1-flash' },
+        orchestrator: { provider: 'gemini', model: 'gemini-2.5-flash' },
+      },
+    })
+    const started = await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })
+    assert.ok(started.json.runId, started.text)
+    const changeModel = (runId) => ctx.request(`/api/sessions/${runId}/model`, {
+      method: 'POST',
+      body: JSON.stringify({ model: 'gemini-3.8-flash', save: true }),
+    })
+    const switched = await changeModel(started.json.runId)
+    assert.equal(switched.status, 200, switched.text)
+    assert.equal(switched.json.role, 'orchestrator')
+    const settings = await ctx.request('/api/settings')
+    assert.equal(settings.json.active.orchestrator.model, 'gemini-3.8-flash')
+    assert.equal(settings.json.user.roles.orchestrator.model, 'gemini-3.8-flash')
+    assert.equal(settings.json.active.worker.model, 'deepseek-v4.1-flash')
+    assert.equal(settings.json.user.roles.worker.model, 'deepseek-v4.1-flash')
+    const chat = await newSession(ctx)
+    const rejected = await changeModel(chat)
+    assert.equal(rejected.status, 400, rejected.text)
+    assert.match(rejected.json.error, /unavailable on OpenCode Go/)
+    assert.equal((await snapshot(ctx, chat)).state.model.model, 'deepseek-v4.1-flash')
   } finally {
     if (ctx) await ctx.close()
     fs.rmSync(dir, { recursive: true, force: true })
@@ -884,6 +964,120 @@ test('web GUI: an added root stays with its workspace and does not follow a work
   }
 })
 
+test('web GUI: a Gemini orchestrator dispatches before expanding unassigned direct edits', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const call = (name, args) => ({ type: 'function_call', name, arguments: args })
+  const write = (file) => call('apply_patch', { file, content: 'Direct edit\n' })
+  const independent = 'independent.md'
+  const calls = [
+    write('setup.md'),
+    write('outline.md'),
+    write(independent),
+    call('orchestrator_scope', { scope: ['file:integration.md'], directReason: 'The user requested direct integration.' }),
+    write('integration.md'),
+    write('outside.md'),
+    call('orchestrator_spawn', {
+      title: 'Independent work',
+      task: `CALL apply_patch ${JSON.stringify({ file: independent, content: 'Worker edit\n' })}`,
+      scope: [`file:${independent}`],
+    }),
+  ]
+  const requests = []
+  const gemini = http.createServer(async (req, res) => {
+    let body = ''
+    for await (const chunk of req) body += chunk
+    const step = calls[requests.length]
+    requests.push(JSON.parse(body))
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify({ steps: [step ?? { type: 'model_output', content: [{ type: 'text', text: 'Worker dispatched.' }] }], usage: { total_input_tokens: 100, total_output_tokens: 20 } }))
+  })
+  let ctx
+  try {
+    await new Promise((resolve) => gemini.listen(0, '127.0.0.1', resolve))
+    ctx = await runServer(dir, { mock: false, autoApprove: true }, {
+      roles: {
+        worker: { provider: 'mock' },
+        orchestrator: { provider: 'gemini', model: 'gemini-3.8-flash', baseUrl: `http://127.0.0.1:${gemini.address().port}`, apiKey: 'fixture' },
+      },
+    })
+    const started = await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })
+    assert.ok(started.json.runId, started.text)
+    const done = await turn(ctx, started.json.runId, 'Set up the project and implement the independent module.')
+    assert.ok(requests.slice(0, calls.length).every((request) =>
+      request.tools.some((tool) => tool.name === 'orchestrator_spawn' && tool.parameters.required.includes('scope'))))
+    assert.ok(!requests[0].tools.some((tool) => tool.name === 'sleep'))
+    assert.equal(done.entries.filter((e) => e.kind === 'tool' && e.isError && e.output.includes('reached two files')).length, 2)
+    assert.ok(done.entries.some((e) => e.kind === 'tool' && e.name === 'orchestrator_spawn' && !e.isError))
+    assert.ok(fs.existsSync(path.join(dir, 'setup.md')))
+    assert.ok(fs.existsSync(path.join(dir, 'outline.md')))
+    assert.ok(fs.existsSync(path.join(dir, 'integration.md')))
+    assert.ok(!fs.existsSync(path.join(dir, 'outside.md')))
+    await waitFor(() => fs.existsSync(path.join(dir, independent)))
+    assert.equal(fs.readFileSync(path.join(dir, independent), 'utf8'), 'Worker edit\n')
+  } finally {
+    if (ctx) await ctx.close()
+    await new Promise((resolve) => gemini.close(resolve))
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('web GUI: native Git can commit while shell GitHub credentials remain private', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const previous = process.env.GH_TOKEN
+  process.env.GH_TOKEN = 'ghp_fixtureGitTokenNotForExternalUse'
+  let ctx
+  try {
+    fs.writeFileSync(path.join(dir, 'ship.md'), 'Ship this file.\n')
+    for (const [key, value] of [['user.name', 'Fixture'], ['user.email', 'fixture@example.test']]) {
+      const result = spawnSync('git', ['config', key, value], { cwd: dir })
+      assert.equal(result.status, 0)
+    }
+    ctx = await runServer(dir, { autoApprove: true }, { sandbox: { envPassthrough: ['GH_TOKEN', 'GITHUB_TOKEN', 'GIT_CONFIG_PARAMETERS'] } })
+    const runId = await newSession(ctx)
+    const probe = await turn(ctx, runId, `CALL shell ${JSON.stringify({ command: 'node -e "console.log(Object.keys(process.env).filter(k => /^(GH_TOKEN|GITHUB_TOKEN|GIT_CONFIG_PARAMETERS)$/.test(k)).length)"' })}`)
+    const shell = probe.entries.filter((entry) => entry.kind === 'tool' && entry.name === 'shell').at(-1)
+    assert.equal(shell.result.stdout.trim(), '0')
+    const status = await turn(ctx, runId, 'CALL git_status {}')
+    const gitStatus = status.entries.find((entry) => entry.kind === 'tool' && entry.name === 'git_status')
+    assert.equal(gitStatus?.result?.githubCredentialConfigured, true, JSON.stringify(gitStatus))
+    assert.ok(gitStatus.result.changes.some((file) => file.path === 'ship.md'), JSON.stringify(gitStatus))
+    const committed = await turn(ctx, runId, 'CALL git_commit {"paths":["ship.md"],"message":"Ship fixture"}')
+    assert.ok(committed.entries.some((entry) => entry.kind === 'tool' && entry.name === 'git_commit' && /^[a-f0-9]{40}$/.test(entry.result?.commit)))
+  } finally {
+    if (ctx) await ctx.close()
+    if (previous === undefined) delete process.env.GH_TOKEN
+    else process.env.GH_TOKEN = previous
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('web GUI: orchestration cost limit blocks a paid request before dispatch', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  let ctx
+  try {
+    ctx = await runServer(dir, { mock: false, maxCostUsd: 0.01 }, {
+      roles: {
+        worker: { provider: 'mock' },
+        orchestrator: { provider: 'gemini', model: 'gemini-3.8-flash', baseUrl: 'http://127.0.0.1:9', apiKey: 'fixture' },
+      },
+    })
+    const { json: { runId } } = await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })
+    const sent = await ctx.request(`/api/sessions/${runId}/turn`, { method: 'POST', body: JSON.stringify({ message: 'Work on the fixture.' }) })
+    assert.equal(sent.status, 202, sent.text)
+    const stopped = await waitFor(async () => {
+      const snap = await snapshot(ctx, runId)
+      return !snap.state.busy && snap.state.lastError ? snap : undefined
+    })
+    assert.match(stopped.state.lastError, /Orchestration cost limit/)
+    const log = readEvents(sessionLogPath(ctx.handle.config.stateDir))
+    assert.ok(log.some((event) => event.runId === runId && event.type === 'turn/error'))
+    assert.ok(!log.some((event) => event.runId === runId && event.type === 'step/end'))
+  } finally {
+    if (ctx) await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('web GUI: orchestration spawns ordinary worker sessions and rejects overlap', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
   const dir = fixture()
   const ctx = await runServer(dir)
@@ -896,12 +1090,12 @@ test('web GUI: orchestration spawns ordinary worker sessions and rejects overlap
       method: 'POST',
       body: JSON.stringify({ on: false }),
     })
-    assert.equal(planOff.status, 409, planOff.text)
+    assert.equal(planOff.status, 200, planOff.text)
 
     const spawn = await ctx.request(`/api/sessions/${encodeURIComponent(orchestratorId)}/turn`, {
       method: 'POST',
       body: JSON.stringify({
-        message: `CALL orchestrator_spawn ${JSON.stringify({ title: 'Worker A', task: 'SAY worker A done', scope: ['src'] })}`,
+        message: `CALL orchestrator_spawn ${JSON.stringify({ title: 'Worker A', task: 'DONE worker A done', scope: ['src'] })}`,
       }),
     })
     assert.equal(spawn.status, 202, spawn.text)
@@ -1065,6 +1259,30 @@ test('web GUI: the orchestrator sees open workers, delivery and review state', {
   }
 })
 
+test('web GUI: missing worker reports remain incomplete and review works without Git', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture(false)
+  const ctx = await runServer(dir)
+  try {
+    const { json: { runId } } = await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })
+    await turn(ctx, runId, `CALL orchestrator_spawn ${JSON.stringify({ title: 'Incomplete', task: 'SAY No status provided.', scope: ['src'] })}`)
+    const worker = await waitFor(async () => (await ctx.request('/api/orchestration')).json.workers.find((w) => w.status === 'partial'))
+    assert.equal(worker.awaitingReview, false)
+    assert.match(worker.blocker, /missing a valid STATUS/)
+    const close = await turn(ctx, runId, `CALL orchestrator_close ${JSON.stringify({ workerId: worker.workerId })}`)
+    assert.equal(close.entries.filter((e) => e.kind === 'tool' && e.name === 'orchestrator_close').at(-1)?.isError, true)
+    await turn(ctx, runId, `CALL orchestrator_send ${JSON.stringify({ workerId: worker.workerId, message: 'DONE verified' })}`)
+    await waitFor(async () => (await ctx.request('/api/orchestration')).json.workers.find((w) => w.workerId === worker.workerId && w.status === 'waiting'))
+    const review = await turn(ctx, runId, `CALL orchestrator_diff ${JSON.stringify({ workerId: worker.workerId })}`)
+    const diff = review.entries.filter((e) => e.kind === 'tool' && e.name === 'orchestrator_diff').at(-1)
+    assert.equal(diff?.status, 'done')
+    assert.equal(diff.result.diffAvailable, false)
+    assert.match(diff.result.note, /verify the relevant checks/)
+  } finally {
+    await ctx.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('web GUI: a restart turns stale running workers into interrupted work and wakes the orchestrator', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
   const dir = fixture()
   let ctx = await runServer(dir)
@@ -1218,6 +1436,9 @@ test('web GUI: a blocked worker is surfaced and cannot be closed as a normal suc
 
 test('web GUI: the orchestrator cannot approve an unconfined worker command; the user can decide it', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
   const dir = fixture()
+  fs.mkdirSync(path.join(dir, 'src'))
+  fs.writeFileSync(path.join(dir, 'src', 'worker.json'), '{}')
+  fs.writeFileSync(path.join(dir, 'independent.json'), '{}')
   const ctx = await runServer(dir)
   try {
     const started = await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })
@@ -1226,7 +1447,7 @@ test('web GUI: the orchestrator cannot approve an unconfined worker command; the
     const spawn = await ctx.request(`/api/sessions/${encodeURIComponent(orchestratorId)}/turn`, {
       method: 'POST',
       body: JSON.stringify({
-        message: `CALL orchestrator_spawn ${JSON.stringify({ title: 'Installer', task: 'CALL shell {"command":"npm install"}', scope: ['src'] })}`,
+        message: `CALL orchestrator_spawn ${JSON.stringify({ title: 'Installer', task: 'CALL shell {"command":"npm install"}', scope: ['src'], requires: ['shell'] })}`,
       }),
     })
     assert.equal(spawn.status, 202, spawn.text)
@@ -1243,6 +1464,12 @@ test('web GUI: the orchestrator cannot approve an unconfined worker command; the
       const current = await snapshot(ctx, orchestratorId)
       return current.state.busy ? undefined : true
     })
+    const independent = await turn(ctx, orchestratorId, 'CALL verify_file {"path":"main:independent.json","check":"json"}')
+    assert.equal(independent.entries.find((entry) => entry.kind === 'tool' && entry.name === 'verify_file')?.result?.passed, true)
+    const overlapping = await turn(ctx, orchestratorId, 'CALL verify_file {"path":"main:src/worker.json","check":"json"}')
+    assert.match(overlapping.entries.filter((entry) => entry.kind === 'tool' && entry.name === 'verify_file').at(-1)?.output ?? '', /active worker may edit/)
+    const shell = await turn(ctx, orchestratorId, 'CALL shell {"command":"node --version"}')
+    assert.match(shell.entries.filter((entry) => entry.kind === 'tool' && entry.name === 'shell').at(-1)?.output ?? '', /worker is still active/i)
 
     // The orchestrator (a model) is refused.
     const tryApprove = await ctx.request(`/api/sessions/${encodeURIComponent(orchestratorId)}/turn`, {
@@ -1922,4 +2149,200 @@ test('web GUI: an orchestrator can resend / edit (conversation only), never rest
     await ctx.close()
     fs.rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('web GUI: direct edits share scope ownership and reviewed workers resume their existing conversation', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir, { autoApprove: true })
+  try {
+    const started = await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })
+    const id = started.json.runId
+    await turn(ctx, id, `CALL apply_patch ${JSON.stringify({ file: 'auto.md', content: 'automatically owned' })}`)
+    assert.equal(fs.readFileSync(path.join(dir, 'auto.md'), 'utf8'), 'automatically owned')
+    const code = `await tools.plugins.orchestrator_scope({scope:['file:direct.md']});
+      let rejected=false;
+      try { await tools.plugins.orchestrator_spawn({title:'Conflicting',task:'SAY no',scope:['file:direct.md']}); } catch { rejected=true; }
+      await tools.applyPatch({file:'direct.md',content:'direct edit verified\\n'});
+      return {rejected};`
+    const direct = await turn(ctx, id, `CALL run_code ${JSON.stringify({ code })}`)
+    const script = direct.entries.filter((e) => e.kind === 'tool' && e.name === 'run_code').at(-1)
+    assert.equal(script?.status, 'done', JSON.stringify(script))
+    assert.equal(script.result.value.rejected, true)
+    assert.equal(fs.readFileSync(path.join(dir, 'direct.md'), 'utf8'), 'direct edit verified\n')
+    await turn(ctx, id, `CALL orchestrator_spawn ${JSON.stringify({ title: 'Reusable', task: `CALL apply_patch ${JSON.stringify({file:'docs/new.md',content:'new document\n'})}`, scope: ['file:docs/new.md'] })}`)
+    const worker = await waitFor(async () => (await ctx.request('/api/orchestration')).json.workers.find((w) => w.title === 'Reusable' && w.status === 'waiting'))
+    const collision = await turn(ctx, id, `CALL apply_patch ${JSON.stringify({file:'docs/new.md',content:'must not overwrite worker work'})}`)
+    assert.ok(collision.entries.some((e) => e.kind === 'tool' && e.name === 'apply_patch' && e.isError && e.output.includes('owned by')))
+    const verification = await turn(ctx, id, 'CALL shell {"command":"Write-Output verified"}')
+    assert.equal(verification.entries.filter((e) => e.kind === 'tool' && e.name === 'shell').at(-1).status, 'done', 'idle review leases do not block exclusive verification')
+    const reviewed = await turn(ctx, id, `CALL orchestrator_diff ${JSON.stringify({workerId: worker.workerId})}`)
+    const review = reviewed.entries.filter((e) => e.kind === 'tool' && e.name === 'orchestrator_diff').at(-1).result
+    assert.match(review.diff, /\+new document/)
+    assert.ok(review.changed.includes('docs/new.md'), 'single-file scopes include new, untracked files')
+    await turn(ctx, id, 'CALL orchestrator_brief {"expectedRevision":0,"objective":"Keep the new document"}')
+    const staleClose = await turn(ctx, id, `CALL orchestrator_close ${JSON.stringify({workerId: worker.workerId})}`)
+    assert.ok(staleClose.entries.some((e) => e.kind === 'tool' && e.name === 'orchestrator_close' && e.isError))
+    await turn(ctx, id, `CALL orchestrator_close ${JSON.stringify({ workerId: worker.workerId, summary: 'The new document still satisfies the updated project objective.' })}`)
+    const initialTurns = (await snapshot(ctx, worker.workerId)).state.turns
+    await turn(ctx, id, `CALL orchestrator_send ${JSON.stringify({ workerId: worker.workerId, message: 'SAY resumed with context' })}`)
+    const resumed = await waitFor(async () => {
+      const snap = await snapshot(ctx, worker.workerId)
+      return snap.state.turns > initialTurns && !snap.state.busy ? snap : undefined
+    })
+    assert.ok(resumed.entries.some((e) => e.kind === 'assistant' && e.text.includes('resumed with context')))
+    assert.equal((await ctx.request('/api/orchestration')).json.workers.length, 1, 'resumption does not create a replacement worker')
+  } finally { await ctx.close(); fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('web GUI: conversation answers during execution, preserves direction and delivers requests through one owner', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir, { autoApprove: true })
+  try {
+    const started = await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })
+    const id = started.json.runId
+    await turn(ctx, id, `CALL orchestrator_brief ${JSON.stringify({ expectedRevision: 0, objective: 'Keep building the requested product', decisions: 'Preserve existing data' })}`)
+    await ctx.request(`/api/sessions/${id}/work-mode`, { method: 'POST', body: JSON.stringify({ mode: 'thorough' }) })
+    await ctx.request(`/api/sessions/${id}/interaction-mode`, { method: 'POST', body: JSON.stringify({ mode: 'collaborative' }) })
+    await ctx.request(`/api/sessions/${id}/turn`, { method: 'POST', body: JSON.stringify({ message: 'CALL shell {"command":"Start-Sleep -Seconds 4"}' }) })
+    await waitFor(async () => (await snapshot(ctx, id)).entries.find((e) => e.kind === 'tool' && e.name === 'shell'))
+    const chat = await ctx.request(`/api/sessions/${id}/steer`, { method: 'POST', body: JSON.stringify({ message: 'SAY 雑談にも応答できました' }) })
+    assert.equal(chat.status, 202, chat.text)
+    const during = await waitFor(async () => {
+      const snap = await snapshot(ctx, id)
+      return snap.entries.some((e) => e.kind === 'assistant' && e.text === '雑談にも応答できました') ? snap : undefined
+    })
+    assert.equal(during.state.busy, true, 'the conversation reply did not stop execution')
+    const stateFile = path.join(ctx.handle.config.stateDir, 'orchestration.json')
+    assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).active.brief.revision, 1, 'small talk does not change accepted direction')
+    const request = await ctx.request(`/api/sessions/${id}/steer`, { method: 'POST', body: JSON.stringify({ message: 'CALL orchestrator_request {"message":"Use the revised acceptance criterion"}' }) })
+    assert.equal(request.status, 202, request.text)
+    await waitFor(async () => !(await snapshot(ctx, id)).state.busy)
+    const events = readEvents(sessionLogPath(ctx.handle.config.stateDir))
+    assert.ok(events.some((e) => e.runId === `${id}.dialogue` && e.type === 'session/work-mode' && e.payload.mode === 'thorough'))
+    assert.ok(events.some((e) => e.runId === `${id}.dialogue` && e.type === 'session/interaction-mode' && e.payload.mode === 'collaborative'))
+    assert.ok(events.some((e) => e.runId === id && e.type === 'user/steer' && e.payload.content.includes('revised acceptance criterion')), 'the request reaches the execution owner')
+    const listed = (await ctx.request('/api/sessions')).json.sessions
+    assert.equal(listed.some((s) => s.runId.endsWith('.dialogue')), false, 'the dialogue is part of the existing chat')
+    const log = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
+    assert.equal(log.active.inbox.length, 0, 'acknowledged requests leave the durable inbox')
+    assert.equal(log.active.brief.revision, 1, 'the conversation lane cannot accept its own proposal')
+  } finally { await ctx.close(); fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('web GUI: worker corrections arrive mid-turn and a pending question leaves execution available', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir, { autoApprove: true })
+  try {
+    const started = await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })
+    const id = started.json.runId
+    await turn(ctx, id, `CALL orchestrator_spawn ${JSON.stringify({ title: 'Correct during work', task: 'CALL shell {"command":"Start-Sleep -Seconds 3"}', scope: ['docs'] })}`)
+    const worker = await waitFor(async () => (await ctx.request('/api/orchestration')).json.workers.find((w) => w.title === 'Correct during work' && w.status === 'running'))
+    await waitFor(async () => (await snapshot(ctx, worker.workerId)).entries.find((e) => e.kind === 'tool' && e.name === 'shell'))
+    const sent = await turn(ctx, id, `CALL orchestrator_send ${JSON.stringify({ workerId: worker.workerId, message: 'Use the corrected premise before editing.' })}`)
+    const delivery = sent.entries.filter((e) => e.kind === 'tool' && e.name === 'orchestrator_send').at(-1).result
+    assert.equal(delivery.received, true)
+    assert.equal(delivery.applied, false)
+    await waitFor(async () => (await ctx.request('/api/orchestration')).json.workers.find((w) => w.workerId === worker.workerId && w.lastInstruction?.appliedAt))
+    const workerLog = readEvents(sessionLogPath(ctx.handle.config.stateDir)).filter((e) => e.runId === worker.workerId)
+    assert.ok(workerLog.some((e) => e.type === 'user/steer' && e.payload.source === 'orchestrator'))
+    assert.equal(workerLog.filter((e) => e.type === 'turn/start').length, 1, 'correction did not wait for another turn')
+    await turn(ctx, id, 'ASK Choose the visual direction')
+    const pending = await snapshot(ctx, id)
+    assert.equal(pending.state.busy, false, 'asking a question does not occupy the execution lane')
+    assert.ok(pending.entries.some((e) => e.kind === 'question'))
+    await turn(ctx, id, 'SAY independent work continues')
+    assert.ok((await snapshot(ctx, id)).entries.some((e) => e.kind === 'assistant' && e.text === 'independent work continues'))
+  } finally { await ctx.close(); fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('web GUI: a durable control notice resumes after restart without open workers', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  let ctx = await runServer(dir)
+  let id
+  try {
+    id = (await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })).json.runId
+  } finally { await ctx.close() }
+  const file = path.join(ctx.handle.config.stateDir, 'orchestration.json')
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'))
+  state.active.inbox = [{ id: 'saved-control', text: 'SAY restored control notice' }]
+  fs.writeFileSync(file, JSON.stringify(state))
+  ctx = await runServer(dir)
+  try {
+    await waitFor(async () => (await snapshot(ctx, id)).entries.some((e) => e.kind === 'assistant' && e.text === 'restored control notice'))
+    await waitFor(async () => JSON.parse(fs.readFileSync(file, 'utf8')).active.inbox.length === 0)
+  } finally { await ctx.close(); fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('web GUI: stopping a worker releases an approval wait before its scope can be reused', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir)
+  try {
+    const id = (await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })).json.runId
+    await turn(ctx, id, `CALL orchestrator_spawn ${JSON.stringify({title:'Waiting for approval',task:'CALL shell {"command":"npm install"}',scope:['docs']})}`)
+    const worker = await waitFor(async () => (await ctx.request('/api/orchestration')).json.workers.find((w) => w.title === 'Waiting for approval' && w.status === 'blocked'))
+    await waitFor(async () => !(await snapshot(ctx, id)).state.busy)
+    await turn(ctx, id, `CALL orchestrator_stop ${JSON.stringify({workerId:worker.workerId})}`)
+    await waitFor(async () => !(await snapshot(ctx, worker.workerId)).state.busy, 5000)
+    await turn(ctx, id, `CALL orchestrator_close ${JSON.stringify({workerId:worker.workerId,summary:'The unexecuted command was cancelled.'})}`)
+    const closed = (await ctx.request('/api/orchestration')).json.workers.find((w) => w.workerId === worker.workerId)
+    assert.equal(closed.status, 'done')
+    assert.equal(closed.scopeHeld, false)
+  } finally { await ctx.close(); fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('web GUI: orchestrator rejects repeated unchanged worker polling, guides async yield, and pauses goal rounds while workers run', { skip: skipReason('pipe') ?? skipReason('sync'), timeout: 90_000, concurrency: false }, async () => {
+  const dir = fixture()
+  const ctx = await runServer(dir, { autoApprove: true })
+  try {
+    const id = (await ctx.request('/api/orchestration/start', { method: 'POST', body: '{}' })).json.runId
+
+    const code = `
+      const spawned = await tools.plugins.orchestrator_spawn({ title: 'Async poll guard', task: 'CALL sleep {"ms": 1500}', scope: ['docs'] });
+      await new Promise((r) => setTimeout(r, 80));
+      const first = await tools.plugins.orchestrator_workers({});
+      const second = await tools.plugins.orchestrator_workers({});
+      let rejected = false;
+      let err = '';
+      try { await tools.plugins.orchestrator_workers({}); } catch (e) { rejected = true; err = String(e.message || e); }
+      return {
+        asyncExecution: spawned.asyncExecution,
+        hasNextStep: typeof spawned.nextStep === 'string' && spawned.nextStep.includes('end this turn'),
+        firstCount: Array.isArray(first.workers) ? first.workers.length : 0,
+        secondUnchanged: second.unchanged,
+        secondAction: second.action,
+        rejected,
+        err,
+      };
+    `
+    const run = await turn(ctx, id, `CALL run_code ${JSON.stringify({ code })}`)
+    const script = run.entries.filter((e) => e.kind === 'tool' && e.name === 'run_code').at(-1)
+    assert.equal(script?.status, 'done', JSON.stringify(script))
+    const val = script.result.value
+    assert.equal(val.asyncExecution, true)
+    assert.equal(val.hasNextStep, true)
+    assert.equal(val.firstCount, 1)
+    assert.equal(val.secondUnchanged, true)
+    assert.equal(val.secondAction, 'yield_turn')
+    assert.equal(val.rejected, true)
+    assert.match(val.err, /Polling rejected/i)
+
+    // Create an active, armed goal while the worker is running; scheduleGoalRound must NOT interrupt waiting.
+    const goalTurn = await turn(ctx, id, `CALL create_goal ${JSON.stringify({ objective: 'Build feature with async workers' })}`)
+    assert.ok(goalTurn.entries.some((e) => e.kind === 'tool' && e.name === 'create_goal' && !e.isError))
+
+    await new Promise((r) => setTimeout(r, 250))
+    const snap = await snapshot(ctx, id)
+    assert.equal(snap.entries.some((e) => e.kind === 'user' && e.text.includes('Goal round')), false)
+
+    // Pause goal before stopping the worker so scheduleGoalRound stays idle during teardown.
+    await ctx.request(`/api/sessions/${encodeURIComponent(id)}/goal/pause`, { method: 'POST', body: '{}' })
+
+    // Stop the running worker cleanly before tearing down.
+    const workers = (await ctx.request('/api/orchestration')).json.workers
+    for (const w of workers) {
+      if (w.status === 'running' || w.status === 'queued') {
+        await turn(ctx, id, `CALL orchestrator_stop ${JSON.stringify({ workerId: w.workerId })}`)
+      }
+    }
+  } finally { await ctx.close(); fs.rmSync(dir, { recursive: true, force: true }) }
 })

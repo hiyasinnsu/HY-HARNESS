@@ -1,6 +1,6 @@
 {
   "name": "@hy/desktop",
-  "version": "0.5.0",
+  "version": "0.5.55",
   "private": true,
   "type": "module",
   "main": "dist/main.js",

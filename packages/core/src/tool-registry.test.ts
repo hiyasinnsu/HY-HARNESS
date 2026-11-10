@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { READ_ONLY_TOOLS, TOOL_SPECS, TOOLS_BY_NAME, deferredTools, jsonSchemaToTs, offeredTools, renderSdk, renderToolPrompt, validate } from './tool-registry.js'
+import { READ_ONLY_TOOLS, TOOL_SPECS, TOOLS_BY_NAME, deferredTools, jsonSchemaToTs, offeredTools, renderSdk, renderToolPrompt, validate, type Schema } from './tool-registry.js'
 import { globToRegExp, normalizeToolArgs } from './tools.js'
 
 // Kept outside src/ so tsc does not compile the declarations into the package.
@@ -66,7 +66,7 @@ test('validation follows the schemas used for the prompt', () => {
   assert.deepEqual(validate(TOOLS_BY_NAME.get('shell')!.input, { command: 1 }), ['args.command must be string, got integer'])
 })
 
-test('nested tool arguments are unwrapped without touching mcp_call args', () => {
+test('nested tool arguments are unwrapped without changing a valid MCP payload', () => {
   const shell = TOOLS_BY_NAME.get('shell')!
   assert.deepEqual(normalizeToolArgs(shell, { args: { command: 'Get-Location' } }), { command: 'Get-Location' })
   assert.deepEqual(normalizeToolArgs(shell, { args: '{"command":"Get-Location"}' }), { command: 'Get-Location' })
@@ -75,8 +75,42 @@ test('nested tool arguments are unwrapped without touching mcp_call args', () =>
     { command: 'Get-Location', root: 'main', cwd: '.' },
   )
   const mcp = TOOLS_BY_NAME.get('mcp_call')!
-  const call = { server: 's', tool: 't', args: { nested: true } }
+  const call = { server: 's', tool: 't', args: { server: 's2', tool: 't2', args: { nested: true } } }
   assert.deepEqual(normalizeToolArgs(mcp, call), call)
+  const wrapped = { args: { server: 'playwright', tool: 'browser_click', args: { target: '#start-btn' } } }
+  const expected = { server: 'playwright', tool: 'browser_click', args: { target: '#start-btn' } }
+  assert.deepEqual(normalizeToolArgs(mcp, wrapped), expected)
+  assert.deepEqual(normalizeToolArgs(mcp, { tool: 'browser_click', args: { server: 'playwright', target: '#start-btn' } }), expected)
+  const conflicting = { ...wrapped, tool: 'browser_navigate' }
+  assert.deepEqual(normalizeToolArgs(mcp, conflicting), conflicting)
+})
+
+test('argument aliases are declared data and never shadow a schema property (G-12)', () => {
+  const declared = (schema: Schema, key: string): boolean =>
+    Object.hasOwn(schema.properties ?? {}, key) || (schema.anyOf ?? []).some((child) => declared(child, key))
+  // Declared next to the tool, not in a hand-written branch per tool name.
+  assert.deepEqual(
+    TOOL_SPECS.filter((spec) => spec.aliases !== undefined).map((spec) => spec.name),
+    ['read_file', 'apply_patch', 'search_grep'],
+  )
+  for (const spec of TOOL_SPECS) {
+    for (const [alias, canonical] of Object.entries(spec.aliases ?? {})) {
+      assert.ok(declared(spec.input, canonical), `${spec.name}: ${alias} must point at a declared argument (${canonical})`)
+      assert.ok(!declared(spec.input, alias), `${spec.name}: alias ${alias} must not be a declared argument`)
+    }
+  }
+  // One generic pass drives all of them.
+  assert.deepEqual(normalizeToolArgs(TOOLS_BY_NAME.get('read_file')!, { file: 'a.md', startLine: 2 }), { path: 'a.md', startLine: 2 })
+  assert.deepEqual(normalizeToolArgs(TOOLS_BY_NAME.get('apply_patch')!, { path: 'a.md', content: 'x' }), { file: 'a.md', content: 'x' })
+  assert.deepEqual(normalizeToolArgs(TOOLS_BY_NAME.get('search_grep')!, { pattern: 'x', path: '*.ts' }), { pattern: 'x', glob: '*.ts' })
+  // A canonical key the call already set wins; the alias is left alone.
+  assert.deepEqual(
+    normalizeToolArgs(TOOLS_BY_NAME.get('apply_patch')!, { file: 'a.md', path: 'b.md', content: 'x' }),
+    { file: 'a.md', path: 'b.md', content: 'x' },
+  )
+  // A tool that declares `arguments` itself keeps it (not an alias slot).
+  const prompt = { server: 's', name: 'p', arguments: { topic: 'x' } }
+  assert.deepEqual(normalizeToolArgs(TOOLS_BY_NAME.get('get_mcp_prompt')!, prompt), prompt)
 })
 
 test('jsonSchemaToTs renders unions, arrays and optional fields', () => {  assert.equal(
@@ -88,13 +122,16 @@ test('jsonSchemaToTs renders unions, arrays and optional fields', () => {  asser
 })
 
 test('SDK-only tools are not offered as wire tools', () => {
+  // 5-2: `job_*` carries `wire: true` now (operating a backgrounded command),
+  // but `wireRequires: 'shell'` keeps it out of sessions without shell; the
+  // offered-list cases at the end of this test cover that gate.
   const wire = TOOL_SPECS.filter((t) => t.wire && !t.objectiveOnly).map((t) => t.name)
-  assert.deepEqual(wire, ['read_file', 'apply_patch', 'shell', 'run_code', 'search_glob', 'search_grep', 'current_time', 'sleep', 'get_context_remaining', 'update_plan', 'skill_load', 'mcp_call', 'delegate', 'web_fetch', 'web_search', 'tool_search', 'lsp', 'memory', 'spawn_agent', 'wait_agent', 'list_agents', 'close_agent', 'list_mcp_resources', 'read_mcp_resource', 'list_mcp_prompts', 'get_mcp_prompt', 'request_permissions', 'write_stdin', 'ask_user'])
+  assert.deepEqual(wire, ['read_file', 'verify_file', 'apply_patch', 'shell', 'run_code', 'search_glob', 'search_grep', 'job_status', 'job_output', 'job_wait', 'job_kill', 'current_time', 'sleep', 'get_context_remaining', 'update_plan', 'skill_load', 'mcp_call', 'delegate', 'web_fetch', 'web_search', 'tool_search', 'lsp', 'memory', 'spawn_agent', 'wait_agent', 'list_agents', 'close_agent', 'list_mcp_resources', 'read_mcp_resource', 'list_mcp_prompts', 'get_mcp_prompt', 'request_permissions', 'write_stdin', 'ask_user', 'git_status', 'git_prepare', 'git_commit', 'git_push', 'github_repo_info', 'github_pages_enable', 'github_actions_status', 'github_create_pr'])
   // A read-only session (subagent, review) is offered only reading tools.
   const ro = renderToolPrompt(true, undefined, false, new Set(['delegate']), READ_ONLY_TOOLS)
   assert.ok(!/- (apply_patch|shell|delegate)\(/.test(ro) && !/namespace (agents|jobs) \{[\s\S]*function kill/.test(ro), ro)
   assert.match(ro, /- read_file\(/)
-  assert.match(renderToolPrompt(false, undefined, false, new Set(['delegate'])), /- delegate\(args: \{ task: string; readOnly\?: boolean; background\?: boolean \}\)/)
+  assert.match(renderToolPrompt(false, undefined, false, new Set(['delegate'])), /- delegate\(args: \{ task: string; readOnly\?: boolean; background\?: boolean; requires\?: \('read' \| 'edit' \| 'shell'\)\[\] \}\)/)
   // skill_load and mcp_call are advertised only when the session has skills / MCP tools.
   assert.ok(!renderToolPrompt(true).includes('mcp_call') && !renderToolPrompt(true).includes('namespace mcp'))
   assert.ok(!renderToolPrompt(true).includes('skill_load') && !renderToolPrompt(true).includes('namespace skills'))
@@ -115,6 +152,14 @@ test('SDK-only tools are not offered as wire tools', () => {
   assert.match(ptc, /namespace jobs \{[\s\S]*function kill\(args: \{ jobId: string \}\)/)
   // The plain SDK (no wire tools in the same prompt) still declares everything.
   assert.match(renderSdk(), /namespace search \{[\s\S]*function grep\(/)
+  // 5-2: job tools travel with shell. Without it they stay SDK-only (a
+  // read-only session has no shell); with it they are direct even without PTC,
+  // and the PTC prompt names the SDK twin instead of repeating the signature.
+  assert.ok(!renderToolPrompt(false).includes('- job_status('))
+  assert.match(renderToolPrompt(false, undefined, false, new Set(['shell'])), /- job_status\(args: \{ jobId: string \}\)/)
+  assert.match(renderToolPrompt(true, undefined, false, new Set(['shell'])), /tools\.jobs\.status = job_status/)
+  assert.match(renderSdk(), /namespace jobs \{[\s\S]*function kill\(args: \{ jobId: string \}\)/)
+  assert.ok(!offeredTools(false, TOOL_SPECS, false, new Set(['delegate']), READ_ONLY_TOOLS).some((t) => t.name.startsWith('job_')))
 })
 
 test('globs match workspace-relative paths', () => {
