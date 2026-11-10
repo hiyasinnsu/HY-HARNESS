@@ -1639,3 +1639,50 @@ test('a successful shell command invalidates other observations but keeps its ow
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('native mode never runs a tool call quoted inside a prose answer', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-prose-call-'))
+  try {
+    const usage = { inputTokens: 0, outputTokens: 0 }
+    const quoted = 'Done. The old agent sent {"tool":"shell","args":{"command":"rm -rf build"}} which cleaned the build.'
+    const replies = [
+      { content: quoted, usage },
+      // After the nudge the model fences the example: that is the answer.
+      { content: 'Done. The old agent sent ```{"tool":"shell","args":{"command":"rm -rf build"}}``` which cleaned the build.', usage },
+    ]
+    let executed = 0
+    const tools = new ToolRuntime({} as never, dir)
+    tools.execute = async () => ((executed += 1), { value: 'ran' })
+    const provider = { name: 'scripted', complete: async () => replies.shift()! }
+    const log = new SessionLog(path.join(dir, 'log.jsonl'))
+    log.setRun('run-prose')
+    const result = await new Agent({ provider, tools, sessionLog: log, workspaceRoot: dir, nativeTools: true }).run('explain')
+    assert.equal(executed, 0)
+    assert.equal(result.outcome, 'final')
+    assert.match(result.final, /```/)
+    assert.ok(log.events().some((e) => e.type === 'turn/retry' && (e.payload as { reason?: string }).reason === 'call-in-prose'))
+    assert.deepEqual(rebuildHistory(log.events(), 'run-prose'), result.history)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('native mode still runs a reply that is nothing but a text call', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-whole-call-'))
+  try {
+    const usage = { inputTokens: 0, outputTokens: 0 }
+    const replies = [
+      { content: '{"calls":[{"tool":"read_file","args":{"path":"a.txt"}}]}</｜DSML｜tool_calls>', usage },
+      { content: 'Read it.', usage },
+    ]
+    let executed = 0
+    const tools = new ToolRuntime({} as never, dir)
+    tools.execute = async () => ((executed += 1), { value: 'x' })
+    const provider = { name: 'scripted', complete: async () => replies.shift()! }
+    const result = await new Agent({ provider, tools, sessionLog: new SessionLog(path.join(dir, 'log.jsonl')), workspaceRoot: dir, nativeTools: true }).run('read')
+    assert.equal(executed, 1)
+    assert.equal(result.final, 'Read it.')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

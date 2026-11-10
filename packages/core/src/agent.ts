@@ -7,7 +7,7 @@ import { Ledger, discoverPinned } from './ledger.js'
 import type { SkillInfo } from './skills.js'
 import type { MemoryStore } from './memory.js'
 import { validate, type Schema, type ToolSpec } from './tool-registry.js'
-import { announcesNextStep, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverMalformedCall, recoverTemplateCall, recoverUnwrappedBatch } from './reply-guard.js'
+import { announcesNextStep, embedsCallInProse, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverMalformedCall, recoverTemplateCall, recoverUnwrappedBatch } from './reply-guard.js'
 import { steerMessage, type SteerInbox } from './steering.js'
 import { classifyDenial, type DenialInfo } from './denial.js'
 import { estimateTokens } from './tokens.js'
@@ -436,6 +436,21 @@ function stripFence(text: string): string {
   return t
 }
 
+/** The reply as one JSON object (a whole-reply fence allowed), or undefined. */
+function parseWholeAction(text: string): Action | undefined {
+  try {
+    const parsed = JSON.parse(stripFence(text)) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Action) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Sent once when a native reply wrote a complete tool call inside its prose. */
+export const EMBEDDED_CALL_NUDGE =
+  'Your reply contains tool-call JSON in its text. Nothing ran: text is never executed as a tool call. ' +
+  'To call a tool, use a function call. If the JSON is only an example in your answer, put it in a code block and reply again.'
+
 function parseAction(text: string): Action | undefined {
   const t = stripFence(text)
   try {
@@ -639,6 +654,8 @@ export class Agent {
     let performedToolCalls = 0
     // Set once an empty native reply (no tool call, no text) has been retried.
     let emptyReplied = false
+    // Set once a native reply with a call written inside its prose was sent back.
+    let embeddedNudged = false
     const ledger = this.options.ledger ?? new Ledger(discoverPinned(this.options.workspaceRoot))
     let messages: ChatMessage[] = [
       { role: 'system', content: base },
@@ -933,7 +950,11 @@ export class Agent {
         // calls follow, running that object alone dropped the rest silently
         // (an orchestrator then reported four workers that never started).
         const partial = hasCallsAfterFirstObject(content)
-        action = partial ? undefined : parseAction(content)
+        // Native mode runs a text call only when the whole reply is that call
+        // (a model that wrote its call as text, or leaked a template tail).
+        // `parseAction`'s "first balanced object" fallback is for the text
+        // protocol: in native mode it ran a call quoted inside a prose answer.
+        action = partial ? undefined : native ? parseWholeAction(content) : parseAction(content)
         // Native mode: one whole JSON value is an answer, but a body cut off
         // after a readable object (`{"final":"ok"}…`) is not — without this it
         // ended the turn with the truncated text.
@@ -953,6 +974,16 @@ export class Agent {
         } else if (native && content && (!action || action.final === undefined)) {
           if (partial || badEntry || looksLikeBrokenToolCall(content)) {
             retryProtocol('broken-tool-call')
+            continue
+          }
+          // A complete call written inside prose never runs: ask once for a
+          // real function call (or a fenced example); a repeat is the answer.
+          if (!embeddedNudged && embedsCallInProse(content)) {
+            embeddedNudged = true
+            messages.push(reply(content))
+            messages.push({ role: 'user', content: EMBEDDED_CALL_NUDGE })
+            this.options.sessionLog.append('turn/retry', { step, reason: 'call-in-prose', ...replay(messages, true) })
+            this.options.onEvent?.({ type: 'retry', step, reason: 'call-in-prose', content: truncate(content, 2_000) })
             continue
           }
           // Goal mode: a plan, confirmation request or "I will proceed" is not
