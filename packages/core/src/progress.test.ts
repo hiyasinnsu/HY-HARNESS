@@ -153,3 +153,29 @@ test('A14: a shell result flagged for attention is not a passing check', () => {
   progress.record(2, [ok('shell', { command: 'Invoke-WebRequest x' }, 'out', { exitCode: 0, attention: 'exit code 0, but …' })])
   assert.equal(progress.summary().lastCheckPassed, false)
 })
+
+test('B5: step/end says how much of the previous request was repeated and what changed first', async () => {
+  const replies = () => [
+    { toolCalls: [{ name: 'read_file', args: { path: 'a' } }] },
+    { toolCalls: [{ name: 'read_file', args: { path: 'b' } }] },
+    { content: 'Done.' },
+  ]
+  const execute = async (_tool: string, args: unknown) => ({ content: JSON.stringify(args) })
+  const plain = await runAgent(replies(), execute)
+  const prefixes = plain.log.filter((e) => e.type === 'step/end').map((e) => (e.payload as { prefix?: { keptMessages: number; changed?: string } }).prefix)
+  assert.equal(prefixes[0], undefined)
+  assert.equal(prefixes[1]!.changed, undefined, 'appending to the conversation keeps the whole prefix')
+  assert.ok(prefixes[1]!.keptMessages >= 2)
+  // A context manager that rewrites an old entry (pruning) breaks the prefix there.
+  let calls = 0
+  const pruning = {
+    beforeRequest: async (messages: Array<{ role: string; content: string }>) => {
+      calls += 1
+      return calls === 3 ? messages.map((m, i) => (i === 2 ? { ...m, content: '[pruned]' } : m)) : messages
+    },
+    toolOutput: (_id: string, raw: string) => ({ visible: raw }),
+  }
+  const pruned = await runAgent(replies(), execute, { context: pruning })
+  const last = pruned.log.filter((e) => e.type === 'step/end').at(-1)!.payload as { prefix: { keptMessages: number; changed?: string } }
+  assert.deepEqual(last.prefix, { keptMessages: 2, changed: 'history' })
+})

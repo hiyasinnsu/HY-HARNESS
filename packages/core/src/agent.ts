@@ -726,6 +726,8 @@ export class Agent {
     const unchanged = new Map<string, { result: string; count: number; step: number }>()
     let blockedSteps = 0
     const progress = new TurnProgress(this.options.stallSteps ?? 8)
+    // B5: the previous request's shape, to say where a cache miss came from.
+    let previousRequest: { tools: string; messages: string[] } | undefined
     // Set once a final answer after an unchecked edit was sent back.
     let verifyNudged = false
     const failReply = (step: number, reason: string, detail: string, assistantAdded = true): AgentResult => {
@@ -817,6 +819,25 @@ export class Agent {
         this.options.sessionLog.append('context/update', { content: context })
       }
       messages[0] = { role: 'system', content: base }
+      // B5: how much of the previous request this one repeats, and what changed
+      // first. A provider prefix cache can only reuse what is byte-identical
+      // from the start, so this names the cause of a miss (system prompt, tool
+      // list, or an edited history entry such as compaction or pruning).
+      const requestShape = {
+        tools: createHash('sha256').update(JSON.stringify(requestTools ?? [])).digest('hex').slice(0, 16),
+        messages: messages.map((message) => createHash('sha256').update(`${message.role}\0${message.content}`).digest('hex').slice(0, 16)),
+      }
+      let prefix: { keptMessages: number; changed?: 'system' | 'tools' | 'history' } | undefined
+      if (previousRequest) {
+        let kept = 0
+        while (kept < previousRequest.messages.length && kept < requestShape.messages.length && previousRequest.messages[kept] === requestShape.messages[kept]) kept += 1
+        const changed = kept === 0 ? 'system' as const
+          : previousRequest.tools !== requestShape.tools ? 'tools' as const
+          : kept < previousRequest.messages.length ? 'history' as const
+          : undefined
+        prefix = { keptMessages: kept, ...(changed ? { changed } : {}) }
+      }
+      previousRequest = requestShape
       let completion: Completion
       // Time spent waiting on the provider (the benchmark separates it from the
       // harness's own time: provider speed varies a lot between requests).
@@ -927,6 +948,8 @@ export class Agent {
         ...(completion.outputLimited ? { outputLimited: true } : {}),
         // Detects prompt-template changes between steps (design §1).
         systemSha256: createHash('sha256').update(messages[0].content).digest('hex').slice(0, 16),
+        toolsSha256: requestShape.tools,
+        ...(prefix ? { prefix } : {}),
       })
       this.options.onEvent?.({ type: 'step-end', step, usage: completion.usage })
       for (const instruction of instructions) this.options.onEvent?.({ type: 'steer-applied', step, id: instruction.id, source: instruction.source })

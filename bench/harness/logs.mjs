@@ -83,6 +83,11 @@ export function readHySession(stateDir) {
   // A tool call written as body text and sent back (agent retry), and reads of a path that does not exist.
   let brokenCalls = 0
   let notFound = 0
+  // Requests that did not repeat the previous one's prefix, by what changed
+  // first (logged since the prefix diagnostics; absent in older logs).
+  const prefixBreaks = { system: 0, tools: 0, history: 0 }
+  // Harness controls that fired on the main session.
+  const guards = { verifyNudges: 0, stallNotes: 0, stallStops: 0 }
   for (const e of events) {
     const main = !String(e.runId ?? '').includes('.sub')
     if (e.type === 'step/end') {
@@ -92,6 +97,12 @@ export function readHySession(stateDir) {
       else subSteps.push(row)
       // latencyMs is logged since 2026-11-07; older logs: since the previous event.
       if (main) modelWaitMs += typeof e.payload?.latencyMs === 'number' ? e.payload.latencyMs : Math.max(0, e.ts - lastTs)
+      const changed = e.payload?.prefix?.changed
+      if (main && changed in prefixBreaks) prefixBreaks[changed]++
+    } else if (main && e.type === 'turn/nudge' && e.payload?.reason === 'final-without-verification') guards.verifyNudges++
+    else if (main && e.type === 'guard/stall') {
+      if (e.payload?.level === 3) guards.stallStops++
+      else guards.stallNotes++
     } else if (e.type === 'tool/result') {
       if (main) toolCalls++
       else subToolCalls++
@@ -110,6 +121,8 @@ export function readHySession(stateDir) {
     logFile: file,
     brokenCalls,
     notFound,
+    prefixBreaks,
+    guards,
     // Subagent work, reported separately (not part of the main session's totals).
     subRequests: subSteps.length,
     subInput: subSteps.every((s) => typeof s.input === 'number') ? subSteps.reduce((a, s) => a + s.input, 0) : null,
