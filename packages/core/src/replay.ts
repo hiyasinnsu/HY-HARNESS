@@ -160,6 +160,10 @@ function repliesOf(slice: RunSlice): { replies: Completion[]; missingAt?: number
       current = calls ? { content: '', toolCalls: calls, usage } : { content, usage }
     } else if ((e.type === 'turn/retry' || e.type === 'turn/failure') && typeof p.assistant === 'string') {
       current = { content: p.assistant, usage }
+    } else if (e.type === 'turn/retry' && typeof p.rejected === 'string') {
+      // A rejected reply that was not kept in the conversation (logged since F1).
+      // A reply cut at the output limit is served with that flag, as it arrived.
+      current = { content: p.rejected, usage, ...(p.reason === 'output-limit' ? { outputLimited: true as const } : {}) }
     } else if (e.type === 'compaction/summary' || e.type === 'compaction/result' || e.type === 'context/forced-compaction') {
       if (compactedAt === undefined) compactedAt = replies.length
     }

@@ -63,14 +63,18 @@ test('F1: a behaviour change shows as a divergence at the first different decisi
   assert.equal(result.logged[2], 'nudge:final-without-verification')
 })
 
-test('F1: a step whose rejected reply was not logged stops the replay as unreplayable', async () => {
+test('F1: a rejected reply is logged and replayed; a log without it stops as unreplayable', async () => {
   const events = await record([
     { content: '{"tool": "read_file", "args": {"path": ' },
     { toolCalls: [{ id: 'c1', name: 'read_file', args: { path: 'a.ts' } }] },
     { content: 'The file says old.' },
   ], execute)
-  const result = await replayRun(agentRuns(events)[0]!)
-  assert.equal(result.logged[0], 'retry:broken-tool-call')
+  const run = agentRuns(events)[0]!
+  assert.equal(decisionsOf(run.events)[0], 'retry:broken-tool-call')
+  assert.equal((await replayRun(run)).status, 'same')
+  // An older log, written before rejected replies were recorded.
+  const old = { ...run, events: run.events.map((e) => e.type === 'turn/retry' ? { ...e, payload: { ...(e.payload as object), rejected: undefined } } : e) }
+  const result = await replayRun(old)
   assert.equal(result.status, 'unreplayable', JSON.stringify(result))
   assert.match(result.note ?? '', /not recorded/)
 })

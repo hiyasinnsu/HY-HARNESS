@@ -956,7 +956,9 @@ export class Agent {
 
       const retryReply = (reason: string, nudge: string) => {
         messages.push({ role: 'user', content: nudge })
-        this.options.sessionLog.append('turn/retry', { step, reason, ...replay(messages, false) })
+        // `rejected` is the reply that was not kept in the conversation (F1:
+        // `pnpm eval:replay` serves it again); `rebuildHistory` ignores it.
+        this.options.sessionLog.append('turn/retry', { step, reason, ...replay(messages, false), ...(wireReply ? { rejected: wireReply.slice(0, 20_000) } : {}) })
         this.options.onEvent?.({ type: 'retry', step, reason, content: truncate(wireReply, 2_000) })
       }
       if (completion.outputLimited) {
