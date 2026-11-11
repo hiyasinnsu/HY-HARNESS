@@ -136,6 +136,7 @@ import {
   scopeOwners,
   scopesOverlap,
   workerAwaitingReview,
+  workerEvidence,
   workerHoldsScope,
   workerNeedsAttention,
   workerOwnsScope,
@@ -146,6 +147,7 @@ import {
   type WorkerRecord,
   type WorkerStatus,
 } from './orchestration.js'
+import { turnEndCause } from './turn-cause.js'
 import {
   beginTurn,
   clearQueuedTurns,
@@ -449,6 +451,8 @@ interface WebSession {
   workerPollUnchangedCount?: number
   busy: boolean
   controller?: AbortController | undefined
+  /** C2: who stopped the running turn, set just before `controller.abort()`. */
+  abortReason?: string | undefined
   entries: ChatEntry[]
   subscribers: Set<http.ServerResponse>
   pendingApprovals: Map<string, Pending<boolean | { approved: boolean; reason?: string }>>
@@ -2595,7 +2599,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     ].join('\n')
   }
 
-  function workerReportMessage(record: WorkerRecord, text: string): string {
+  function workerReportMessage(record: WorkerRecord, text: string, evidence?: { lines: string[]; concern?: string }): string {
     const status = workerStatusLabel(record.status)
     const lines = [
       '[worker report]',
@@ -2606,7 +2610,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       record.status === 'failed' || record.status === 'stopped'
         ? `error:\n${text.slice(0, 4000)}`
         : `report:\n${text.slice(0, 8000)}`,
+      ...(evidence?.lines ?? []),
     ]
+    if (evidence?.concern) lines.push(evidence.concern)
     if (record.status === 'blocked' || record.status === 'partial') {
       lines.push(
         'This task is incomplete; do not present it as done. Use orchestrator_send to request missing work or verification when possible. Otherwise explain what is blocked and what is needed.',
@@ -2733,7 +2739,16 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       ...(blocker ? { blocker } : { blocker: undefined }),
       ...(outcome === 'completed' ? { lastSummary: text.slice(0, 8_000) } : { lastError: text.slice(0, 4_000) }),
     })
-    queueOrchestratorNotice(workerReportMessage(record, text))
+    // C1: a "done" report travels with what the worker's tool results show.
+    let evidence: ReturnType<typeof workerEvidence> | undefined
+    if (parsed?.status === 'done') {
+      try {
+        evidence = workerEvidence(readEvents(logFile), session.runId)
+      } catch {
+        evidence = undefined
+      }
+    }
+    queueOrchestratorNotice(workerReportMessage(record, text, evidence))
   }
 
   async function startOrchestration(): Promise<OrchestrationRecord> {
@@ -2778,6 +2793,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     if (!active) return null
     const stoppedIds = [active.orchestratorRunId, ...active.workers.map((worker) => worker.runId)]
     const orchestrator = sessions.get(active.orchestratorRunId)
+    if (orchestrator) orchestrator.abortReason = 'orchestration-stopped'
     orchestrator?.controller?.abort()
     orchestrator?.dialogueController?.abort()
     for (const worker of active.workers) {
@@ -2946,6 +2962,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   async function stopWorker(workerId: string, reason?: string) {
     const record = workerForId(workerId)
     const worker = sessions.get(workerId)
+    if (worker) worker.abortReason = 'worker-stopped'
     worker?.controller?.abort()
     if (worker) resolvePending(worker)
     updateWorker(record, {
@@ -2976,7 +2993,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
           'send a correction, stop it, or close it with a summary that explains how the blocker is handled',
       )
     }
-    sessions.get(workerId)?.controller?.abort()
+    const closing = sessions.get(workerId)
+    if (closing) closing.abortReason = 'worker-closed'
+    closing?.controller?.abort()
     updateWorker(record, {
       status: 'done',
       pendingMessages: [],
@@ -3447,6 +3466,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     broadcast(session, { type: 'turn/start', turn })
     broadcast(session, { type: 'state', state: sessionState(session) })
     broadcastSessions()
+    session.abortReason = undefined
     let final = ''
     let completed = false
     try {
@@ -3461,7 +3481,10 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       const aborted = controller.signal.aborted
       const text = aborted ? 'run cancelled' : errorMessage(error)
       session.lastError = text
-      conv.log.append('turn/error', { outcome: aborted ? 'aborted' : 'error', error: text })
+      // C2: why the turn ended, so a paused goal or a stopped worker can be
+      // explained after the fact (user cancel vs. budget vs. provider failure).
+      const cause = turnEndCause(error, aborted ? session.abortReason : undefined)
+      conv.log.append('turn/error', { outcome: aborted ? 'aborted' : 'error', error: text, cause })
       // A cancelled or failed goal must not auto-continue. DSH pauses the
       // durable goal on cancellation; an explicit resume re-arms it.
       if (session.conv?.goalView()?.phase === 'active') {
@@ -4542,6 +4565,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
               json(res, 409, { error: 'orchestrator and worker chats are managed by orchestration; stop orchestration or archive the chat instead' })
               return
             }
+            session.abortReason = 'chat-deleted'
             session.controller?.abort()
             resolvePending(session)
             session.pty?.dispose()
@@ -4832,6 +4856,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
           }
 
           if (sub === 'cancel' && method === 'POST') {
+            session.abortReason = 'user-cancel'
             session.controller?.abort()
             session.dialogueController?.abort()
             resolvePending(session)
@@ -6286,6 +6311,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         job.child?.kill()
       }
       for (const session of sessions.values()) {
+        session.abortReason = 'server-shutdown'
         session.controller?.abort()
         session.dialogueController?.abort()
         void session.dialogue?.end()

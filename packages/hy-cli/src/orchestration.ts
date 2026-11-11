@@ -381,3 +381,42 @@ export function workerStatusLabel(status: WorkerStatus): string {
       return 'done'
   }
 }
+
+
+/**
+ * C1: what the host itself recorded about a worker's last turn (the agent's
+ * `turn/verification` summary), for the orchestrator to weigh against the
+ * worker's own report. A `STATUS: done` is the worker's claim; these lines are
+ * what its tool results show. Edits made through the shell are not tracked.
+ */
+export function workerEvidence(events: readonly { runId?: string; seq: number; type: string; payload?: unknown }[], runId: string): { lines: string[]; concern?: string } {
+  let turnStart = -1
+  let summary: { editedFiles?: unknown; checks?: unknown; verifiedAfterLastEdit?: unknown; lastCheckPassed?: unknown } | undefined
+  for (const event of events) {
+    if (event.runId !== runId) continue
+    if (event.type === 'turn/start') {
+      turnStart = event.seq
+      summary = undefined
+    } else if (event.type === 'turn/verification' && event.seq > turnStart) {
+      summary = (event.payload ?? {}) as typeof summary
+    }
+  }
+  const edited = Array.isArray(summary?.editedFiles) ? summary!.editedFiles.filter((file): file is string => typeof file === 'string') : []
+  const checks = Array.isArray(summary?.checks)
+    ? summary!.checks.filter((check): check is { target: string; passed: boolean; exitCode?: number } =>
+      !!check && typeof check === 'object' && typeof (check as { target?: unknown }).target === 'string')
+    : []
+  if (!summary) return { lines: ['host evidence: no file edits or checks recorded by the edit and check tools in this turn (shell edits are not tracked).'] }
+  const lines = [
+    `host evidence: edited ${edited.length ? edited.slice(0, 10).join(', ') + (edited.length > 10 ? `, +${edited.length - 10} more` : '') : 'no files through the edit tools'}`,
+    ...(checks.length
+      ? [`checks run: ${checks.slice(-4).map((check) => `${check.target} → ${check.passed ? 'passed' : `failed${check.exitCode !== undefined ? ` (exit ${check.exitCode})` : ''}`}`).join('; ')}`]
+      : ['checks run: none']),
+  ]
+  const concern = edited.length > 0 && summary.verifiedAfterLastEdit !== true
+    ? 'The worker reported done, but no check ran after its last edit. Verify the change yourself or send it back before accepting it.'
+    : summary.lastCheckPassed === false
+      ? 'The worker reported done, but its last check failed. Read that result before accepting the work.'
+      : undefined
+  return { lines, ...(concern ? { concern } : {}) }
+}
