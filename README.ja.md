@@ -54,6 +54,7 @@ node packages\hy-cli\dist\main.js web --cwd C:\work\my-repo   # ブラウザで�
 | `hy sandbox status\|grant\|revoke` | サンドボックスの状態と ACL |
 | `hy index status\|rebuild` | セッション全文検索（FTS5）の索引 |
 | `hy models list\|discover` | モデルカタログとプロバイダの一覧 |
+| `hy models probe [--role R] [--save]` | 小さなリクエストでツール呼び出し・並列呼び出し・画像・使用量報告を実測し、`--save` で `models[]` に保存 |
 | `hy update check\|fetch` | Ed25519 署名付きリリースフィードの確認と取得 |
 | `hy update keygen\|sign` | リリース鍵の生成と署名 |
 | `hy acp` | ACP v1 サーバ（stdio、エディタ連携） |

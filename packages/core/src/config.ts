@@ -93,6 +93,10 @@ export interface RoleConfig {
 /** Whether a role offers tools through native function calling. */
 export function usesNativeTools(role: RoleConfig): boolean {
   if (role.nativeTools !== undefined) return role.nativeTools
+  // G-7: what the user registered (or `hy models probe --save` measured) for
+  // this model wins over the provider default.
+  const listed = findModel(role.provider, role.model)?.capabilities?.tools
+  if (listed !== undefined) return listed
   return role.provider === 'ollama' || role.provider === 'openai-compatible' || role.provider === 'openai-responses' || role.provider === 'deepseek' || role.provider === 'opencode' || role.provider === 'anthropic' || role.provider === 'gemini'
 }
 

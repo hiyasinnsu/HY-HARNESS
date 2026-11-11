@@ -47,6 +47,7 @@ import {
   assertFeatureName,
   WorktreeManager,
   writeUserConfig,
+  probeModel,
   type AgentEvent,
   type ApprovalCallback,
   type ApprovalRequest,
@@ -163,6 +164,7 @@ Usage:
   hy features [list|enable <name>|disable <name>] [--json]
   hy index status|rebuild [options]       full-text session index (FTS5) status or a rebuild
   hy models list|discover [--json]       built-in catalog, or the provider's own model list
+  hy models probe [--role R] [--save]    measure tools, parallel calls, vision and usage reporting with tiny requests
   hy update check|fetch [--feed <url|path>] [--channel <name>]  signed release feed (Ed25519)
   hy update keygen [--out <dir>] | sign ...   release key, and the JSON entry to publish
 
@@ -729,6 +731,47 @@ async function sessions(p: Parsed): Promise<number> {
 /** `hy models list [--json]`: the built-in model catalog and this session's roles. */
 async function modelsCommand(p: Parsed): Promise<number> {
   const config = loadConfig(toOverrides(p))
+  // A1: hy models probe [--role worker] [--no-vision] [--save] [--json]:
+  // measure what the role's endpoint does with a few tiny requests.
+  if (p.positional[0] === 'probe') {
+    const roleName = typeof p.flags.role === 'string' ? p.flags.role : 'worker'
+    const roleOf: Record<string, RoleConfig> = {
+      worker: config.role, orchestrator: config.orchestratorRole, subagent: config.subagentRole,
+      grader: config.graderRole, compactor: config.compactorRole, summarizer: config.summarizerRole,
+    }
+    const role = roleOf[roleName]
+    if (!role) {
+      console.error(`hy models probe: unknown role ${roleName}; use one of ${Object.keys(roleOf).join(', ')}`)
+      return 1
+    }
+    const report = await probeModel(createProvider(role, config.workspaceRoot), { vision: !bool(p.flags, 'no-vision') })
+    if (bool(p.flags, 'json')) console.log(JSON.stringify(report, null, 2))
+    else {
+      console.log(`${role.provider}/${role.model}`)
+      for (const step of report.steps) {
+        const verdict = step.supported === undefined ? 'error' : step.supported ? 'yes' : 'no'
+        console.log(`  ${step.name.padEnd(15)} ${verdict.padEnd(6)} ${String(step.latencyMs).padStart(6)} ms  ${step.error ?? step.detail ?? ''}`)
+      }
+      if (report.usage) console.log(`  usage           input ${report.usage.input ? 'yes' : 'no'}, output ${report.usage.output ? 'yes' : 'no'}, cache split ${report.usage.cacheSplit ? 'yes' : 'no'}`)
+      for (const line of report.advice) console.log(`  - ${line}`)
+      console.log(`  capabilities: ${JSON.stringify(report.capabilities)}`)
+    }
+    if (bool(p.flags, 'save')) {
+      if (report.steps.some((step) => step.error && step.name !== 'vision')) {
+        console.error('hy models probe: not saved, because some probes failed with errors; rerun first.')
+        return 1
+      }
+      const file = writeUserConfig((user) => {
+        const models = Array.isArray(user.models) ? user.models as Array<Record<string, unknown>> : []
+        const entry = models.find((m) => m.provider === role.provider && m.model === role.model)
+        if (entry) entry.capabilities = { ...(entry.capabilities as object | undefined), ...report.capabilities }
+        else models.push({ provider: role.provider, model: role.model, capabilities: report.capabilities })
+        user.models = models
+      })
+      console.log(`saved capabilities for ${role.provider}/${role.model} to ${file}`)
+    }
+    return report.steps[0]?.supported === undefined ? 1 : 0
+  }
   // hy models discover: ask the worker's provider which models it offers.
   if (p.positional[0] === 'discover') {
     try {
