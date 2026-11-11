@@ -8,6 +8,7 @@ import { Ledger, discoverPinned } from './ledger.js'
 import type { SkillInfo } from './skills.js'
 import type { MemoryStore } from './memory.js'
 import { validate, type Schema, type ToolSpec } from './tool-registry.js'
+import { discoverProjectChecks, renderProjectChecks } from './project-checks.js'
 import { TurnProgress, stallNote, verificationNudge, verificationNoticeText } from './progress.js'
 import { announcesNextStep, embedsCallInProse, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverMalformedCall, recoverTemplateCall, recoverUnwrappedBatch, rememberToolNames } from './reply-guard.js'
 import { steerMessage, type SteerInbox } from './steering.js'
@@ -700,6 +701,8 @@ export class Agent {
     // Set once a native reply with a call written inside its prose was sent back.
     let embeddedNudged = false
     const ledger = this.options.ledger ?? new Ledger(discoverPinned(this.options.workspaceRoot))
+    // A7: read once per turn; a session that edits its manifests sees the change next turn.
+    const projectChecks = renderProjectChecks(discoverProjectChecks(this.options.workspaceRoot))
     let messages: ChatMessage[] = [
       { role: 'system', content: base },
       ...(native ? withoutTextProtocolRetries(history) : history),
@@ -805,7 +808,7 @@ export class Agent {
         // The model's own sense of "now" is its training cutoff (DSH time context).
         date: new Date().toLocaleDateString('sv-SE'),
         ...(goal ? { goal } : {}),
-        sections: [ledger.render(), this.options.memory?.render() ?? '', native && mcpSpecs.length ? '' : this.options.mcpCatalog ?? '', this.options.sessionContext?.() ?? ''],
+        sections: [ledger.render(), this.options.memory?.render() ?? '', native && mcpSpecs.length ? '' : this.options.mcpCatalog ?? '', projectChecks, this.options.sessionContext?.() ?? ''],
       })
       if (lastSessionContext(messages) !== context) {
         const last = messages.at(-1)
