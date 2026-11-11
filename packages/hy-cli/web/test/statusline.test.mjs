@@ -37,3 +37,9 @@ test('CP-36: order follows the preference and empty items disappear', () => {
   assert.equal(renderStatusline([], data), '')
   assert.match(renderStatusline(['model'], { model: '<x>' }), /&lt;x&gt;/)
 })
+
+test('B1: the cost item shows the registered-price estimate, marks an upper bound, and hides without a price', () => {
+  assert.equal(statusText('cost', {}), '')
+  assert.equal(statusText('cost', { costUsd: 0.01234 }), '≈ $0.0123')
+  assert.equal(statusText('cost', { costUsd: 3.456, costApproximate: true }), '≤ $3.46')
+})

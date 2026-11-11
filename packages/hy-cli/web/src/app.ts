@@ -548,6 +548,7 @@ function statuslineHtml(current: SessionState | undefined): string {
     ...(current?.usage.lastInputTokens !== undefined ? { lastInputTokens: current.usage.lastInputTokens, lastOutputTokens: current.usage.lastOutputTokens ?? 0 } : {}),
     ...(role ? { contextWindowTokens: role.contextWindowTokens } : {}),
     ...(current ? { turns: current.turns } : {}),
+    ...(current?.cost ? { costUsd: current.cost.usd, costApproximate: current.cost.approximate } : {}),
   })
   const vim = state.prefs.vimMode ? `<span class="status-item vim-mode vim-${state.vim.mode}">${state.vim.mode === 'normal' ? 'NORMAL' : 'INSERT'}</span>` : ''
   return vim ? (html ? `${vim}<span class="status-sep">·</span>${html}` : vim) : html

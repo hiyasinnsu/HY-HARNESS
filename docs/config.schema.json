@@ -1906,6 +1906,22 @@
       },
       "description": "Extra regular expressions that recognize a reply announcing its own next step (Japanese and English are built in)."
     },
+    "guards": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Harness-side progress controls applied to every agent turn.",
+      "properties": {
+        "verifyGate": {
+          "type": "boolean",
+          "description": "Send a final answer that follows an unchecked code edit back once, asking for a check or a plain \"not verified\" (default true)."
+        },
+        "stallSteps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Steps in a row without a successful edit or a new tool result before a change-of-approach note; twice this gives a second note, three times stops the turn (default 8, 0 = off)."
+        }
+      }
+    },
     "models": {
       "type": "array",
       "description": "Models registered by the user: presets shown in Settings, plus the pricing and request-shape flags the harness cannot know by itself.",

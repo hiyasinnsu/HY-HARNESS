@@ -7,7 +7,7 @@
  * items, themes or shortcut ids are dropped instead of failing the GUI.
  */
 
-export const STATUS_ITEMS = ['model', 'sandbox', 'tokens', 'cache', 'last', 'context', 'turns'] as const
+export const STATUS_ITEMS = ['model', 'sandbox', 'tokens', 'cache', 'cost', 'last', 'context', 'turns'] as const
 export type StatusItem = (typeof STATUS_ITEMS)[number]
 
 export const CODE_THEMES = ['auto', 'github', 'monokai', 'plain'] as const
@@ -22,7 +22,7 @@ export interface UiPrefs {
 }
 
 export const DEFAULT_PREFS: UiPrefs = {
-  statusline: ['tokens', 'cache', 'last'],
+  statusline: ['tokens', 'cache', 'cost', 'last'],
   codeTheme: 'auto',
   vimMode: false,
   shortcuts: {},

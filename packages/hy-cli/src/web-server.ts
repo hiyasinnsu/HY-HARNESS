@@ -10,6 +10,9 @@ import type { AddressInfo } from 'node:net'
 import {
   MemoryStore,
   HARNESS_VERSION,
+  estimateCostUsd,
+  pricingFor,
+  type ModelPricing,
   buildInfo,
   canonicalWorkspace,
   loadConfig,
@@ -451,6 +454,8 @@ interface WebSession {
   workerPollUnchangedCount?: number
   busy: boolean
   controller?: AbortController | undefined
+  /** B1: worst-case USD reserved by this chat's requests in flight (a chat under a USD cap). */
+  reservedCostUsd?: number
   /** C2: who stopped the running turn, set just before `controller.abort()`. */
   abortReason?: string | undefined
   entries: ChatEntry[]
@@ -1025,7 +1030,22 @@ function parseImages(raw: unknown): ImageInput[] {
     .map((item) => ({ mimeType: String(item.mimeType), data: String(item.data) }))
 }
 
+/**
+ * B1: the registered price of a session's model, set when the server starts
+ * (sessionState has no access to the config). Undefined when not registered.
+ */
+let pricingOf: (model: { provider: string; model: string }) => ModelPricing | undefined = () => undefined
+
+/** The USD the session's usage cost at its model's registered price (undefined without one). */
+function sessionCost(session: WebSession): { usd: number; approximate: boolean } | undefined {
+  const pricing = pricingOf(session.model)
+  if (!pricing) return undefined
+  const usage = combineUsage(session.conv?.usageSnapshot() ?? session.usage, session.dialogue?.usageSnapshot() ?? session.dialogueUsage)
+  return estimateCostUsd(usage, pricing)
+}
+
 function sessionState(session: WebSession) {
+  const cost = sessionCost(session)
   return {
     runId: session.runId,
     kind: session.kind,
@@ -1046,6 +1066,7 @@ function sessionState(session: WebSession) {
     stats: statsView(session.stats),
     effort: session.conv?.currentEffort() ?? session.effort ?? '',
     model: session.model,
+    ...(cost ? { cost } : {}),
     ...(session.lastError !== undefined ? { lastError: session.lastError } : {}),
   }
 }
@@ -1137,6 +1158,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   await startServices(config)
   if (onboarding.applied.length > 0) options.log?.(`onboarding: applied ${onboarding.applied.join(', ')}`)
   const logFile = sessionLogPath(config.stateDir)
+  pricingOf = (model) => pricingFor(config, model.provider, model.model)
   const token = options.token ?? randomBytes(24).toString('hex')
   // Phone access: paired devices (each with its own secret) and Web Push. They
   // live in the user config directory, so a phone stays paired across restarts
@@ -2263,9 +2285,36 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     return orchestration.active?.status === 'active' ? orchestration.active : undefined
   }
 
+  /**
+   * B1: an explicit USD cap (`budget.maxCostUsd`) also bounds each chat, which
+   * it did not before. A chat on a model with no registered price runs
+   * uncapped as before: refusing it would make an unrelated cap block every
+   * unpriced model (the 5.71 complaint). The spend is recomputed from the
+   * chat's logged usage, so a restart does not reset it.
+   */
+  function runWithChatBudget<T>(session: WebSession, limit: number, run: () => T): T {
+    if (!pricingOf(session.model)) return run()
+    return withModelBudget((maximum) => {
+      if (!Number.isFinite(maximum) || maximum < 0) throw new Error('Cannot estimate the maximum cost of this model request.')
+      const spent = sessionCost(session)?.usd ?? 0
+      const reserved = session.reservedCostUsd ?? 0
+      if (spent + reserved + maximum > limit) {
+        throw new Error(`Chat cost limit (USD ${limit.toFixed(2)}) would be exceeded by this model request (spent about USD ${spent.toFixed(4)}). Raise budget.maxCostUsd or start a new chat. Work is preserved.`)
+      }
+      session.reservedCostUsd = reserved + maximum
+      let closed = false
+      return () => {
+        if (closed) return
+        closed = true
+        session.reservedCostUsd = Math.max(0, (session.reservedCostUsd ?? 0) - maximum)
+      }
+    }, run)
+  }
+
   function runWithOrchestrationBudget<T>(session: WebSession, run: () => T): T {
     const active = activeOrchestration()
     const limit = config.budget.maxCostUsd
+    if (limit !== undefined && session.kind === 'chat') return runWithChatBudget(session, limit, run)
     if (limit === undefined || !active || session.kind === 'chat') return run()
     return withModelBudget((maximum) => {
       if (!Number.isFinite(maximum) || maximum < 0) throw new Error('Cannot estimate the maximum cost of this model request.')

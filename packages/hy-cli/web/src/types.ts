@@ -354,6 +354,8 @@ export interface SessionState {
     lastCacheMissTokens?: number
   }
   effort?: string
+  /** B1: USD at the model's registered price; absent without a price. */
+  cost?: { usd: number; approximate: boolean }
   lastError?: string
 }
 
