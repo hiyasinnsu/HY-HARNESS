@@ -123,7 +123,8 @@ export class TurnProgress {
       const backgrounded = (o.result as { status?: unknown } | undefined)?.status === 'backgrounded'
       if (CHECK_TOOLS.has(tool) && !o.blocked && !backgrounded) {
         const exitCode = exitCodeOf(o.result)
-        const passed = o.ok && (exitCode === undefined || exitCode === 0) && (o.result as { passed?: unknown } | undefined)?.passed !== false
+        const flags = (o.result ?? {}) as { passed?: unknown; attention?: unknown }
+        const passed = o.ok && (exitCode === undefined || exitCode === 0) && flags.passed !== false && flags.attention === undefined
         this.checks.push({ step, tool, target: checkTarget(tool, o.call.args), passed, ...(exitCode !== undefined ? { exitCode } : {}) })
         if (this.checks.length > 8) this.checks.shift()
         this.lastCheckStep = step

@@ -179,6 +179,28 @@ export function pipeChildGap(
 }
 
 /**
+ * A14: a command that exited 0 but whose output shows a failure the exit code
+ * hides: a PowerShell non-terminating error (the cmdlet failed, the script went
+ * on and `$LASTEXITCODE` stayed 0), an HTTP error status, a curl error, or a
+ * Python traceback after a pipe. Returned as a note beside the result rather
+ * than an error: the output may only quote such text (a log, a test fixture),
+ * and the model sees both.
+ */
+export function shellAttention(result: { stdout?: unknown; stderr?: unknown; exitCode?: unknown }): string | undefined {
+  if (result.exitCode !== 0) return undefined
+  const stdout = typeof result.stdout === 'string' ? result.stdout : ''
+  const stderr = typeof result.stderr === 'string' ? result.stderr : ''
+  const found: string[] = []
+  if (/^\s*\+ (?:CategoryInfo|FullyQualifiedErrorId)\s*:/m.test(stderr)) found.push('a PowerShell error record in stderr (a cmdlet failed but the script continued)')
+  const http = /\bHTTP\/\d(?:\.\d)? ([45]\d\d)\b/.exec(`${stderr}\n${stdout}`) ?? /\bThe remote server returned an error: \(([45]\d\d)\)/.exec(`${stderr}\n${stdout}`) ?? /\bResponse status code does not indicate success: ([45]\d\d)\b/.exec(`${stderr}\n${stdout}`)
+  if (http) found.push(`an HTTP ${http[1]} response`)
+  if (/^curl: \(\d+\) /m.test(stderr)) found.push('a curl error')
+  if (/^Traceback \(most recent call last\):/m.test(stderr)) found.push('a Python traceback in stderr')
+  if (found.length === 0) return undefined
+  return `exit code 0, but the output shows ${found.join(', ')}. Check whether the command really did what was intended before relying on it.`
+}
+
+/**
  * True when a finished command failed because the confined token could not
  * start a child process that needs pipes (`spawn EPERM`) or a console
  * (`0xC0000142`). Stricter than `pipeChildGap`: a finished, non-zero command in
@@ -600,6 +622,42 @@ export function nearbyLines(source: string, needle: string, limit = 5): string {
   return hits.length > 0 ? `\nLines that look close:\n${hits.join('\n')}` : ''
 }
 
+/**
+ * A9: where `needle` occurs in `source` once whitespace is ignored (indentation,
+ * runs of spaces, trailing blanks), or failing that the window of the same
+ * length whose lines agree most. The file's exact text is returned with line
+ * numbers so the model can copy it instead of guessing again. Nothing is
+ * applied: an edit that only matches loosely may still be the wrong place.
+ */
+export function closestBlock(source: string, needle: string): string {
+  const norm = (line: string) => line.trim().replace(/\s+/g, ' ')
+  const lines = source.replace(/\r\n/g, '\n').split('\n')
+  const want = needle.replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '').split('\n').map(norm)
+  const size = want.length
+  if (size === 0 || want.every((line) => line === '') || size > lines.length || lines.length > 20_000) return ''
+  const have = lines.map(norm)
+  const exact: number[] = []
+  let best = { at: -1, score: 0 }
+  for (let at = 0; at + size <= lines.length; at += 1) {
+    let score = 0
+    for (let i = 0; i < size; i += 1) if (have[at + i] === want[i] && want[i] !== '') score += 1
+    if (score === want.filter((line) => line !== '').length && want.every((line, i) => line === have[at + i])) exact.push(at)
+    if (score > best.score) best = { at, score }
+  }
+  const excerpt = (at: number) => lines.slice(at, at + size).map((line, i) => `  ${at + i + 1}: ${line.slice(0, 200)}`).join('\n')
+  if (exact.length === 1) {
+    return `\nThe text matches lines ${exact[0]! + 1}-${exact[0]! + size} when whitespace is ignored. The file has exactly:\n${excerpt(exact[0]!)}\nCopy that text (without the line numbers) as old.`
+  }
+  if (exact.length > 1) {
+    return `\nIgnoring whitespace, the text matches ${exact.length} places (from line ${exact.map((at) => at + 1).join(', ')}); include more surrounding lines to pick one.`
+  }
+  const nonEmpty = want.filter((line) => line !== '').length
+  if (best.at >= 0 && size > 1 && best.score * 2 >= nonEmpty) {
+    return `\nThe closest block (${best.score} of ${nonEmpty} lines agree) is lines ${best.at + 1}-${best.at + size}:\n${excerpt(best.at)}`
+  }
+  return ''
+}
+
 /** Glob → RegExp for workspace-relative `/` paths: `**`, `*`, `?`, `{a,b}`. */
 export function globToRegExp(glob: string): RegExp {
   let re = ''
@@ -949,7 +1007,7 @@ export class ToolRuntime {
     const before = decoded.text
     const { count: occurrences, text: after } = replaceIgnoringEol(before, oldText, newText)
     const want = args.count === undefined ? 1 : Number(args.count)
-    if (occurrences === 0) throw new Error(`edit_file: the text to replace was not found in ${file}.${nearbyLines(before, oldText)}`)
+    if (occurrences === 0) throw new Error(`edit_file: the text to replace was not found in ${file}.${closestBlock(before, oldText) || nearbyLines(before, oldText)}`)
     if (occurrences !== want) {
       throw new Error(`edit_file: the text occurs ${occurrences} times in ${file} but count=${want}.${nearbyLines(before, oldText)}`)
     }
@@ -2174,13 +2232,15 @@ export class ToolRuntime {
       }
       const gap = [this.persistentGap, escalated ? undefined : pipeChildGap(result, command)].filter(Boolean).join('; ')
       this.persistentGap = undefined
-      return {
+      const cleaned = {
         ...result,
         ...(escalated ? { escalated } : {}),
         ...(typeof result.stdout === 'string' ? { stdout: cleanPowerShellOutput(result.stdout) } : {}),
         ...(typeof result.stderr === 'string' ? { stderr: cleanPowerShellOutput(result.stderr) } : {}),
         ...(gap ? { gap } : {}),
       }
+      const attention = shellAttention(cleaned)
+      return attention ? { ...cleaned, attention } : cleaned
     } finally {
       release?.()
     }

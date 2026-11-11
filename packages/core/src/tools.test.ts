@@ -890,3 +890,26 @@ test('only the user can grant the low-integrity token', async () => {
   assert.equal(calls.length, 1, 'a Guardian approval does not re-run the command with a looser token')
   assert.equal(result.exitCode, 1)
 })
+
+test('A14: shellAttention flags failures an exit code 0 hides, and nothing else', async () => {
+  const { shellAttention } = await import('./tools.js')
+  assert.match(shellAttention({ exitCode: 0, stdout: '', stderr: 'Get-Item : not found\n    + CategoryInfo          : ObjectNotFound: (x:String) [Get-Item]\n' })!, /PowerShell error record/)
+  assert.match(shellAttention({ exitCode: 0, stdout: 'HTTP/2 403 \ncontent-type: x', stderr: '' })!, /HTTP 403/)
+  assert.match(shellAttention({ exitCode: 0, stdout: '', stderr: 'Invoke-WebRequest : The remote server returned an error: (404) Not Found.' })!, /HTTP 404/)
+  assert.match(shellAttention({ exitCode: 0, stdout: '', stderr: 'curl: (6) Could not resolve host: x' })!, /curl error/)
+  assert.match(shellAttention({ exitCode: 0, stdout: '', stderr: 'Traceback (most recent call last):\n  File "a.py"' })!, /Python traceback/)
+  assert.equal(shellAttention({ exitCode: 0, stdout: 'HTTP/1.1 200 OK', stderr: '' }), undefined)
+  assert.equal(shellAttention({ exitCode: 1, stdout: '', stderr: 'curl: (6) x' }), undefined, 'a non-zero exit is already a failure')
+  assert.equal(shellAttention({ exitCode: 0, stdout: 'see the Traceback (most recent call last): docs', stderr: '' }), undefined)
+})
+
+test('A9: an edit_file miss that differs only in whitespace shows the exact lines to copy', async () => {
+  const { closestBlock } = await import('./tools.js')
+  const source = 'function f() {\n    const a = 1\n    return a\n}\n'
+  const hint = closestBlock(source, 'const a = 1\nreturn  a')
+  assert.match(hint, /matches lines 2-3 when whitespace is ignored/)
+  assert.match(hint, / {2}2: {5}const a = 1\n {2}3: {5}return a/)
+  assert.match(closestBlock('x = 1\ny = 2\nz = 3\n', 'x = 1\ny = 9\nz = 3'), /closest block \(2 of 3 lines agree\) is lines 1-3/)
+  assert.match(closestBlock('a\nb\na\nb\n', ' a\n b'), /matches 2 places \(from line 1, 3\)/)
+  assert.equal(closestBlock('unrelated\n', 'zzz\nyyy'), '')
+})

@@ -146,3 +146,10 @@ test('A5: varied failing calls get a progress note and then stop the turn', asyn
   assert.match(seen[4]!, /\[progress check\] 4 steps in a row produced no progress/)
   assert.deepEqual(log.filter((e) => e.type === 'guard/stall').map((e) => (e.payload as { level: number }).level), [1, 2, 3])
 })
+
+test('A14: a shell result flagged for attention is not a passing check', () => {
+  const progress = new TurnProgress()
+  progress.record(1, [ok('edit_file', { file: 'a.ps1' }, '{}')])
+  progress.record(2, [ok('shell', { command: 'Invoke-WebRequest x' }, 'out', { exitCode: 0, attention: 'exit code 0, but …' })])
+  assert.equal(progress.summary().lastCheckPassed, false)
+})
