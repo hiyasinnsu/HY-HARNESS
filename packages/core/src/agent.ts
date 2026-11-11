@@ -8,7 +8,7 @@ import { Ledger, discoverPinned } from './ledger.js'
 import type { SkillInfo } from './skills.js'
 import type { MemoryStore } from './memory.js'
 import { validate, type Schema, type ToolSpec } from './tool-registry.js'
-import { announcesNextStep, embedsCallInProse, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverMalformedCall, recoverTemplateCall, recoverUnwrappedBatch } from './reply-guard.js'
+import { announcesNextStep, embedsCallInProse, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverMalformedCall, recoverTemplateCall, recoverUnwrappedBatch, rememberToolNames } from './reply-guard.js'
 import { steerMessage, type SteerInbox } from './steering.js'
 import { classifyDenial, type DenialInfo } from './denial.js'
 import { estimateTokens } from './tokens.js'
@@ -767,7 +767,10 @@ export class Agent {
         })
       }
       this.options.onEvent?.({ type: 'step-start', step, role: 'worker', model: this.options.provider.name })
-      const requestTools = native ? nativeToolDefs(ptc, objectiveMode, { ...extras, activeTools: this.activeTools() }) : undefined
+      const offeredDefs = nativeToolDefs(ptc, objectiveMode, { ...extras, activeTools: this.activeTools() })
+      const requestTools = native ? offeredDefs : undefined
+      // Plugin and MCP tool names join the built-ins for text-call recovery.
+      rememberToolNames(offeredDefs.map((tool) => tool.name))
       const replayTools = this.options.cacheCompaction ? requestTools : undefined
       if (this.options.context) messages = await this.options.context.beforeRequest(messages, lastInputTokens, replayTools)
       // Prefix cache (DSH "in-history" updates): the system prompt stays

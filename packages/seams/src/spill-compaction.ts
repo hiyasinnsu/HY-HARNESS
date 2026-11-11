@@ -169,7 +169,7 @@ export class SpillCompaction implements ContextManager {
       {
         role: 'system',
         content:
-          'You compress the earlier part of a coding agent session so it can continue in less context. ' +
+          'You compress the earlier part of an agent session so it can continue in less context. ' +
           'Keep decisions, files read or changed, commands run and their outcomes, and open problems. ' +
           `Do not restate these agent notes, which are kept separately: ${keys.length > 0 ? keys.join(', ') : '(none)'}. ` +
           'Reply with a JSON object {"summary":"<Markdown summary under 300 words>"}.',

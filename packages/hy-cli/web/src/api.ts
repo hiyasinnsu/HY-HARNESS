@@ -11,12 +11,23 @@ export class ApiError extends Error {
   }
 }
 
+/** The UI language, so server-written text (thinking summaries) matches it. */
+function uiLocale(): string {
+  try {
+    return localStorage.getItem('hy-locale') || navigator.language || ''
+  } catch {
+    return ''
+  }
+}
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const locale = uiLocale()
   const response = await fetch(path, {
     credentials: 'same-origin',
     ...init,
     headers: {
       ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(locale ? { 'X-HY-Locale': locale } : {}),
       ...(init.headers ?? {}),
     },
   })

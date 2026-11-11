@@ -411,8 +411,12 @@ function recoverXmlParameterCall(text: string): string | undefined {
 // The parser below reads tag names and attributes generically instead of
 // enumerating dialects, and converts an unambiguous call to the JSON protocol.
 
-/** Known tool names; the bare `<NAME>…</NAME>` form needs one to be safe. */
-const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
+/**
+ * Known tool names; the bare `<NAME>…</NAME>` form needs one to be safe. The
+ * built-ins, plus every tool a session has offered (plugins, MCP tools), which
+ * the agent registers with `rememberToolNames`.
+ */
+const KNOWN_TOOL_NAMES = new Set<string>([
   ...TOOLS_BY_NAME.keys(),
   'write_file',
   'edit_file',
@@ -420,6 +424,16 @@ const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
   'todo_write',
   'present',
 ])
+
+/** Adds the names of tools a session offers, so their bare XML form is recovered too. */
+export function rememberToolNames(names: Iterable<string>): void {
+  for (const name of names) if (/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(name)) KNOWN_TOOL_NAMES.add(name)
+}
+
+/** Whether `name` is a tool the harness knows (built-in or offered by a session). */
+export function isKnownToolName(name: string): boolean {
+  return KNOWN_TOOL_NAMES.has(name)
+}
 
 const XML_TAG_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*/
 const XML_ATTR_NAME = /^[A-Za-z_][A-Za-z0-9_.:-]*/
@@ -689,7 +703,8 @@ export function recoverXmlToolCall(text: string): string | undefined {
 }
 
 /**
- * Repairs one known glitch of DeepSeek/GLM/Qwen models: a text tool call written
+ * Repairs a glitch seen across model families (DeepSeek, GLM, Qwen, Hunyuan
+ * in the logs) — chat-template tags leaking into a text tool call written
  * as a JSON call or batch that lacks its closing brackets, is wrapped in
  * `<tool_call>...</tool_call>`, or mixes template closing tags
  * (`</｜DSML｜ parameter>`, `</tool_call:id>`, `</invoke>`). The intent is
@@ -848,7 +863,26 @@ const ANNOUNCE_JA = new RegExp(
     .join('|'),
   'u',
 )
-const ANNOUNCE_EN = /^(?:(?:ok(?:ay)?|now|next|then|first|so)[,:]?\s+)*(?:i'll|i will|i'm going to|i am going to|let me|i'll now|i will now)\b/i
+/**
+ * The same signal in other languages: the agent itself about to act (first
+ * person + future / "going to"). Data, one row per language, so a language is
+ * added without new branches; users add more with `announcePatterns`. The
+ * prompt states the rule for every language; this only catches a slip.
+ */
+const ANNOUNCE_OTHER: readonly RegExp[] = [
+  // English ("Let me know." hands back, it does not announce).
+  /^(?:(?:ok(?:ay)?|now|next|then|first|so)[,:]?\s+)*(?:i'll|i will|i'm going to|i am going to|let me(?! know\b)|i'll now|i will now)\b/i,
+  // Chinese: 我将/我会/我要/接下来我/现在我… ending the reply.
+  /(?:我(?:将|会|要|这就|马上|现在|接下来)|接下来我|下面我|现在我|让我)(?:来)?[^。！？!?]*[。.!！]?$/u,
+  // Korean: …하겠습니다 / …할게요 / …하겠다 / …해 보겠습니다.
+  /(?:하겠습니다|할게요|하겠다|해\s?보겠습니다|진행하겠습니다)[.!]?$/u,
+  // Spanish, Portuguese, French, German, Italian.
+  /^(?:(?:ahora|a continuación|luego|ok)[,:]?\s+)?(?:voy a|procedo a|vamos a)\b/iu,
+  /^(?:(?:agora|em seguida|ok)[,:]?\s+)?(?:vou|irei|vamos)\s/iu,
+  /^(?:(?:maintenant|ensuite|ok)[,:]?\s+)?(?:je vais|nous allons|je m'occupe)\b/iu,
+  /^(?:(?:jetzt|als nächstes|ok)[,:]?\s+)?(?:ich werde|werde ich|ich mache jetzt|lass mich)\b/iu,
+  /^(?:(?:ora|adesso|ok)[,:]?\s+)?(?:vado a|procedo a|sto per)\b/iu,
+]
 
 /**
  * Endings that legitimately hand the turn back: questions, offers, conditions
@@ -864,6 +898,8 @@ const HANDS_BACK = new RegExp(
     '次第|届いたら|そろったら|揃ったら|終わったら|完了したら|報告を待|返事を待|承認を待|待ってから|を待って|待ちます|待つ[。]?$',
     'と判断する|と判断します|ことにする|ことにします|とします|別途|後で|あとで|今後',
     "\\b(?:if you|if needed|would you|do you|shall i|once|when (?:the|it|they)|after (?:the|it|they)|waiting for|wait for|later)\\b",
+    // Conditions and waiting in the other languages of ANNOUNCE_OTHER.
+    '如果|若是|需要的话|等待|之后再|완료되면|필요하시면|기다리|si (?:lo )?(?:necesitas|deseas|quieres)|cuando|se (?:precisar|quiser)|quando|si vous|lorsque|wenn|sobald|falls|se (?:vuoi|necessario)',
   ].join('|'),
   'iu',
 )
@@ -876,5 +912,5 @@ const HANDS_BACK = new RegExp(
 export function announcesNextStep(text: string): boolean {
   const last = lastSentence(text)
   if (!last || HANDS_BACK.test(last)) return false
-  return ANNOUNCE_JA.test(last) || ANNOUNCE_EN.test(last)
+  return ANNOUNCE_JA.test(last) || ANNOUNCE_OTHER.some((pattern) => pattern.test(last))
 }

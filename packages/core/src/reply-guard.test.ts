@@ -577,3 +577,32 @@ test('XML arguments that are JSON literals are typed even without string="false"
   // string="false" with a value that is not JSON is still refused.
   assert.equal(recoverXmlToolCall('<invoke name="shell"><parameter name="ms" string="false">oops</parameter></invoke>'), undefined)
 })
+
+test('announcesNextStep: the same signal in several languages; hand-backs are not announcements', async () => {
+  const { announcesNextStep } = await import('./reply-guard.js')
+  for (const announce of [
+    "I'll run the tests now.",
+    '接下来我将运行测试。',
+    '다음으로 테스트를 실행하겠습니다.',
+    'Ahora voy a ejecutar las pruebas.',
+    'Je vais maintenant lancer les tests.',
+    'Ich werde jetzt die Tests ausführen.',
+    '次にテストを確認します。',
+  ]) assert.equal(announcesNextStep(announce), true, announce)
+  for (const handBack of [
+    'Let me know.',
+    'Let me know if you want changes.',
+    '如果需要，我会继续优化。',
+    'Si lo necesitas, voy a añadir más pruebas.',
+    'テストを追加しました。',
+    'Done: all 12 tests pass.',
+  ]) assert.equal(announcesNextStep(handBack), false, handBack)
+})
+
+test('a bare XML call of a session-offered (plugin / MCP) tool is recovered once its name is known', async () => {
+  const { recoverXmlToolCall, rememberToolNames } = await import('./reply-guard.js')
+  const text = '<mcp_browser_open><url>https://example.test</url></mcp_browser_open>'
+  assert.equal(recoverXmlToolCall(text), undefined, 'an unknown bare tag is not a call')
+  rememberToolNames(['mcp_browser_open'])
+  assert.deepEqual(JSON.parse(recoverXmlToolCall(text)!), { tool: 'mcp_browser_open', args: { url: 'https://example.test' } })
+})

@@ -75,6 +75,7 @@ import {
   sessionPlugins,
   startServices,
   summarizeThinking,
+  defaultSummaryLocale,
 } from './session-app.js'
 import { applyAgentEvent, compactionNotice, projectChat, stripPlanPrefix, type ChatEntry } from './chat-projection.js'
 import { API_VERSION } from './api-schema.js'
@@ -1096,6 +1097,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   const fence = createHostFence(host, options.trustedHosts ?? [])
   const scheme = secure ? 'https' : 'http'
   const { config, client } = await openClient(options.overrides, options.execServer)
+  /** The UI's language, from the latest API request (the OS locale until one arrives). */
+  let uiLocale = defaultSummaryLocale()
   // Ask local servers what their models take (vision), in the background.
   const probeLocalModels = (): void => {
     for (const role of [config.role, config.orchestratorRole, config.subagentRole]) {
@@ -2159,7 +2162,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       const text = String(event.content ?? '').trim()
       if (text) {
         instantSummary = instantThinkingSummary(text) || undefined
-        void summarizeThinking(config, text, session.runId)
+        void summarizeThinking(config, text, session.runId, undefined, uiLocale)
           .then((summary) => {
             const entry = session.entries.find((candidate) => candidate.id === `think-${seq}`)
             if (entry?.kind !== 'thinking') return
@@ -3667,6 +3670,10 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         return
       }
       const method = req.method ?? 'GET'
+      // The UI's language (sent on every API call): server-written text such as
+      // thinking summaries follows it.
+      const localeHeader = req.headers['x-hy-locale']
+      if (typeof localeHeader === 'string' && /^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$/.test(localeHeader)) uiLocale = localeHeader
       // WP-43: the API contract is checked once per request, so a body of the
       // wrong shape is a typed 400 instead of a 500 deeper in the handler.
       const contractRoute = matchContract(method, pathname)

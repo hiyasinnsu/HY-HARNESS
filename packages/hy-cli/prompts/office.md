@@ -1,15 +1,17 @@
 # Working with Office documents (WP-52)
 
 You are about to create or change a document the user will open outside the
-editor (`.docx`, `.xlsx`, `.pptx`, or a PDF). Follow this order.
+editor (`.docx`, `.xlsx`, `.pptx`, or a PDF). Follow this order. The commands
+below use Python so they work the same on every OS; if Python is missing, use
+the shell's own equivalent.
 
 ## 1. Check what is available
 
-```powershell
-# A converter is optional; the harness previews Office files only when it exists.
-Get-Command soffice -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+```text
+python -c "import shutil; print(shutil.which('soffice') or shutil.which('libreoffice') or 'no converter')"
 ```
 
+A converter is optional: the harness previews Office files only when it exists.
 If LibreOffice is not installed, say so in the final answer instead of writing a
 broken file: the GUI can still show the bytes, but it cannot render them.
 
@@ -17,8 +19,8 @@ broken file: the GUI can still show the bytes, but it cannot render them.
 
 Use the workspace's own toolchain when Python is available:
 
-```powershell
-python -c "import docx, openpyxl, pptx; print('ok')"   # python-docx / openpyxl / python-pptx
+```text
+python -c "import docx, openpyxl, pptx; print('ok')"
 ```
 
 - Word: `python-docx` (`Document()`, `add_heading`, `add_paragraph`, tables).
@@ -35,9 +37,8 @@ rebuilt. Do not edit the `.docx` by hand.
 
 ## 4. Verify before presenting
 
-```powershell
-# The same conversion the GUI uses; it fails loudly when LibreOffice is missing.
-python -c "import sys; print('preview:', sys.argv[1])" report.docx
+```text
+python -c "import docx, sys; d = docx.Document(sys.argv[1]); print(len(d.paragraphs), 'paragraphs')" report.docx
 ```
 
 - Re-open the file with the library that wrote it and assert the text you expect.
@@ -53,6 +54,6 @@ installed, cached by content hash, and the conversion error is shown otherwise).
 
 - Conversion failure: report the command, the exit code and the last stderr lines
   in the final answer. Do not claim the document is ready.
-- A missing `soffice` is not a failure of your work: say that the file is valid
+- A missing converter is not a failure of your work: say that the file is valid
   but cannot be previewed on this machine, and offer the PDF route instead
   (`soffice --headless --convert-to pdf` once it is installed).

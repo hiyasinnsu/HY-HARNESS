@@ -479,7 +479,7 @@ test('native tool calls: parallel reads, a plain-text final, and history that re
     const r = await new Agent({ provider, tools, sessionLog: log, workspaceRoot: dir, nativeTools: true }).run('read both')
     assert.equal(r.final, 'Both files read: A and B.')
     assert.ok(requests[0]!.tools!.some((t) => (t as { name: string }).name === 'apply_patch'))
-    assert.match(requests[0]!.system, /Use the provided tools through function calls/)
+    assert.match(requests[0]!.system, /Call tools through function calls/)
     assert.doesNotMatch(requests[0]!.system, /Reply with exactly one JSON object/)
     // One user message holds both results, in call order.
     const results = r.history.find((m) => m.content.startsWith('TOOL RESULT'))!.content
@@ -609,8 +609,7 @@ test('a broken pseudo tool call is retried natively, downgraded, retried once mo
     assert.match(r.final, /task is incomplete.*earlier results and changes are preserved/)
     assert.deepEqual(rebuildHistory(log.events(), 'run-b'), r.history)
     // The prompt tells the model not to put a pseudo call in the body.
-    assert.match(systems[0]!, /never write JSON such as/)
-    assert.match(systems[0]!, /never a final answer: emit a real function call/)
+    assert.match(systems[0]!, /never by writing call JSON/)
     const retries = log.events().filter((e) => e.type === 'turn/retry')
     assert.equal(retries.length, 3, 'native retry, downgrade, one text-protocol retry')
     assert.deepEqual(
@@ -618,8 +617,9 @@ test('a broken pseudo tool call is retried natively, downgraded, retried once mo
       ['broken-tool-call', 'tool-protocol-fallback', 'broken-tool-call'],
     )
     assert.match(r.final, /invalid tool replies persisted after switching protocols/)
-    assert.doesNotMatch(systems[2]!, /emit a real function call/)
-    assert.doesNotMatch(systems[3]!, /emit a real function call/)
+    // After the downgrade the text protocol prompt is sent.
+    assert.doesNotMatch(systems[2]!, /never by writing call JSON/)
+    assert.doesNotMatch(systems[3]!, /never by writing call JSON/)
     assert.equal(events.filter((t) => t === 'retry').length, 3)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })

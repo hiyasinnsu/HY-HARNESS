@@ -217,10 +217,9 @@ export interface HarnessConfig {
    */
   reasoningHistory: ReasoningHistory
   /**
-   * System-prompt variant. `lean4` is the default since 2026-11-09 (the lean2-4
-   * rules and the detailed tool descriptions; no worse than `lean` on the
-   * financial and security benchmarks, bench/results/2026-11-09-lean4-vs-lean-*).
-   * `lean` was the default before; `legacy` is the opening used until 2026-11-07.
+   * Accepted for compatibility (old configs, bench presets); it no longer
+   * selects text. One standard system prompt serves every model and task since
+   * 2026-11-11 (`buildSystemPrompt`).
    */
   promptVariant: 'lean' | 'legacy' | 'lean2' | 'lean3' | 'lean4'
   /**

@@ -58,47 +58,28 @@ test('tool usage lives with native definitions and the SDK follows loaded tools'
   assert.doesNotMatch(text.slice(text.lastIndexOf('\nRules:\n')), /search_glob|apply_patch|PowerShell/)
 })
 
-test('promptVariant: lean is the default; legacy keeps the old opening; the rest is shared', () => {
+test('one standard prompt for every model and variant name, not tied to coding', () => {
   for (const native of [true, false]) {
-    const lean = buildSystemPrompt('C:\\work\\alpha', false, false, { native })
-    assert.equal(buildSystemPrompt('C:\\work\\alpha', false, false, { native, promptVariant: 'lean' }), lean)
-    const base = buildSystemPrompt('C:\\work\\alpha', false, false, { native, promptVariant: 'legacy' })
-    assert.match(base, /^You are HY-HARNESS, a careful autonomous coding agent\. The workspace and this session's role are given at the end/)
-    assert.match(lean, /^You are HY-HARNESS, a careful autonomous coding agent\.\nPrivate reasoning style: use a concise tone\./)
-    assert.doesNotMatch(lean, /Japanese|given at the end|Start with one sentence/)
-    const rest = (s: string) => s.slice(s.indexOf(native ? 'Rules:' : 'Tools (call as'))
-    assert.equal(rest(lean), rest(base), 'only the first two lines differ')
+    const standard = buildSystemPrompt('C:\\work\\alpha', false, false, { native })
+    for (const promptVariant of ['lean', 'legacy', 'lean2', 'lean3', 'lean4'] as const) {
+      assert.equal(buildSystemPrompt('C:\\work\\alpha', false, false, { native, promptVariant }), standard, promptVariant)
+    }
+    assert.match(standard, /^You are HY-HARNESS, an autonomous agent working in the user's workspace\.\nPrivate reasoning style: use a concise tone\./)
+    assert.doesNotMatch(standard, /coding agent|Japanese|what changed and what you verified/)
+    // How a turn ends is stated the same way in both protocols.
+    assert.match(standard, /nothing it says you will do next will happen/)
+    assert.match(standard, /what you could not verify/)
   }
-})
-
-test('promptVariant lean2: the user-drafted rules (native function calling)', () => {
-  const p = buildSystemPrompt('C:\\work\\alpha', false, false, { native: true, promptVariant: 'lean2' })
-  assert.match(p, /^You are HY-HARNESS, an autonomous coding agent\.\nPrivate reasoning style: use a concise tone\. Do not state uncertain points as certain; present them as possibilities\./)
+  const p = buildSystemPrompt('C:\\work\\alpha', false, false, { native: true })
   for (const line of [
     "Read the user's intent and its background before acting.",
     'Do not settle for a partial solution.',
-    'Ask the user only when a decision is genuinely theirs',
-    'In the final answer, lead with the conclusion; if you did work, summarize clearly what changed and what you verified.',
+    'a decision is genuinely the user',
+    'never by writing call JSON in your reply text',
   ]) assert.ok(p.includes(line), line)
-  for (const gone of ['never write JSON such as', 'Such JSON', 'Never claim success', 'instead of guessing similar paths', 'careful']) {
-    assert.ok(!p.includes(gone), `removed: ${gone}`)
-  }
   assert.match(p, /\nThis session:\nWorkspace root: C:\\work\\alpha\n*$/)
   // An objective run keeps its own ending rule.
-  assert.match(buildSystemPrompt('C:\\work\\alpha', false, true, { native: true, promptVariant: 'lean2' }), /Finish only by calling claim_complete/)
-})
-
-test('promptVariant lean3: tool use and rules groups', () => {
-  const p = buildSystemPrompt('C:\\work\\alpha', false, false, { native: true, promptVariant: 'lean3' })
-  assert.match(p, /^You are HY-HARNESS, an autonomous coding agent\.\nPrivate reasoning style: use a concise tone\. Do not state uncertain points as certain; present them as possibilities\./)
-  for (const line of [
-    'Tool use:\nMake independent calls together, at the same time.\nDo not try to read or write outside the workspace.\n',
-    'Rules:\nRead the user\'s intent and its background before acting.\nDo not settle for a partial solution.\n',
-    'Do not implement a lot at once; proceed in small, verifiable steps.\n',
-  ]) assert.ok(p.includes(line), line)
-  assert.ok(!p.includes('Use the provided tools through function calls'))
-  assert.match(p, /\nThis session:\nWorkspace root: C:\\work\\alpha\n*$/)
-  assert.match(buildSystemPrompt('C:\\work\\alpha', false, true, { native: true, promptVariant: 'lean3' }), /Finish only by calling claim_complete/)
+  assert.match(buildSystemPrompt('C:\\work\\alpha', false, true, { native: true }), /Finish only by calling claim_complete/)
 })
 
 test('promptVariant lean4: the prompt drops what the detailed tool docs cover', async () => {
@@ -106,7 +87,7 @@ test('promptVariant lean4: the prompt drops what the detailed tool docs cover', 
   const { RICH_TOOL_DOCS } = await import('./tool-docs.js')
   const { TOOL_SPECS } = await import('./tool-registry.js')
   const p = buildSystemPrompt('C:\\work\\alpha', false, false, { native: true, promptVariant: 'lean4' })
-  assert.match(p, /^You are HY-HARNESS, an autonomous coding agent\.\nPrivate reasoning style: [^\n]+\nTool use:\nMake independent calls together, at the same time\.\nDo not try to read or write outside the workspace\.\nRules:\n/)
+  assert.match(p, /\nTool use:\nCall tools through function calls, never by writing call JSON in your reply text\. Make independent calls together, at the same time\.\nDo not try to read or write outside the workspace\.\nRules:\n/)
   assert.doesNotMatch(p, /Shell environment|Read a file before editing|search_glob|apply_patch|edit_file/, 'now in the tool descriptions')
   assert.match(p, /proceed in small, verifiable steps\.\n\nThis session:/)
 

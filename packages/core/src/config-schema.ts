@@ -408,7 +408,7 @@ export const userConfigJsonSchema = {
     promptVariant: {
       type: 'string',
       enum: ['lean', 'legacy', 'lean2', 'lean3', 'lean4'],
-      description: 'System-prompt variant. lean4 (default since 2026-11-09): fewer rules (intent, no partial solutions, self-contained answers) with detailed tool and parameter descriptions, and the prompt drops what they cover. lean: the previous default (short opening, tone-only reasoning line, rules including the body-JSON warning). legacy: the opening used until 2026-11-07 (Japanese reasoning, longer style rules). lean2 / lean3: earlier drafts of lean4 kept for comparison.',
+      description: 'Accepted for compatibility; no longer selects text. Since 2026-11-11 every model and task gets one standard system prompt (the former variants were benchmark comparisons). Whether detailed tool descriptions are sent is richToolDocs.',
     },
     reasoningHistory: {
       type: 'string',

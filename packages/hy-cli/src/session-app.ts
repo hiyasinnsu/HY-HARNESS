@@ -77,7 +77,7 @@ import {
   createApprover,
 } from '../../seams/dist/index.js'
 import { stripPlanPrefix, parseModelAction } from './chat-projection.js'
-import { cleanThinkingSummary, hasJapanese } from './summary-text.js'
+import { cleanThinkingSummary } from './summary-text.js'
 import { GoalStore, type GoalView } from './goal.js'
 import { SubagentRegistry, type SubagentRunner, type SubagentView } from './agents.js'
 import { DocumentError, previewDocument } from './documents.js'
@@ -1072,16 +1072,49 @@ async function runSubagent(
   return { final: result.final, steps: result.steps }
 }
 
-/** Summarizes a visible thinking trace in Japanese (the Summarizer role). */
+/** The language summaries are written in when the UI has not said: the OS locale. */
+export function defaultSummaryLocale(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale || 'en'
+  } catch {
+    return 'en'
+  }
+}
+
+/** A language's English name for an instruction ("Japanese"); the code itself when unknown. */
+function languageName(locale: string): string {
+  const code = locale.toLowerCase().split(/[-_]/)[0] || 'en'
+  try {
+    return new Intl.DisplayNames(['en'], { type: 'language' }).of(code) ?? code
+  } catch {
+    return code
+  }
+}
+
+/** Script checks for languages a model may silently answer in English instead. */
+const SCRIPT_OF: Record<string, RegExp> = {
+  ja: /[぀-ヿ]/,
+  zh: /[一-鿿]/,
+  ko: /[가-힯]/,
+  ru: /[Ѐ-ӿ]/,
+  ar: /[؀-ۿ]/,
+  hi: /[ऀ-ॿ]/,
+  th: /[฀-๿]/,
+}
+
+/** Summarizes a visible thinking trace in the UI's language (the Summarizer role). */
 export async function summarizeThinking(
   config: HarnessConfig,
   text: string,
   sessionId?: string,
   signal?: AbortSignal,
+  locale: string = defaultSummaryLocale(),
 ): Promise<string> {
   const trace = text.trim()
   if (!trace) return ''
-  if (config.summarizerRole.provider === 'mock') return 'モックの思考要約です。'
+  const code = locale.toLowerCase().split(/[-_]/)[0] || 'en'
+  if (config.summarizerRole.provider === 'mock') return code === 'ja' ? 'モックの思考要約です。' : 'Mock thinking summary.'
+  const language = languageName(locale)
   const provider = createProvider(config.summarizerRole, config.workspaceRoot, sessionId)
   // The UI shows a provisional summary immediately; this refinement must not
   // spend time on a reasoning phase. Helper roles (summarizer, title,
@@ -1095,14 +1128,18 @@ export async function summarizeThinking(
     [
       {
         role: 'system',
-        content:
-          'コーディングエージェントの思考ログを、日本語の平文1〜3文に要約する。\n' +
-          '敬語は使わず「〜だ。〜する。〜が分かった。」のように、簡潔でフランクに書く。\n' +
-          'JSON、Markdown、箇条書き、見出し、コードフェンス、引用符は禁止。\n' +
-          '入力が英語・中国語でも日本語にする。\n' +
-          '入力のJSONキーや値、ファイルパス、コマンドをそのまま列挙しない。\n' +
-          '推測や新しい方針を追加しない。\n' +
-          '例: 主要なファイルを確認して構成を把握する。次に実装状況を短くまとめる。',
+        content: code === 'ja'
+          // The user's own wording for Japanese summaries (2026-11): plain, blunt style.
+          ? 'エージェントの思考ログを、日本語の平文1〜3文に要約する。\n' +
+            '敬語は使わず「〜だ。〜する。〜が分かった。」のように、簡潔でフランクに書く。\n' +
+            'JSON、Markdown、箇条書き、見出し、コードフェンス、引用符は禁止。\n' +
+            '入力が英語・中国語でも日本語にする。\n' +
+            '入力のJSONキーや値、ファイルパス、コマンドをそのまま列挙しない。\n' +
+            '推測や新しい方針を追加しない。\n' +
+            '例: 主要なファイルを確認して構成を把握する。次に実装状況を短くまとめる。'
+          : `Summarize an agent's thinking log in 1-3 plain sentences of ${language}, whatever language the log is in.\n` +
+            'Be brief and direct. No JSON, Markdown, lists, headings, code fences or quotation marks.\n' +
+            'Do not list JSON keys or values, file paths or commands verbatim. Add no guesses or new plans.',
       },
       { role: 'user', content: trace.slice(0, 6_000) },
     ],
@@ -1110,23 +1147,25 @@ export async function summarizeThinking(
   )
   let summary = cleanThinkingSummary(completion.content)
   if (!summary) throw new Error('summarizer returned an empty summary')
-  if (!hasJapanese(summary)) {
+  const script = SCRIPT_OF[code]
+  if (script && !script.test(summary)) {
     // The model ignored the language instruction; translate once instead of
-    // showing an English/Chinese sentence under a "要約" label.
+    // showing a sentence in another language under the summary label.
     const translated = await provider.complete(
       [
         {
           role: 'system',
-          content:
-            '次の文章を、敬語を使わない簡潔な日本語に翻訳する。JSON、見出し、前置き、引用符は使わず、翻訳本文だけを返す。',
+          content: code === 'ja'
+            ? '次の文章を、敬語を使わない簡潔な日本語に翻訳する。JSON、見出し、前置き、引用符は使わず、翻訳本文だけを返す。'
+            : `Translate the following text into concise ${language}. Return only the translation: no JSON, headings, preface or quotation marks.`,
         },
         { role: 'user', content: summary.slice(0, 4_000) },
       ],
       options,
     )
     const clean = cleanThinkingSummary(translated.content)
-    if (clean && hasJapanese(clean)) summary = clean
-    else throw new Error('summarizer returned a non-Japanese summary')
+    if (clean && script.test(clean)) summary = clean
+    else throw new Error(`summarizer returned a summary not in ${language}`)
   }
   return summary
 }
