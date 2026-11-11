@@ -8,6 +8,7 @@ import { Ledger, discoverPinned } from './ledger.js'
 import type { SkillInfo } from './skills.js'
 import type { MemoryStore } from './memory.js'
 import { validate, type Schema, type ToolSpec } from './tool-registry.js'
+import { TurnProgress, stallNote, verificationNudge, verificationNoticeText } from './progress.js'
 import { announcesNextStep, embedsCallInProse, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverMalformedCall, recoverTemplateCall, recoverUnwrappedBatch, rememberToolNames } from './reply-guard.js'
 import { steerMessage, type SteerInbox } from './steering.js'
 import { classifyDenial, type DenialInfo } from './denial.js'
@@ -116,6 +117,17 @@ export interface AgentOptions {
   announcePatterns?: readonly string[]
   /** Safety cap on the steps of one turn (default: no cap). */
   maxSteps?: number
+  /**
+   * Send a final answer that follows an unchecked code edit back once, asking
+   * for a check or an explicit "not verified" (default true).
+   */
+  verifyGate?: boolean
+  /**
+   * Consecutive steps with no successful edit and no new tool result before the
+   * first change-of-approach note; the second note comes at twice this and the
+   * turn stops at three times (default 8, 0 turns it off).
+   */
+  stallSteps?: number
   workMode?: () => WorkMode
   /** How the agent involves the user (session context, like the work mode). */
   interactionMode?: () => InteractionMode
@@ -710,8 +722,14 @@ export class Agent {
     const stepHistory: string[] = []
     const unchanged = new Map<string, { result: string; count: number; step: number }>()
     let blockedSteps = 0
+    const progress = new TurnProgress(this.options.stallSteps ?? 8)
+    // Set once a final answer after an unchecked edit was sent back.
+    let verifyNudged = false
     const failReply = (step: number, reason: string, detail: string, assistantAdded = true): AgentResult => {
-      const final = `The task is incomplete: ${detail}. The failed calls did not run; earlier results and changes are preserved.`
+      // A stall ran its calls; every other failure here stopped before running them.
+      const final = reason === 'no-progress'
+        ? `The task is incomplete: ${detail}. The turn was stopped; results and changes so far are preserved.`
+        : `The task is incomplete: ${detail}. The failed calls did not run; earlier results and changes are preserved.`
       messages.push({ role: 'user', content: final })
       this.options.sessionLog.append('turn/failure', { step, reason, ...replay(messages, assistantAdded) })
       this.options.sessionLog.append('turn/end', { status: 'stalled', reason })
@@ -748,6 +766,7 @@ export class Agent {
       if (instructions.some((message) => message.interrupt !== false)) {
         unchanged.clear()
         blockedSteps = 0
+        progress.resetStall()
         brokenRetried = false
         limitedRetried = false
         invalidTextRetried = false
@@ -1160,6 +1179,19 @@ export class Agent {
         continue
       }
 
+      // A final answer right after a code edit that nothing has checked: send it
+      // back once. The model either runs a check or says what is unverified; a
+      // second final is accepted either way (the summary below records which).
+      const unchecked = !calls && action && typeof action.final === 'string' && !objectiveMode ? progress.uncheckedEdits() : []
+      if (unchecked.length > 0 && this.options.verifyGate !== false && !verifyNudged && !lastStepDelegated && !this.options.allowWaitingReply?.()) {
+        verifyNudged = true
+        messages.push(reply(content))
+        messages.push({ role: 'user', content: verificationNudge(unchecked) })
+        this.options.sessionLog.append('turn/nudge', { step, reason: 'final-without-verification', files: unchecked.slice(0, 20), ...replay(messages, false) })
+        this.options.onEvent?.({ type: 'retry', step, reason: 'final-without-verification', content: truncate(String(action!.final), 2_000) })
+        continue
+      }
+
       if (!calls && action && typeof action.final === 'string') {
         if (objectiveMode) {
           // A text-only reply is not a claim (OQ-4): one nudge, then a stall.
@@ -1179,9 +1211,10 @@ export class Agent {
           this.options.sessionLog.append('turn/nudge', { step, reason: 'final-without-claim', ...replay(messages, false) })
           continue
         }
+        const verification = this.recordVerification(progress)
         this.options.sessionLog.append('turn/end', { status: 'completed' })
         messages.push(reply(content))
-        this.options.onEvent?.({ type: 'final', content: action.final })
+        this.options.onEvent?.({ type: 'final', content: action.final, ...(verification ? { verification } : {}) })
         return { outcome: 'final', final: action.final, steps: step, usage, history: messages.slice(1) }
       }
 
@@ -1205,6 +1238,8 @@ export class Agent {
         }
         lastStepDelegated = outcomes.some((o) => o.ok && DELEGATING_TOOLS.has(o.call.tool))
         performedToolCalls += calls.length
+        const stall = progress.record(step, outcomes)
+        if (stall.level > 0) this.options.sessionLog.append('guard/stall', { step, steps: stall.steps, level: stall.level })
         // WP-30: `read_image` hands the bytes over out of band. They ride on the
         // tool-result message, so the assistant/user alternation (and the mock's
         // request shape) stays exactly as before.
@@ -1220,13 +1255,15 @@ export class Agent {
           loopNote = cycleReminder(tools, cycle.times, failing)
           this.options.sessionLog.append('guard/cycle', { tools, period: cycle.period, times: cycle.times, failing })
         }
-        const waitingHint = (reminder || loopNote) && this.options.allowWaitingReply?.()
+        const waiting = this.options.allowWaitingReply?.() === true
+        const waitingHint = (reminder || loopNote || stall.level > 0) && waiting
           ? '\n[waiting hint] Async workers are currently active. Stop calling tools to poll or fill time—reply briefly in plain text without tool calls to end this turn and wait for automatic wakeup.'
           : ''
+        const stallHint = !waiting && (stall.level === 1 || stall.level === 2) ? stallNote(stall, this.options.ask === true) : ''
         // The step's native calls, matched one to one with its results.
         const structuredCalls = historyCalls?.length === outcomes.length ? historyCalls : undefined
         const parts = outcomes.map((o, i) => {
-          const tail = i === outcomes.length - 1 ? reminder + loopNote + waitingHint : ''
+          const tail = i === outcomes.length - 1 ? reminder + loopNote + stallHint + waitingHint : ''
           const output = o.output + tail
           this.options.sessionLog.append('tool/result', {
             callId: o.callId,
@@ -1271,9 +1308,13 @@ export class Agent {
             return failReply(step, 'tool-no-progress', 'repeated tool calls produced no new result', false)
           }
         }
+        if (stall.level === 3 && !waiting && !this.options.steer?.hasInterrupt()) {
+          return failReply(step, 'no-progress', `${stall.steps} consecutive steps made no progress (no successful edit and no new tool result)`, false)
+        }
         // claim_complete, directly or from a run_code script, ends the session.
         const claim = this.options.tools.takeClaim()
         if (claim !== undefined) {
+          this.recordVerification(progress)
           this.options.sessionLog.append('objective/claim', { summary: claim })
           this.options.sessionLog.append('turn/end', { status: 'completed' })
           this.options.onEvent?.({ type: 'final', content: claim })
@@ -1291,6 +1332,14 @@ export class Agent {
       this.options.onEvent?.({ type: 'retry', step, reason: 'missing-tool-or-final', content: truncate(content, 2_000) })
     }
 
+  }
+
+  /** Logs the turn's verification summary; returns the GUI notice for it. */
+  private recordVerification(progress: TurnProgress): { text: string; level: 'info' | 'warn' } | undefined {
+    const summary = progress.summary()
+    if (summary.editedFiles.length === 0 && summary.checks.length === 0) return undefined
+    this.options.sessionLog.append('turn/verification', { ...summary })
+    return verificationNoticeText(summary)
   }
 
   /**

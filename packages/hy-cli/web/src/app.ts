@@ -849,6 +849,12 @@ function localizeNotice(text: string): string {
   if (text.startsWith('compacted ')) return `${tr('compacted')} ${text.slice(10)}`
   const effort = /^reasoning effort: (.+)$/.exec(text)
   if (effort) return tr('effortSet', { effort: effort[1] === 'provider default' ? tr('effortDefault') : tr(`effort_${effort[1]}`) })
+  const checked = /^Checked after the last edit: (.*)$/s.exec(text)
+  if (checked) return tr('verifiedAfterEdit', { detail: checked[1] ?? '' })
+  const checkFailed = /^Last check failed: (.*)$/s.exec(text)
+  if (checkFailed) return tr('lastCheckFailed', { detail: checkFailed[1] ?? '' })
+  const unverified = /^Not verified after the last edit: (.*)$/s.exec(text)
+  if (unverified) return tr('notVerifiedAfterEdit', { files: unverified[1] ?? '' })
   const steerLate = /^steering message arrived after the last step \((\d+)\)/.exec(text)
   if (steerLate) return tr('steerLate', { count: steerLate[1] ?? '' })
   return text

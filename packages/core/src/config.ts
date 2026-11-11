@@ -171,6 +171,18 @@ export function configuredExtraRoots(
 /** Whether the model's reasoning stays in the conversation it is sent. */
 export type ReasoningHistory = 'none' | 'full'
 
+/** Harness-side progress controls applied to every agent turn. */
+export interface GuardsConfig {
+  /** Send a final answer that follows an unchecked code edit back once (default true). */
+  verifyGate?: boolean
+  /**
+   * Steps in a row without a successful edit or a new tool result before the
+   * first change-of-approach note; twice this gives a second note and three
+   * times stops the turn (default 8, 0 = off).
+   */
+  stallSteps?: number
+}
+
 export interface HarnessConfig {
   workspaceRoot: string
   /** Primary (`main`) plus explicitly added roots. */
@@ -234,6 +246,8 @@ export interface HarnessConfig {
    * built-in detection is Japanese and English; users add their language here.
    */
   announcePatterns: string[]
+  /** Harness-side progress controls (see `GuardsConfig`). */
+  guards: Required<GuardsConfig>
   ptc: boolean
   projectTrusted: boolean
   protectedPaths: string[]
@@ -437,6 +451,7 @@ interface UserConfigFile {
    * step (the built-in detection covers Japanese and English).
    */
   announcePatterns?: string[]
+  guards?: GuardsConfig
   /**
    * Models the user registered. The harness ships no per-model facts (context
    * window, price, API quirks): they change over time. Entries here supply the
@@ -1093,6 +1108,12 @@ export function loadConfig(overrides: CliOverrides = {}): HarnessConfig {
     promptVariant: user?.promptVariant === 'lean' || user?.promptVariant === 'legacy' || user?.promptVariant === 'lean2' || user?.promptVariant === 'lean3' ? user.promptVariant : 'lean4',
     richToolDocs: user?.richToolDocs !== false,
     announcePatterns: (user?.announcePatterns ?? []).filter((pattern) => typeof pattern === 'string' && pattern.trim().length > 0),
+    guards: {
+      verifyGate: user?.guards?.verifyGate !== false,
+      stallSteps: typeof user?.guards?.stallSteps === 'number' && Number.isFinite(user.guards.stallSteps) && user.guards.stallSteps >= 0
+        ? Math.floor(user.guards.stallSteps)
+        : 8,
+    },
     ptc: overrides.ptc ?? process.env.HY_PTC === '1',
     projectTrusted: trusted,
     protectedPaths: project?.protectedPaths ?? [],

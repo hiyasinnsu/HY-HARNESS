@@ -1051,6 +1051,8 @@ async function runSubagent(
     promptVariant: config.promptVariant,
     richToolDocs: config.richToolDocs,
     announcePatterns: config.announcePatterns,
+    verifyGate: config.guards.verifyGate,
+    stallSteps: config.guards.stallSteps,
     workMode: () => o.workMode,
     interactionMode: () => o.interactionMode,
     ...(subagentRole.temperature !== undefined ? { temperature: subagentRole.temperature } : {}),
@@ -1641,6 +1643,8 @@ export class Conversation {
         reasoningHistory: config.reasoningHistory,
         richToolDocs: config.richToolDocs,
         announcePatterns: config.announcePatterns,
+        verifyGate: config.guards.verifyGate,
+        stallSteps: config.guards.stallSteps,
         // The compactor may replay this request's native prefix only when it
         // goes to the same route with the same credentials; which providers
         // keep a prefix cache is their business (the structural match is what

@@ -1,4 +1,5 @@
-import type { AgentEvent, SessionEvent } from '../../core/dist/index.js'
+import type { AgentEvent, SessionEvent, VerificationSummary } from '../../core/dist/index.js'
+import { verificationNoticeText } from '../../core/dist/index.js'
 import { cleanThinkingSummary, instantThinkingSummary } from './summary-text.js'
 
 export interface ChatToolEntry {
@@ -247,6 +248,13 @@ export function projectChat(events: readonly SessionEvent[], runId: string): Cha
     switch (e.type) {
       case 'turn/failure': {
         if (typeof p.nudge === 'string') entries.push({ id: `failure-${e.seq}`, kind: 'notice', runId, text: p.nudge, ts, level: 'warn' })
+        break
+      }
+      // What the turn changed and whether a check ran after the last change,
+      // from the tool results rather than the model's own account.
+      case 'turn/verification': {
+        const notice = verificationNoticeText(p as unknown as VerificationSummary)
+        if (notice) entries.push({ id: `verification-${e.seq}`, kind: 'notice', runId, text: notice.text, ts, level: notice.level })
         break
       }
       case 'orchestration/dialogue': {
@@ -581,8 +589,11 @@ export function applyAgentEvent(entries: ChatEntry[], runId: string, event: Agen
     case 'final': {
       const text = String(event.content ?? '')
       const last = entries.at(-1)
-      if (last?.kind === 'assistant' && last.text === text) break
-      entries.push({ id: `final-${ts}-${entries.length}`, kind: 'assistant', runId, text, ts, final: true })
+      if (!(last?.kind === 'assistant' && last.text === text)) entries.push({ id: `final-${ts}-${entries.length}`, kind: 'assistant', runId, text, ts, final: true })
+      const verification = event.verification as { text?: unknown; level?: unknown } | undefined
+      if (verification && typeof verification.text === 'string') {
+        entries.push({ id: `verification-${ts}-${entries.length}`, kind: 'notice', runId, text: verification.text, ts, level: verification.level === 'warn' ? 'warn' : 'info' })
+      }
       break
     }
     case 'retry':
