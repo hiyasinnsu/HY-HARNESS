@@ -52,3 +52,18 @@ node bench/harness/report.mjs bench/results/<stamp>
 - 作業フォルダーは exFAT の F: にある。git は所有者を確認できないため、子プロセスにだけ `safe.directory=*` を渡している。
 - C: のユーザープロファイル配下では、HY のサンドボックスが AppContainer の ACE で起動できない。そのため既定の作業フォルダーを F: にしている。
 - 同じモデルでも 1 回ごとのばらつきが大きいので、比較は信頼区間で行う。区間が重なる差は「差がある」とは言えない。
+
+## Replaying saved sessions (no model, no API cost)
+
+`pnpm eval:replay <session.v1.jsonl> [...] [--json] [--run <runId>]` replays
+every agent run in the given session logs through the current agent loop: the
+model's recorded replies are served in order and the tools return their
+recorded results. It reports, per run, whether the current code makes the same
+decisions (run these tools, send a reply back for a reason, stop, finish) as the
+logged run, and the first step where it does not.
+
+Use it before and after changing a reply guard, a loop guard or the
+verification gate, on logs that showed the problem and on logs that did not. A
+divergence is where the change acts on real history; read the two decisions to
+judge it. Runs whose rejected reply was never logged, or that compacted, are
+replayed up to that point and counted as `unreplayable`.
