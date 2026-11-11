@@ -151,6 +151,7 @@ import {
   type WorkerStatus,
 } from './orchestration.js'
 import { turnEndCause } from './turn-cause.js'
+import { WarmupChain } from './worker-warmup.js'
 import {
   beginTurn,
   clearQueuedTurns,
@@ -2263,6 +2264,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       }
     }
     if (event.type === 'step-end' || event.type === 'final') broadcast(session, { type: 'state', state: sessionState(session) })
+    if (event.type === 'step-end' || event.type === 'final') releaseWorkerWarmup(session.runId)
   }
 
   const resolvePending = (session: WebSession, keepQuestions = false): void => {
@@ -2890,6 +2892,11 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     return active
   }
 
+  // B4: see WarmupChain.
+  const workerWarmup = new WarmupChain()
+  const holdWorkerWarmup = (runId: string) => workerWarmup.hold(runId)
+  const releaseWorkerWarmup = (runId: string) => workerWarmup.release(runId)
+
   async function spawnWorker(title: string, task: string, rawScope: string[], required: string[] = []) {
     const active = activeOrchestration()
     if (!active) throw new Error('orchestration is not active')
@@ -2928,14 +2935,20 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     active.workers.push(record)
     updateWorker(record, { status: 'queued' })
     const message = workerTaskMessage(record)
-    setTimeout(() => {
+    // B4: wait (briefly) for the previous new worker's first response.
+    const warm = holdWorkerWarmup(record.runId)
+    setTimeout(async () => {
+      await warm
       const worker = ensureSession(record.runId)
-      if (!worker || record.status !== 'queued' || activeOrchestration()?.id !== active.id) return
+      if (!worker || record.status !== 'queued' || activeOrchestration()?.id !== active.id) {
+        releaseWorkerWarmup(record.runId)
+        return
+      }
       updateWorker(record, { status: 'running' })
       void runTurn(worker, message, [], { synthetic: true, source: 'orchestrator', from: 'orchestrator' }).catch((error: unknown) => {
         updateWorker(record, { status: 'failed', lastError: errorMessage(error) })
         queueOrchestratorNotice(workerReportMessage(record, errorMessage(error)))
-      })
+      }).finally(() => releaseWorkerWarmup(record.runId))
     }, 0)
     return {
       ...workerCard(record),
