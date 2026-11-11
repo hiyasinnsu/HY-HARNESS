@@ -47,3 +47,14 @@ test('C1: a done report gets what the worker\'s tool results show, and a concern
   assert.match(stale.lines[0]!, /no file edits or checks recorded/)
   assert.equal(stale.concern, undefined)
 })
+
+test('D2: common failures come with the next step to take', async () => {
+  const { turnErrorHint } = await import('./turn-cause.js')
+  assert.match(turnErrorHint({ kind: 'provider', detail: 'HTTP 401' })!, /API key/)
+  assert.match(turnErrorHint({ kind: 'provider', detail: 'HTTP 402' })!, /no credit/)
+  assert.match(turnErrorHint({ kind: 'provider', detail: 'HTTP 429' })!, /rate limiting/)
+  assert.match(turnErrorHint({ kind: 'provider', detail: 'HTTP 503' })!, /failed on its side/)
+  assert.match(turnErrorHint({ kind: 'context-overflow' })!, /\/compact/)
+  assert.equal(turnErrorHint({ kind: 'provider', detail: 'HTTP 400' }), undefined)
+  assert.equal(turnErrorHint({ kind: 'error' }), undefined)
+})

@@ -150,7 +150,7 @@ import {
   type WorkerRecord,
   type WorkerStatus,
 } from './orchestration.js'
-import { turnEndCause } from './turn-cause.js'
+import { turnEndCause, turnErrorHint } from './turn-cause.js'
 import { WarmupChain } from './worker-warmup.js'
 import {
   beginTurn,
@@ -3541,11 +3541,13 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       if (options.queuedId !== undefined) finishQueuedTurn(session, options.queuedId, completed)
     } catch (error) {
       const aborted = controller.signal.aborted
-      const text = aborted ? 'run cancelled' : errorMessage(error)
-      session.lastError = text
       // C2: why the turn ended, so a paused goal or a stopped worker can be
       // explained after the fact (user cancel vs. budget vs. provider failure).
       const cause = turnEndCause(error, aborted ? session.abortReason : undefined)
+      // D2: an error says what to do next, not only what failed.
+      const hint = aborted ? undefined : turnErrorHint(cause)
+      const text = aborted ? 'run cancelled' : hint ? `${errorMessage(error)}\n${hint}` : errorMessage(error)
+      session.lastError = text
       conv.log.append('turn/error', { outcome: aborted ? 'aborted' : 'error', error: text, cause })
       // A cancelled or failed goal must not auto-continue. DSH pauses the
       // durable goal on cancellation; an explicit resume re-arms it.
