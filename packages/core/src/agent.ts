@@ -917,7 +917,8 @@ export class Agent {
       if (completion.outputLimited) {
         if (limitedRetried) return failReply(step, 'output-limit', 'the provider cut off two replies at its output limit', false)
         limitedRetried = true
-        retryReply('output-limit', 'The provider cut off your reply. None of its calls ran. Continue from the last confirmed result and send one smaller, complete action. Split large edits into separate calls.')
+        retryReply('output-limit', 'The provider cut off your reply at its output limit. None of its calls ran. Continue from the last confirmed result and send one smaller, complete action. ' +
+          'Split large edits into separate calls; write a large new file in parts: create it with the first part, then add each further part with its own edit.')
         continue
       }
       limitedRetried = false
