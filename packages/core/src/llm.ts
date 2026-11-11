@@ -18,7 +18,7 @@ import {
   type RawUsage,
 } from './llm-negotiate.js'
 import { estimateTokens } from './tokens.js'
-import { redactGitHubSecrets } from './github.js'
+import { redactSecrets } from './secret-scan.js'
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -1903,18 +1903,20 @@ function modelPricing(role: RoleConfig): RoleConfig['pricing'] | undefined {
 }
 
 /**
- * A message with GitHub credentials masked in every part the adapters send:
+ * A message with credentials (E1: GitHub and other providers' tokens, private
+ * keys, URL and header credentials, the harness's own key values) masked in
+ * every part the adapters send:
  * the text, the reasoning, and the structured calls and results (which repeat
  * the text and would otherwise carry the credential past the mask). Other
  * fields (provider continuation, images) are kept.
  */
 export function redactMessage(message: ChatMessage): ChatMessage {
-  const content = redactGitHubSecrets(message.content)
-  const reasoning = message.reasoning === undefined ? undefined : redactGitHubSecrets(message.reasoning)
+  const content = redactSecrets(message.content)
+  const reasoning = message.reasoning === undefined ? undefined : redactSecrets(message.reasoning)
   let toolCalls = message.toolCalls
   if (toolCalls) {
     try {
-      const masked = toolCalls.map((call) => ({ ...call, args: JSON.parse(redactGitHubSecrets(JSON.stringify(call.args ?? {}))) as unknown }))
+      const masked = toolCalls.map((call) => ({ ...call, args: JSON.parse(redactSecrets(JSON.stringify(call.args ?? {}))) as unknown }))
       toolCalls = JSON.stringify(masked) === JSON.stringify(toolCalls) ? toolCalls : masked
     } catch {
       // The masked arguments are not JSON: the step goes back as (masked) text.
@@ -1922,8 +1924,8 @@ export function redactMessage(message: ChatMessage): ChatMessage {
     }
   }
   const toolResults = message.toolResults && {
-    rendered: redactGitHubSecrets(message.toolResults.rendered),
-    entries: message.toolResults.entries.map((entry) => ({ ...entry, text: redactGitHubSecrets(entry.text) })),
+    rendered: redactSecrets(message.toolResults.rendered),
+    entries: message.toolResults.entries.map((entry) => ({ ...entry, text: redactSecrets(entry.text) })),
   }
   const resultsChanged = toolResults !== undefined &&
     (toolResults.rendered !== message.toolResults!.rendered || toolResults.entries.some((entry, i) => entry.text !== message.toolResults!.entries[i]!.text))

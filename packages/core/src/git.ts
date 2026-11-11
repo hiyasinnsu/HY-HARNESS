@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
+import { findSecrets } from './secret-scan.js'
 import { buildGitAuthEnv, parseGitHubRepo, redactGitHubSecrets, withoutGitHubCredentials, type GitHubRepoRef } from './github.js'
 
 const exec = promisify(execFile)
@@ -177,6 +178,8 @@ export async function gitCommit(cwd: string, paths: string[], message: string, t
   if (!paths.length || !message.trim()) throw new Error('Provide the commit message and exact repository-relative paths from git_status.')
   const root = fs.realpathSync.native(cwd)
   if (redactGitHubSecrets(message, token) !== message) throw new Error('The commit message contains a GitHub credential.')
+  const inMessage = findSecrets(message)
+  if (inMessage.length) throw new Error(`The commit message contains a credential (${inMessage.join(', ')}).`)
   for (const file of paths) {
     if (!file || file.startsWith(':') || path.isAbsolute(file) ||
         file.split(/[\\/]/).some((part) => !part || ['.', '..', '.git', '.hy-harness'].includes(part.toLowerCase()))) {
@@ -191,6 +194,10 @@ export async function gitCommit(cwd: string, paths: string[], message: string, t
     }
     const text = await fs.promises.readFile(real, 'utf8')
     if (redactGitHubSecrets(text, token) !== text) throw new Error(`Remove the GitHub credential from ${file} before committing it.`)
+    // E2: any other credential the harness recognizes blocks the commit too;
+    // the model is told the kind, never the value.
+    const found = findSecrets(text)
+    if (found.length) throw new Error(`Remove the credential (${found.join(', ')}) from ${file} before committing it, or commit it yourself if it is intentional.`)
   }
   // Literal pathspecs preserve the selected set and leave other staged work alone.
   await git(cwd, ['--literal-pathspecs', 'add', '--', ...paths], signal)
