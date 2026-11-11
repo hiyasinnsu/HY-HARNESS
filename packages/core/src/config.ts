@@ -109,7 +109,9 @@ export function roleSupportsImages(role: RoleConfig): boolean {
   if (role.provider === 'mock') return true
   // The Gemini adapter rejects image messages (it does not send them yet).
   if (role.provider === 'gemini') return false
-  // A local model's name is the only signal before the first request.
+  // Ollama: `catalogVision` above already holds what the server reported
+  // (`/api/show` capabilities, read by `discoverModelLimits`). Until it has
+  // answered, the name is the only hint; an older server never answers.
   if (role.provider === 'ollama') return /(llava|vision|-vl\b|vl:|gemma3|minicpm-v|pixtral|qwen2?\.?5-vl)/i.test(role.model)
   // Every other adapter sends image parts; an endpoint that refuses them says
   // so on the request, which is clearer than guessing per model.
@@ -583,8 +585,10 @@ function readJson<T>(file: string): T | undefined {
 }
 
 /**
- * Old OpenCode Go profiles used the DeepSeek-direct model name. The gateway
- * rejects it with HTTP 400 "Model is unavailable", so map it while loading.
+ * A migration of names this harness itself once wrote: old OpenCode Go
+ * profiles saved the DeepSeek-direct default name, which the gateway rejects.
+ * Not a model rule — whether a model is offered is asked of the endpoint's
+ * own listing (`endpointOffersModel`).
  */
 const OPENCODE_MODEL_ALIASES: Record<string, string> = {
   'deepseek-flash': 'deepseek-v4.1-flash',
@@ -599,11 +603,6 @@ function isOpenCodeBaseUrl(baseUrl: string | undefined): boolean {
   } catch {
     return false
   }
-}
-
-export function isUnavailableOpenCodeGoModel(baseUrl: string | undefined, model: string): boolean {
-  return model === 'gemini-3.8-flash' && baseUrl !== undefined && isOpenCodeBaseUrl(baseUrl) &&
-    new URL(baseUrl).pathname.startsWith('/inference/go/')
 }
 
 function normalizeOpenCodeRole(role: RoleConfig): void {
@@ -639,6 +638,35 @@ export function applyModelLimits(role: RoleConfig, explicit: { contextWindowToke
     if (listed?.maxOutputTokens !== undefined) role.maxOutputTokens = listed.maxOutputTokens
     else if (unknown) role.maxOutputTokens = Math.min(role.maxOutputTokens, UNKNOWN_MODEL_OUTPUT_TOKENS)
   }
+}
+
+/** A provider's default role (its default model, endpoint and limits). */
+export function defaultRoleFor(provider: ProviderKind): RoleConfig {
+  return defaultRole(provider)
+}
+
+/**
+ * The limits to use for `role.model`: the registry entry, else what the
+ * provider's own listing states (`discover`), else the provider default for
+ * its default model, else the conservative values for an unknown model.
+ */
+export async function resolveModelLimits(
+  role: RoleConfig,
+  discover: (role: RoleConfig) => Promise<{ contextWindowTokens?: number; maxOutputTokens?: number }>,
+): Promise<{ contextWindowTokens: number; maxOutputTokens: number; source: 'registry' | 'endpoint' | 'default' | 'assumed' }> {
+  const listed = findModel(role.provider, role.model)
+  if (listed?.contextWindowTokens !== undefined && listed.maxOutputTokens !== undefined) {
+    return { contextWindowTokens: listed.contextWindowTokens, maxOutputTokens: listed.maxOutputTokens, source: 'registry' }
+  }
+  const probe: RoleConfig = { ...defaultRole(role.provider), ...role }
+  applyModelLimits(probe, {})
+  const found = await discover(role)
+  if (found.contextWindowTokens !== undefined) {
+    const output = found.maxOutputTokens ?? Math.min(UNKNOWN_MODEL_OUTPUT_TOKENS, Math.floor(found.contextWindowTokens / 4))
+    return { contextWindowTokens: found.contextWindowTokens, maxOutputTokens: Math.min(output, found.contextWindowTokens), source: 'endpoint' }
+  }
+  const isDefault = role.model === defaultRole(role.provider).model
+  return { contextWindowTokens: probe.contextWindowTokens, maxOutputTokens: probe.maxOutputTokens, source: isDefault ? 'default' : 'assumed' }
 }
 
 function defaultRole(provider: ProviderKind): RoleConfig {
@@ -726,10 +754,12 @@ function defaultRole(provider: ProviderKind): RoleConfig {
   }
 }
 
+/** Every provider adapter kind. */
+export const PROVIDER_KINDS: ReadonlySet<string> = new Set<ProviderKind>(['ollama', 'deepseek', 'openai-compatible', 'openai-responses', 'opencode', 'gemini', 'anthropic', 'mock'])
+
 function envProvider(): ProviderKind | undefined {
   const v = process.env.HY_PROVIDER
-  const kinds: readonly ProviderKind[] = ['ollama', 'deepseek', 'openai-compatible', 'openai-responses', 'opencode', 'gemini', 'anthropic', 'mock']
-  return kinds.find((kind) => kind === v)
+  return v !== undefined && PROVIDER_KINDS.has(v) ? (v as ProviderKind) : undefined
 }
 
 export function findRustxngBinary(harnessRoot: string, customPath?: string): string | undefined {

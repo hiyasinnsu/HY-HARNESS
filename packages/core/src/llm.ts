@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { roleApiKey, type RoleConfig } from './config.js'
 import { isSteerMessage, steerText } from './steering.js'
-import { catalogForRole, effortWithToolsFor, reasoningEchoFor, temperatureAllowedFor, tokenFieldFor } from './model-catalog.js'
+import { catalogForRole, effortWithToolsFor, reasoningEchoFor, rememberReportedVision, temperatureAllowedFor, tokenFieldFor } from './model-catalog.js'
 import {
   learnFromError,
   negotiatedEffort,
@@ -1736,6 +1736,93 @@ export function parseOpenAiResponses(text: string): Completion {
  * is not limited to the catalog or the user's config. Mock has no endpoint.
  */
 export async function listProviderModels(role: RoleConfig): Promise<string[]> {
+  const names = (await fetchModelEntries(role)).map((entry) => entry.id)
+  return [...new Set(names)].sort()
+}
+
+/** A model as the provider's own listing describes it (limits when it states them). */
+export interface DiscoveredModel {
+  id: string
+  contextWindowTokens?: number
+  maxOutputTokens?: number
+}
+
+function positiveInt(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const n = typeof value === 'string' ? Number(value) : value
+    if (typeof n === 'number' && Number.isInteger(n) && n > 0) return n
+  }
+  return undefined
+}
+
+/**
+ * Reads the limits a listing entry states, whatever the server calls them:
+ * OpenRouter `context_length` / `top_provider.max_completion_tokens`, vLLM
+ * `max_model_len`, LM Studio `max_context_length`, Gemini `inputTokenLimit` /
+ * `outputTokenLimit`, and the plain `context_window` / `max_output_tokens`.
+ */
+export function modelEntryLimits(entry: Record<string, unknown>): Omit<DiscoveredModel, 'id'> {
+  const top = (entry.top_provider && typeof entry.top_provider === 'object' ? entry.top_provider : {}) as Record<string, unknown>
+  const context = positiveInt(entry.context_length, entry.max_model_len, entry.context_window, entry.max_context_length, entry.inputTokenLimit, entry.max_input_tokens, top.context_length)
+  const output = positiveInt(entry.max_output_tokens, entry.max_completion_tokens, entry.outputTokenLimit, top.max_completion_tokens)
+  return { ...(context ? { contextWindowTokens: context } : {}), ...(output ? { maxOutputTokens: output } : {}) }
+}
+
+/**
+ * The limits the provider itself states for `model`, or `{}` when it states
+ * none (or cannot be reached). Used when the user picks a model the registry
+ * does not describe, instead of a table of model names kept in the harness.
+ */
+export async function discoverModelLimits(role: RoleConfig): Promise<Omit<DiscoveredModel, 'id'>> {
+  try {
+    if (role.provider === 'ollama') {
+      const base = (role.baseUrl ?? 'http://127.0.0.1:11434').replace(/\/+$/, '')
+      const response = await fetch(`${base}/api/show`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: role.model }), signal: AbortSignal.timeout(10_000) })
+      if (!response.ok) return {}
+      const body = (await response.json()) as { model_info?: Record<string, unknown>; capabilities?: unknown }
+      // Newer servers list what the model takes ("completion", "tools", "vision", "thinking").
+      if (Array.isArray(body.capabilities)) rememberReportedVision(role.provider, role.model, body.capabilities.includes('vision'))
+      const key = Object.keys(body.model_info ?? {}).find((name) => name.endsWith('.context_length'))
+      const context = key ? positiveInt(body.model_info![key]) : undefined
+      return context ? { contextWindowTokens: context } : {}
+    }
+    const entries = await cachedModelEntries(role)
+    const found = entries?.find((entry) => entry.id === role.model)
+    return found ? { ...(found.contextWindowTokens ? { contextWindowTokens: found.contextWindowTokens } : {}), ...(found.maxOutputTokens ? { maxOutputTokens: found.maxOutputTokens } : {}) } : {}
+  } catch {
+    return {}
+  }
+}
+
+const modelListCache = new Map<string, { at: number; entries: DiscoveredModel[] }>()
+
+/** The endpoint's listing, kept 5 minutes; undefined when it cannot be read. */
+async function cachedModelEntries(role: RoleConfig): Promise<DiscoveredModel[] | undefined> {
+  if (role.provider === 'mock') return undefined
+  const key = `${role.provider}|${role.baseUrl ?? ''}`
+  const cached = modelListCache.get(key)
+  if (cached && Date.now() - cached.at <= 5 * 60_000) return cached.entries
+  try {
+    const entries = await fetchModelEntries(role)
+    modelListCache.set(key, { at: Date.now(), entries })
+    return entries
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether the endpoint lists `model`: true / false from its own listing,
+ * undefined when it has no listing or cannot be reached (then nothing is
+ * claimed). Replaces per-gateway lists of unavailable model names.
+ */
+export async function endpointOffersModel(role: RoleConfig, model: string): Promise<boolean | undefined> {
+  const entries = await cachedModelEntries(role)
+  if (!entries || entries.length === 0) return undefined
+  return entries.some((entry) => entry.id === model)
+}
+
+async function fetchModelEntries(role: RoleConfig): Promise<DiscoveredModel[]> {
   const base = (role.baseUrl ?? '').replace(/\/+$/, '')
   const key = role.provider === 'ollama' ? undefined : roleApiKey(role)
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -1766,18 +1853,20 @@ export async function listProviderModels(role: RoleConfig): Promise<string[]> {
     throw new LlmError(`could not list models from ${role.provider}: ${response.status} ${text.slice(0, 200)}`, response.status, text)
   }
   let body: {
-    data?: Array<{ id?: string; name?: string }>
-    models?: Array<{ name?: string; id?: string }>
+    data?: Array<Record<string, unknown>>
+    models?: Array<Record<string, unknown>>
   }
   try {
     body = JSON.parse(text) as typeof body
   } catch {
     throw new LlmError(`${role.provider} returned non-JSON for its model list`)
   }
-  const names = (body.data ?? body.models ?? [])
-    .map((entry) => (typeof entry.id === 'string' ? entry.id : typeof entry.name === 'string' ? entry.name : ''))
-    .filter((name) => name.length > 0)
-  return [...new Set(names)].sort()
+  return (body.data ?? body.models ?? []).flatMap((entry) => {
+    // Gemini lists `models/<id>`; the API takes the bare id.
+    const raw = typeof entry.id === 'string' ? entry.id : typeof entry.name === 'string' ? entry.name : ''
+    const id = role.provider === 'gemini' ? raw.replace(/^models\//, '') : raw
+    return id ? [{ id, ...modelEntryLimits(entry) }] : []
+  })
 }
 /**
  * The routing / cache key sent to providers that keep their prompt cache per

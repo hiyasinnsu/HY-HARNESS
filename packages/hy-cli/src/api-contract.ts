@@ -155,6 +155,7 @@ export const API_ROUTES: readonly RouteContract[] = [
   { method: 'GET', path: '/api/files/search', summary: 'Find files by name.', response: 'FileSearchResponse' },
   { method: 'GET', path: '/api/files/tree', summary: 'List a directory.', response: 'FileTreeResponse', errors: [400] },
   { method: 'GET', path: '/api/files', summary: 'Read one file.', response: 'FileResponse', errors: [400, 413, 415] },
+  { method: 'POST', path: '/api/model-limits', summary: "A model's limits: the registry, else the endpoint's own listing, else conservative values.", request: { provider: { type: 'string', required: true }, model: { type: 'string', required: true }, baseUrl: { type: 'string' }, apiKeyEnv: { type: 'string' } }, errors: [400] },
   { method: 'GET', path: '/api/settings', summary: 'User config and active settings.', response: 'SettingsResponse' },
   { method: 'PUT', path: '/api/settings', summary: 'Save settings.', request: { roles: { type: 'object' }, sandboxMode: { type: 'string' }, autoApprove: { type: 'boolean' }, fullAuto: { type: 'boolean' } }, errors: [400] },
   { method: 'GET', path: '/api/plugins', summary: 'Plugin catalog.', response: 'PluginCatalog' },

@@ -14,7 +14,11 @@ import {
   canonicalWorkspace,
   loadConfig,
   withModelBudget,
-  isUnavailableOpenCodeGoModel,
+  endpointOffersModel,
+  discoverModelLimits,
+  defaultRoleFor,
+  resolveModelLimits,
+  PROVIDER_KINDS,
   parseSandboxMode,
   readEvents,
   metricsSnapshot,
@@ -1092,6 +1096,13 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   const fence = createHostFence(host, options.trustedHosts ?? [])
   const scheme = secure ? 'https' : 'http'
   const { config, client } = await openClient(options.overrides, options.execServer)
+  // Ask local servers what their models take (vision), in the background.
+  const probeLocalModels = (): void => {
+    for (const role of [config.role, config.orchestratorRole, config.subagentRole]) {
+      if (role.provider === 'ollama') void discoverModelLimits(role)
+    }
+  }
+  probeLocalModels()
   // WP-62: opt-in tracing. `HY_OTEL_ENDPOINT` is the quick switch; the user
   // config's `telemetry` block is the durable one. Default is off.
   let telemetry: TelemetrySink = createTelemetrySink(resolveTelemetryConfig(undefined))
@@ -3582,6 +3593,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       else config.guardianRole = fresh.guardianRole
       config.compactorRole = fresh.compactorRole
       config.summarizerRole = fresh.summarizerRole
+      probeLocalModels()
       config.guardianApproveBelow = fresh.guardianApproveBelow
       config.autoApprove = fresh.autoApprove
       config.fullAuto = fresh.fullAuto
@@ -5064,14 +5076,19 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             }
             const roleName = session.kind === 'orchestrator' ? 'orchestrator' : 'worker'
             const configured = roleName === 'orchestrator' ? config.orchestratorRole : config.role
-            if (isUnavailableOpenCodeGoModel(configured.baseUrl, model)) {
-              json(res, 400, { error: `${model} is unavailable on OpenCode Go. Select a Go model or change the role provider in Settings.` })
+            // The endpoint's own model listing decides, not a list of names kept here.
+            if (await endpointOffersModel(configured, model) === false) {
+              json(res, 400, { error: `${model} is not offered by ${configured.baseUrl ?? configured.provider}. Select a model the endpoint lists, or change the role provider in Settings.` })
               return
             }
             const conversation = ensureConversation(session)
             const current = conversation.currentModel()
             const { path: settingsPath, user } = readUserConfigFile()
-            const limits = modelProfileLimits(user, current.provider, model)
+            // A model without a profile gets the registry's, the endpoint's or
+            // conservative limits, not the previous model's window.
+            const resolved = modelProfileLimits(user, current.provider, model) ??
+              await resolveModelLimits({ ...configured, model }, discoverModelLimits).then(({ contextWindowTokens, maxOutputTokens }) => ({ contextWindowTokens, maxOutputTokens }))
+            const limits = resolved
             if (body.save === true) {
               const roles = asRecord(user.roles) ?? {}
               roles[roleName] = { ...asRecord(roles[roleName]), provider: current.provider, model, ...limits }
@@ -5865,6 +5882,28 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
             content,
             truncated: false,
           })
+          return
+        }
+
+        // The limits of a model the user is about to pick: the registry, else the
+        // endpoint's own listing, else conservative values (never a table of names).
+        if (pathname === '/api/model-limits' && method === 'POST') {
+          const body = await readBody()
+          const provider = typeof body.provider === 'string' ? body.provider : ''
+          const model = typeof body.model === 'string' ? body.model.trim() : ''
+          if (!PROVIDER_KINDS.has(provider) || !model) {
+            json(res, 400, { error: 'provider and model are required' })
+            return
+          }
+          const configured = [config.role, config.orchestratorRole, config.subagentRole, config.compactorRole].find((r) => r.provider === provider)
+          const role: RoleConfig = {
+            ...(configured ?? defaultRoleFor(provider as ProviderKind)),
+            provider: provider as ProviderKind,
+            model,
+            ...(typeof body.baseUrl === 'string' && body.baseUrl.trim() ? { baseUrl: body.baseUrl.trim() } : {}),
+            ...(typeof body.apiKeyEnv === 'string' && body.apiKeyEnv.trim() ? { apiKeyEnv: body.apiKeyEnv.trim() } : {}),
+          }
+          json(res, 200, await resolveModelLimits(role, discoverModelLimits))
           return
         }
 

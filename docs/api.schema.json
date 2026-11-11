@@ -1541,6 +1541,35 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/api/model-limits",
+      "summary": "A model's limits: the registry, else the endpoint's own listing, else conservative values.",
+      "errors": [
+        400
+      ],
+      "request": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "apiKeyEnv": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "model"
+        ]
+      }
+    },
+    {
       "method": "GET",
       "path": "/api/settings",
       "summary": "User config and active settings.",

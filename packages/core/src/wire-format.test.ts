@@ -143,3 +143,33 @@ test('redactMessage masks the structured parts and keeps the other fields', () =
   const clean: ChatMessage = { role: 'user', content: 'nothing secret' }
   assert.equal(redactMessage(clean), clean)
 })
+
+test('model discovery reads limits under the names servers use', async () => {
+  const { modelEntryLimits } = await import('./llm.js')
+  assert.deepEqual(modelEntryLimits({ id: 'a', context_length: 65536, top_provider: { max_completion_tokens: 8192 } }), { contextWindowTokens: 65536, maxOutputTokens: 8192 })
+  assert.deepEqual(modelEntryLimits({ id: 'b', max_model_len: 32768 }), { contextWindowTokens: 32768 })
+  assert.deepEqual(modelEntryLimits({ name: 'models/c', inputTokenLimit: 1048576, outputTokenLimit: 65536 }), { contextWindowTokens: 1048576, maxOutputTokens: 65536 })
+  assert.deepEqual(modelEntryLimits({ id: 'd' }), {})
+})
+
+test('Ollama capabilities decide vision once the server has answered', async () => {
+  const { discoverModelLimits } = await import('./llm.js')
+  const { roleSupportsImages } = await import('./config.js')
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ capabilities: ['completion', 'vision'], model_info: { 'qwen3.context_length': 40960 } }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const port = (server.address() as { port: number }).port
+    const role = { provider: 'ollama' as const, model: 'my-multimodal:latest', baseUrl: `http://127.0.0.1:${port}`, contextWindowTokens: 8192, maxOutputTokens: 1024 }
+    assert.equal(roleSupportsImages(role), false, 'the name says nothing')
+    assert.deepEqual(await discoverModelLimits(role), { contextWindowTokens: 40960 })
+    assert.equal(roleSupportsImages(role), true, 'the server said vision')
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})

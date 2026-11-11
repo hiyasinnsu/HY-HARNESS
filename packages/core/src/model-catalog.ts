@@ -96,7 +96,18 @@ export function reasoningEchoFor(provider: ProviderKind, model: string): boolean
   return findModel(provider, model)?.compat?.reasoningEcho
 }
 
-/** Vision input, from the registry; a role's explicit `vision` still wins. */
+/** Capabilities a server reported for a model it serves (Ollama `/api/show`). */
+const reportedVision = new Map<string, boolean>()
+
+/** Records what the serving endpoint said about a model's image input. */
+export function rememberReportedVision(provider: ProviderKind, model: string, vision: boolean): void {
+  reportedVision.set(`${provider}:${model}`, vision)
+}
+
+/**
+ * Vision input, from the registry, else from what the serving endpoint
+ * reported; a role's explicit `vision` still wins.
+ */
 export function catalogVision(provider: ProviderKind, model: string): boolean | undefined {
-  return findModel(provider, model)?.capabilities?.vision
+  return findModel(provider, model)?.capabilities?.vision ?? reportedVision.get(`${provider}:${model}`)
 }

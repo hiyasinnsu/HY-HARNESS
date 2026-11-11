@@ -1383,10 +1383,8 @@ function renderComposer(force = false): void {
   const current = currentState()
   const cache = cacheInfo(current?.usage)
   const modelName = current?.model?.model ?? config?.worker.model ?? 'model'
-  // Beam Free rejects "none"; the other effort levels are valid for it.
-  const effortValues = modelName === 'beam-free'
-    ? ['', 'low', 'medium', 'high', 'xhigh', 'max']
-    : ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+  // Every level for every model: the adapter maps one the endpoint does not take onto the nearest.
+  const effortValues = ['', ...effortValuesFor(current?.model?.provider ?? config?.worker.provider ?? '', modelName)]
   const kind: SessionKind = current?.kind ?? state.current?.state.kind ?? 'chat'
   if (kind === 'worker') {
     wrap.innerHTML = `<div class="worker-readonly"><span class="session-badge worker">${tr('worker')}</span><span>${tr('workerReadOnly')}</span></div>`
@@ -2847,64 +2845,41 @@ function refreshModelProfileOptions(): void {
   }
 }
 
+/** Debounces the server lookup while a model name is being typed, per role. */
+const modelLimitTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+/** Limits assumed for a model nothing describes (the server uses the same values). */
+const UNKNOWN_MODEL_LIMITS = { contextWindowTokens: 131_072, maxOutputTokens: 16_384 }
+
+/**
+ * Limits to prefill for a model, synchronously: the user's own profile for
+ * it, a preset's data, the provider default for its default model, else
+ * conservative values. `fetchModelLimits` then asks the server, which also
+ * reads the endpoint's own listing. No table of model names lives here.
+ */
 function modelDefaults(provider: string, model: string): { contextWindowTokens: number; maxOutputTokens: number } {
-  const opencode = provider === 'opencode'
-  switch (model) {
-    case 'deepseek-flash':
-      // Native 1,048,576 context / 393,216 output; 262,144 is the 25% output
-      // reserve left by the default compaction trigger.
-      return { contextWindowTokens: 1_048_576, maxOutputTokens: 262_144 }
-    case 'deepseek-chat':
-    case 'deepseek-reasoner':
-      // Legacy aliases no longer listed by the provider; keep the old cap so a
-      // saved configuration cannot send an oversized max_tokens.
-      return { contextWindowTokens: 1_048_576, maxOutputTokens: 8_192 }
-    case 'deepseek-v4.1-flash':
-      return opencode
-        ? { contextWindowTokens: 1_000_000, maxOutputTokens: 131_072 }
-        : { contextWindowTokens: 1_048_576, maxOutputTokens: 262_144 }
-    case 'deepseek-v4.1-flash-free':
-      // OpenCode's free route advertises 200K context and a 32K output cap.
-      return { contextWindowTokens: 200_000, maxOutputTokens: 32_000 }
-    case 'deepseek-v4-pro':
-    case 'deepseek-v4-flash':
-      return opencode
-        ? { contextWindowTokens: 1_000_000, maxOutputTokens: 131_072 }
-        : { contextWindowTokens: 1_048_576, maxOutputTokens: 262_144 }
-    case 'beam-free':
-    case 'kimi-k3':
-      return { contextWindowTokens: 1_048_576, maxOutputTokens: 131_072 }
-    case 'glm-5.3':
-    case 'qwen3.8-flash':
-      return { contextWindowTokens: 1_000_000, maxOutputTokens: 131_072 }
-    case 'minimax-m3.1-flash-free':
-      return { contextWindowTokens: 1_000_000, maxOutputTokens: 512_000 }
-    case 'gemini-3.8-flash':
-    case 'gemini-2.5-flash':
-    case 'gemini-2.5-pro':
-      return { contextWindowTokens: 1_048_576, maxOutputTokens: 65_536 }
-    case 'gpt-4.1':
-    case 'gpt-4.1-mini':
-      return { contextWindowTokens: 1_047_576, maxOutputTokens: 32_768 }
-    case 'gpt-6.1-terra':
-      return { contextWindowTokens: 1_050_000, maxOutputTokens: 128_000 }
-    case 'gpt-4o-mini':
-      return { contextWindowTokens: 128_000, maxOutputTokens: 16_384 }
-    case 'o4-mini':
-      return { contextWindowTokens: 200_000, maxOutputTokens: 100_000 }
-    case 'qwen2.5:3b':
-    case 'qwen2.5-coder:7b':
-    case 'deepseek-r1:7b':
-    case 'llama3.2:3b':
-      // Qwen2.5 3B: 32,768 context, 8,192 max generation.
-      return { contextWindowTokens: 32_768, maxOutputTokens: 8_192 }
-    case 'mock':
-      return { contextWindowTokens: 32_768, maxOutputTokens: 4_096 }
-    default:
-      return {
-        contextWindowTokens: providerDefaults(provider).contextWindowTokens,
-        maxOutputTokens: providerDefaults(provider).maxOutputTokens,
-      }
+  const known = [...state.modelProfiles, ...DEFAULT_MODEL_PROFILES].find((p) => p.provider === provider && p.model === model && p.contextWindowTokens && p.maxOutputTokens)
+  if (known) return { contextWindowTokens: known.contextWindowTokens!, maxOutputTokens: known.maxOutputTokens! }
+  const defaults = providerDefaults(provider)
+  if (model === defaults.model) return { contextWindowTokens: defaults.contextWindowTokens, maxOutputTokens: defaults.maxOutputTokens }
+  return {
+    contextWindowTokens: Math.min(defaults.contextWindowTokens, UNKNOWN_MODEL_LIMITS.contextWindowTokens),
+    maxOutputTokens: Math.min(defaults.maxOutputTokens, UNKNOWN_MODEL_LIMITS.maxOutputTokens),
+  }
+}
+
+/** The server's answer for a model's limits (registry, the endpoint's listing, or assumed). */
+async function fetchModelLimits(provider: string, model: string, baseUrl?: string, apiKeyEnv?: string): Promise<{ contextWindowTokens: number; maxOutputTokens: number; source: string } | undefined> {
+  if (!model.trim()) return undefined
+  try {
+    return await post<{ contextWindowTokens: number; maxOutputTokens: number; source: string }>('/api/model-limits', {
+      provider,
+      model: model.trim(),
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(apiKeyEnv ? { apiKeyEnv } : {}),
+    })
+  } catch {
+    return undefined
   }
 }
 
@@ -2913,40 +2888,30 @@ interface ModelPreset {
   label: string
   provider: string
   model: string
+  /** Published limits of this preset (data, used to prefill its profile). */
+  contextWindowTokens?: number
+  maxOutputTokens?: number
 }
 
 const EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
-/** OpenCode's DeepSeek routes expose none/low/high/max, not xhigh/minimal. */
-const DEEPSEEK_OPENCODE_MODELS = new Set([
-  'deepseek-v4.1-flash',
-  'deepseek-v4.1-flash-free',
-  'deepseek-v4-pro',
-  'deepseek-v4-flash',
-])
-
-/** Beam Free exposes low..max only (no none/minimal). */
-function effortValuesFor(provider: string, model: string): readonly string[] {
-  if (provider === 'opencode' && DEEPSEEK_OPENCODE_MODELS.has(model)) {
-    return ['none', 'low', 'high', 'max']
-  }
-  if (provider === 'gemini' && model === 'gemini-3.8-flash') {
-    // Gemini 3.8 Flash supports low/medium/high; minimal is rejected.
-    return ['low', 'medium', 'high']
-  }
-  return provider === 'opencode' && model === 'beam-free'
-    ? EFFORT_OPTIONS.filter((value) => value !== 'none' && value !== 'minimal')
-    : EFFORT_OPTIONS
+/**
+ * Every effort level is offered for every model: the adapter maps a level an
+ * endpoint does not take onto the nearest one it lists (and leaves the field
+ * out when it takes none), so no per-model list is kept here.
+ */
+function effortValuesFor(_provider: string, _model: string): readonly string[] {
+  return EFFORT_OPTIONS
 }
 
 const MODEL_PRESETS: ModelPreset[] = [
-  { id: 'deepseek-flash', label: 'DeepSeek · deepseek-flash', provider: 'deepseek', model: 'deepseek-flash' },
-  { id: 'deepseek-v4-pro', label: 'DeepSeek · deepseek-v4-pro', provider: 'deepseek', model: 'deepseek-v4-pro' },
-  { id: 'ollama-qwen', label: 'Ollama · qwen2.5:3b', provider: 'ollama', model: 'qwen2.5:3b' },
-  { id: 'gemini-flash', label: 'Gemini · gemini-3.8-flash', provider: 'gemini', model: 'gemini-3.8-flash' },
-  { id: 'openai-mini', label: 'OpenAI-compatible · gpt-4.1-mini', provider: 'openai-compatible', model: 'gpt-4.1-mini' },
-  { id: 'opencode-beam-free', label: 'OpenCode · Beam Free', provider: 'opencode', model: 'beam-free' },
-  { id: 'mock', label: 'Mock · mock', provider: 'mock', model: 'mock' },
+  { id: 'deepseek-flash', label: 'DeepSeek · deepseek-flash', provider: 'deepseek', model: 'deepseek-flash', contextWindowTokens: 1_048_576, maxOutputTokens: 262_144 },
+  { id: 'deepseek-v4-pro', label: 'DeepSeek · deepseek-v4-pro', provider: 'deepseek', model: 'deepseek-v4-pro', contextWindowTokens: 1_048_576, maxOutputTokens: 262_144 },
+  { id: 'ollama-qwen', label: 'Ollama · qwen2.5:3b', provider: 'ollama', model: 'qwen2.5:3b', contextWindowTokens: 32_768, maxOutputTokens: 8_192 },
+  { id: 'gemini-flash', label: 'Gemini · gemini-3.8-flash', provider: 'gemini', model: 'gemini-3.8-flash', contextWindowTokens: 1_048_576, maxOutputTokens: 65_536 },
+  { id: 'openai-mini', label: 'OpenAI-compatible · gpt-4.1-mini', provider: 'openai-compatible', model: 'gpt-4.1-mini', contextWindowTokens: 1_047_576, maxOutputTokens: 32_768 },
+  { id: 'opencode-beam-free', label: 'OpenCode · Beam Free', provider: 'opencode', model: 'beam-free', contextWindowTokens: 1_048_576, maxOutputTokens: 131_072 },
+  { id: 'mock', label: 'Mock · mock', provider: 'mock', model: 'mock', contextWindowTokens: 32_768, maxOutputTokens: 4_096 },
 ]
 
 const DEFAULT_MODEL_PROFILES: ModelProfile[] = MODEL_PRESETS.map((p) => ({
@@ -2956,8 +2921,8 @@ const DEFAULT_MODEL_PROFILES: ModelProfile[] = MODEL_PRESETS.map((p) => ({
   model: p.model,
   ...(providerDefaults(p.provider).baseUrl ? { baseUrl: providerDefaults(p.provider).baseUrl } : {}),
   ...(providerDefaults(p.provider).apiKeyEnv ? { apiKeyEnv: providerDefaults(p.provider).apiKeyEnv } : {}),
-  contextWindowTokens: modelDefaults(p.provider, p.model).contextWindowTokens,
-  maxOutputTokens: modelDefaults(p.provider, p.model).maxOutputTokens,
+  contextWindowTokens: p.contextWindowTokens ?? providerDefaults(p.provider).contextWindowTokens,
+  maxOutputTokens: p.maxOutputTokens ?? providerDefaults(p.provider).maxOutputTokens,
 }))
 
 /**
@@ -3788,6 +3753,19 @@ function renderModal(): void {
       if (context) context.value = String(limits.contextWindowTokens)
       if (max) max.value = String(limits.maxOutputTokens)
       syncEffortOptions(role)
+      // Then what the server knows (registry or the endpoint's listing), if
+      // the user has not typed another model meanwhile.
+      const typed = model.value
+      const baseUrl = document.querySelector<HTMLInputElement>(`input[data-role="${role}"][data-field="baseUrl"]`)?.value.trim()
+      const apiKeyEnv = document.querySelector<HTMLInputElement>(`input[data-role="${role}"][data-field="apiKeyEnv"]`)?.value.trim()
+      clearTimeout(modelLimitTimers.get(role))
+      modelLimitTimers.set(role, setTimeout(() => {
+        void fetchModelLimits(provider, typed, baseUrl, apiKeyEnv).then((found) => {
+          if (!found || model.value !== typed) return
+          if (context) context.value = String(found.contextWindowTokens)
+          if (max) max.value = String(found.maxOutputTokens)
+        })
+      }, 400))
     })
   }
 }
@@ -6626,6 +6604,11 @@ function onDocumentClick(event: MouseEvent): void {
         maxOutputTokens: limits.maxOutputTokens,
       }
       state.modelProfiles = [...state.modelProfiles, profile]
+      // Then the server's answer (registry or the endpoint's own listing), when it has one.
+      void fetchModelLimits(provider, model, profile.baseUrl, profile.apiKeyEnv).then((found) => {
+        if (!found) return
+        state.modelProfiles = state.modelProfiles.map((p) => p.id === profile.id ? { ...p, contextWindowTokens: found.contextWindowTokens, maxOutputTokens: found.maxOutputTokens } : p)
+      })
       const list = document.querySelector('.model-profile-list')
       if (list) {
         list.querySelector('.panel-empty')?.remove()

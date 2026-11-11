@@ -892,6 +892,18 @@ export const API_ROUTES: readonly ApiRouteInfo[] = [
     errors: [400, 413, 415],
   },
   {
+    method: "POST",
+    path: "/api/model-limits",
+    summary: "A model's limits: the registry, else the endpoint's own listing, else conservative values.",
+    errors: [400],
+    request: {
+    provider: { type: "string", required: true },
+    model: { type: "string", required: true },
+    baseUrl: { type: "string" },
+    apiKeyEnv: { type: "string" },
+    },
+  },
+  {
     method: "GET",
     path: "/api/settings",
     summary: "User config and active settings.",
