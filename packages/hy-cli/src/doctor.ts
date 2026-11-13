@@ -77,6 +77,25 @@ function configuredRoles(config: HarnessConfig): Array<[string, RoleConfig]> {
   return roles.filter((entry): entry is [string, RoleConfig] => entry[1] !== undefined)
 }
 
+/**
+ * B11: sandbox gaps that are expected on a working setup: the ones every
+ * confined mode has (`hy_sandbox_windows::known_gaps`) and non-ACL volumes.
+ */
+export const EXPECTED_SANDBOX_GAPS: ReadonlySet<string> = new Set([
+  'reads-not-confined',
+  'network-not-confined',
+  'named-pipe-grandchildren',
+  'late-hard-links',
+  'low-integrity',
+  'non-acl-volumes',
+])
+
+/** The kind of a gap: the text before its first colon. */
+export function gapKind(gap: string): string {
+  const colon = gap.indexOf(':')
+  return (colon >= 0 ? gap.slice(0, colon) : gap).trim()
+}
+
 export function buildDoctorReport(input: DoctorInput): { ok: boolean; version: string; checks: DoctorCheck[] } {
   const checks: DoctorCheck[] = []
   checks.push({ name: 'node', status: 'ok', detail: `${input.node} on ${input.platform}` })
@@ -101,9 +120,14 @@ export function buildDoctorReport(input: DoctorInput): { ok: boolean; version: s
     checks.push({ name: 'sandbox', status: 'warn', detail: input.sandbox.error })
   } else {
     const gaps = input.sandbox.gaps ?? []
+    // B11: the gaps every confined mode has, and non-ACL volumes (allowed on
+    // purpose, 2026-11-03), stay 'ok' with their detail shown. A failed
+    // denyRead / read-only grant, or a gap this version does not know, is a
+    // configuration that did not take effect and gets 'warn'.
+    const unexpected = gaps.filter((gap) => !EXPECTED_SANDBOX_GAPS.has(gapKind(gap)))
     checks.push({
       name: 'sandbox',
-      status: input.sandbox.available ? (gaps.length > 0 ? 'ok' : 'ok') : 'warn',
+      status: input.sandbox.available && unexpected.length === 0 ? 'ok' : 'warn',
       detail: `${input.sandbox.enforcement}; available=${String(input.sandbox.available)}${
         gaps.length > 0 ? `; gaps: ${gaps.join(', ')}` : ''
       }`,

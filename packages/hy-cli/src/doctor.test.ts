@@ -141,3 +141,23 @@ test('CP-39/G-19: auxiliary roles are diagnosed too and a missing key only warns
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+test('B11: expected sandbox gaps stay ok; a failed grant or an unknown gap warns', () => {
+  const report = (gaps: string[]) => buildDoctorReport({
+    version: '0.4.0',
+    node: 'v24.0.0',
+    platform: 'win32 x64',
+    workspace: process.cwd(),
+    config: config(),
+    execServerPath: process.execPath,
+    sandbox: { enforcement: 'partial', available: true, gaps },
+  }).checks.find((check) => check.name === 'sandbox')!
+  const expected = report([
+    'reads-not-confined: x', 'network-not-confined: x', 'named-pipe-grandchildren: x', 'late-hard-links: x', 'low-integrity: x',
+    'non-acl-volumes: confined commands can write to F:\\ (no ACLs)',
+  ])
+  assert.equal(expected.status, 'ok')
+  assert.match(expected.detail, /non-acl-volumes/)
+  assert.equal(report(['network-not-confined: x', 'deny-read-failed: C:/secret']).status, 'warn')
+  assert.equal(report(['read-only-failed: C:/ws/docs']).status, 'warn')
+  assert.equal(report(['something-new: x']).status, 'warn')
+})
