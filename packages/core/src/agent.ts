@@ -8,7 +8,7 @@ import { Ledger, discoverPinned } from './ledger.js'
 import type { SkillInfo } from './skills.js'
 import type { MemoryStore } from './memory.js'
 import { validate, type Schema, type ToolSpec } from './tool-registry.js'
-import { discoverProjectChecks, renderProjectChecks } from './project-checks.js'
+import { checksFor, discoverProjectChecks, discoverWorkspacePackages, packagesOf, renderProjectChecks } from './project-checks.js'
 import { TurnProgress, failedCheckNudge, stallNote, verificationNudge, verificationNoticeText } from './progress.js'
 import { announcesNextStep, embedsCallInProse, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverMalformedCall, recoverTemplateCall, recoverUnwrappedBatch, rememberToolNames } from './reply-guard.js'
 import { steerMessage, type SteerInbox } from './steering.js'
@@ -702,7 +702,13 @@ export class Agent {
     let embeddedNudged = false
     const ledger = this.options.ledger ?? new Ledger(discoverPinned(this.options.workspaceRoot))
     // A7: read once per turn; a session that edits its manifests sees the change next turn.
-    const projectChecks = renderProjectChecks(discoverProjectChecks(this.options.workspaceRoot))
+    const rootChecks = discoverProjectChecks(this.options.workspaceRoot)
+    // B9: in a workspace (monorepo) the checks of the packages this turn
+    // changed are listed first. The list is rebuilt only when that set of
+    // packages changes, so the session context is not re-sent on every edit.
+    const workspacePackages = discoverWorkspacePackages(this.options.workspaceRoot)
+    let projectChecks = renderProjectChecks(rootChecks)
+    let checkedPackages = ''
     let messages: ChatMessage[] = [
       { role: 'system', content: base },
       ...(native ? withoutTextProtocolRetries(history) : history),
@@ -803,6 +809,14 @@ export class Agent {
       // newest user message whenever it differs from the last block the
       // conversation holds. Compaction or pruning that drops that block makes
       // it differ, so the current block is always in the request (Goal 3).
+      if (workspacePackages.length > 0) {
+        const changed = packagesOf(this.options.workspaceRoot, workspacePackages, progress.summary().editedFiles)
+        const key = changed.map((pkg) => `${pkg.kind}:${pkg.dir}`).sort().join('|')
+        if (key !== checkedPackages) {
+          checkedPackages = key
+          projectChecks = renderProjectChecks(checksFor(this.options.workspaceRoot, rootChecks, changed))
+        }
+      }
       const goal = typeof this.options.goal === 'function' ? this.options.goal() : this.options.goal
       const context = sessionContextBlock({
         ...(this.options.workMode ? { workMode: this.options.workMode() } : {}),
