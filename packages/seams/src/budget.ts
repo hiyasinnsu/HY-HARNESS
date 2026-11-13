@@ -58,6 +58,13 @@ export class Budget4D {
   rounds = 0
   tokensUsed = 0
   costUsd = 0
+  /**
+   * B6: the worst case of requests still running (admitted, not recorded).
+   * Without it, parallel requests (subagents, Guardian beside the worker)
+   * were each admitted against the same remaining budget.
+   */
+  private reservedUsd = 0
+  private reservedTokens = 0
   private readonly startedAt: number
   private roundSignal: AbortSignal | undefined
 
@@ -122,14 +129,14 @@ export class Budget4D {
     if (this.elapsedMs() >= this.limits.maxWallClockMs) {
       throw new BudgetExhaustedError('wall-clock', `${this.limits.maxWallClockMs} ms elapsed`)
     }
-    const tokensLeft = this.limits.maxTotalTokens - this.tokensUsed
+    const tokensLeft = this.limits.maxTotalTokens - this.tokensUsed - this.reservedTokens
     if (inputEstimate >= tokensLeft) {
       throw new BudgetExhaustedError('tokens', `${this.tokensUsed} of ${this.limits.maxTotalTokens} tokens used; the next request needs ~${inputEstimate}`)
     }
     let maxTokens = Math.min(requestedMaxTokens, tokensLeft - inputEstimate)
     if (this.limits.maxCostUsd !== undefined) {
       const p = this.pricing[role] ?? { inputPerMTokUsd: 0, outputPerMTokUsd: 0 }
-      const usdLeft = this.limits.maxCostUsd - this.costUsd
+      const usdLeft = this.limits.maxCostUsd - this.costUsd - this.reservedUsd
       const inputCost = (inputEstimate * p.inputPerMTokUsd) / 1e6
       if (p.outputPerMTokUsd > 0) {
         maxTokens = Math.min(maxTokens, Math.floor(((usdLeft - inputCost) * 1e6) / p.outputPerMTokUsd))
@@ -163,8 +170,15 @@ export class Budget4D {
     return {
       name: provider.name,
       complete: async (messages: ChatMessage[], options: CompleteOptions): Promise<Completion> => {
-        const estimate = estimateTokens(messages.map((m) => m.content).join('\n'))
+        // B6: the tool definitions are sent with every request and count too
+        // (2-4K tokens). Prices stay at the full input rate here: a prompt-cache
+        // hit is not known before the response, and a hard cap must hold.
+        const estimate = estimateTokens(messages.map((m) => m.content).join('\n') + (options.tools?.length ? JSON.stringify(options.tools) : ''))
         const maxTokens = this.admit(role, estimate, options.maxTokens)
+        const p = this.pricing[role]
+        const worstUsd = p ? (estimate * p.inputPerMTokUsd + maxTokens * p.outputPerMTokUsd) / 1e6 : 0
+        this.reservedUsd += worstUsd
+        this.reservedTokens += estimate + maxTokens
         let completion: Completion
         try {
           completion = await provider.complete(messages, {
@@ -178,6 +192,9 @@ export class Budget4D {
             throw new RoundAbortedError(reason instanceof Error ? reason.message : String(reason))
           }
           throw error
+        } finally {
+          this.reservedUsd = Math.max(0, this.reservedUsd - worstUsd)
+          this.reservedTokens = Math.max(0, this.reservedTokens - estimate - maxTokens)
         }
         // `cacheHitTokens` is the prompt-cache part of the input; `record`
         // prices it at `cachedInputPerMTokUsd` when the role sets one.

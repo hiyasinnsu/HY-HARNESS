@@ -1004,3 +1004,14 @@ test('OpenAI-compatible: a too-large max_tokens is capped and retried; no temper
     await s.close()
   }
 })
+
+test('B12: a request reserves its own estimate with a margin, not the whole window', async () => {
+  const { reservedInputTokens } = await import('./llm.js')
+  const small = reservedInputTokens([{ role: 'user', content: 'x'.repeat(4_000) }], {}, 1_000_000)
+  assert.ok(small > 1_000 && small < 5_000, String(small))
+  const withImage = reservedInputTokens([{ role: 'user', content: 'x'.repeat(4_000), images: [{ mimeType: 'image/png', data: 'AA==' }] }], {}, 1_000_000)
+  assert.equal(withImage - small, 2_400)
+  assert.equal(reservedInputTokens([{ role: 'user', content: 'x'.repeat(4_000_000) }], {}, 128_000), 128_000, 'never above the window')
+  const withTools = reservedInputTokens([{ role: 'user', content: 'hi' }], { tools: [{ name: 't', description: 'd'.repeat(4_000), parameters: {} }] }, 1_000_000)
+  assert.ok(withTools > 1_000, String(withTools))
+})

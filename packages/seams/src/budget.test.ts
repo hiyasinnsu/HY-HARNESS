@@ -77,3 +77,29 @@ test('an aborted round stops the next call; Guardian does not swallow budget err
   const g = new Guardian({ provider: spent.meter(new Recorder(), 'guardian'), objective: 'o' })
   await assert.rejects(g.review({ command: 'npm test' }), BudgetExhaustedError)
 })
+
+test('B6: a request in flight is reserved, so a parallel one cannot overrun the cap', async () => {
+  const budget = new Budget4D({ maxRounds: 1, maxTotalTokens: 1e9, maxWallClockMs: 60_000, maxCostUsd: 1 }, { worker: { inputPerMTokUsd: 0, outputPerMTokUsd: 1_000_000 } })
+  let release!: () => void
+  const slow = budget.meter({
+    name: 'slow',
+    complete: () => new Promise((resolve) => { release = () => resolve({ content: 'ok', usage: { inputTokens: 1, outputTokens: 0 } }) }),
+  }, 'worker')
+  // $1 at $1 per output token: the first request may use the whole budget.
+  const first = slow.complete([{ role: 'user', content: 'a' }], { maxTokens: 1 })
+  await assert.rejects(slow.complete([{ role: 'user', content: 'b' }], { maxTokens: 1 }), /could exceed it/)
+  release()
+  await first
+  // Released and recorded at its real (zero) cost: the next request is admitted.
+  const next = slow.complete([{ role: 'user', content: 'c' }], { maxTokens: 1 })
+  release()
+  await next
+})
+
+test('B6: tool definitions count toward the request estimate', async () => {
+  const budget = new Budget4D({ maxRounds: 1, maxTotalTokens: 200, maxWallClockMs: 60_000 }, { worker: { inputPerMTokUsd: 0, outputPerMTokUsd: 0 } })
+  const provider = budget.meter({ name: 'p', complete: async () => ({ content: 'ok', usage: { inputTokens: 1, outputTokens: 1 } }) }, 'worker')
+  const tools = [{ name: 'big', description: 'x'.repeat(2_000), parameters: {} }]
+  await assert.rejects(provider.complete([{ role: 'user', content: 'hi' }], { maxTokens: 10, tools }), /tokens/)
+  await provider.complete([{ role: 'user', content: 'hi' }], { maxTokens: 10 })
+})

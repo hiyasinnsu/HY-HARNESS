@@ -2157,6 +2157,24 @@ export function redactMessage(message: ChatMessage): ChatMessage {
   }
 }
 
+/**
+ * B12: the prompt tokens a request is reserved for under a USD cap. It was the
+ * whole context window (up to 1M tokens), so a few parallel subagents
+ * reserved the cap away and stalled although little was spent. It is now the
+ * request's own estimate (text, tool definitions, and a flat allowance per
+ * image) with a 1.5x margin for estimation error, never above the window.
+ * Usage reported by the provider still settles the real cost afterwards.
+ */
+export function reservedInputTokens(messages: readonly ChatMessage[], options: Pick<CompleteOptions, 'tools'>, contextWindowTokens: number): number {
+  const text = messages.map((message) => message.content).join('\n') + (options.tools?.length ? JSON.stringify(options.tools) : '')
+  const images = messages.reduce((sum, message) => sum + (message.images?.length ?? 0), 0)
+  const estimate = estimateTokens(text) + images * IMAGE_TOKEN_ALLOWANCE
+  return Math.min(contextWindowTokens, Math.ceil(estimate * 1.5))
+}
+
+/** A flat prompt-token allowance per attached image when reserving budget (B12). */
+const IMAGE_TOKEN_ALLOWANCE = 1_600
+
 export function createProvider(role: RoleConfig, workspaceRoot: string, runId?: string): LlmProvider {
   const provider = createUnbudgetedProvider(role, workspaceRoot, runId)
   return {
@@ -2172,8 +2190,7 @@ export function createProvider(role: RoleConfig, workspaceRoot: string, runId?: 
           `No USD pricing for ${provider.name}: set roles.*.pricing or add a "pricing" entry for this model in "models", or run without a USD cap.`,
         )
       }
-      const context = role.contextWindowTokens
-      const maximum = (context * pricing.inputPerMTokUsd + options.maxTokens * pricing.outputPerMTokUsd) / 1_000_000
+      const maximum = (reservedInputTokens(messages, options, role.contextWindowTokens) * pricing.inputPerMTokUsd + options.maxTokens * pricing.outputPerMTokUsd) / 1_000_000
       const settle = reserve(maximum)
       let result: Completion
       try {
