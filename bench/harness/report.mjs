@@ -22,7 +22,7 @@ for (const r of records) {
   if (r.logMissing) continue
   const fresh = r.sessionId ? readDshSession(r.sessionId) : r.logFile && fs.existsSync(r.logFile) ? readHySession(path.dirname(r.logFile)) : undefined
   if (fresh) {
-    for (const key of ['modelWaitMs', 'harnessMs', 'brokenCalls', 'notFound']) if (r[key] === undefined) r[key] = fresh[key]
+    for (const key of ['modelWaitMs', 'harnessMs', 'brokenCalls', 'notFound', 'subRequests', 'subInput', 'subOutput', 'subToolCalls']) if (r[key] === undefined) r[key] = fresh[key]
     for (const key of ['input', 'hit', 'miss', 'hitRate', 'cacheReportedSteps', 'cacheTotalSteps']) r[key] = fresh[key]
   } else {
     r.hit = r.miss = r.hitRate = null
@@ -65,6 +65,12 @@ const METRICS = [
   ['waitMin', 'Model wait (min)', (r) => (typeof r.modelWaitMs === 'number' ? r.modelWaitMs / 60_000 : NaN)],
   ['activeMin', 'Time in turns (min)', (r) => (r.exit === 0 ? r.activeMs / 60_000 : NaN)],
   ['wallMin', 'Wall time (min)', (r) => r.wallMs / 60_000],
+  // Subagent work (B10): the rows above are the main session only, as in
+  // earlier reports; these add what delegated subagents used, and the sum.
+  ['subRequests', 'Subagent model requests', (r) => (typeof r.subRequests === 'number' ? r.subRequests : NaN)],
+  ['subInput', 'Subagent prompt tokens', (r) => (typeof r.subInput === 'number' ? r.subInput : NaN)],
+  ['totalInput', 'Prompt tokens incl. subagents', (r) => (typeof r.input === 'number' && typeof r.subInput === 'number' ? r.input + r.subInput : NaN)],
+  ['totalOutput', 'Output tokens incl. subagents', (r) => (typeof r.subOutput === 'number' ? r.output + r.subOutput : NaN)],
   ['brokenCalls', 'Tool calls written as text (retried)', (r) => r.brokenCalls ?? NaN],
   ['notFound', 'Reads of missing paths', (r) => r.notFound ?? NaN],
   ['solved', 'Solved (exit 0 and every hidden check passed)', (r) => (solved(r) ? 1 : 0)],
