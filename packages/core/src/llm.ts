@@ -1294,6 +1294,7 @@ export class GeminiProvider implements LlmProvider {
         content?: Array<{ type?: string; text?: string }>
       }>
       usage?: { total_input_tokens?: number; total_output_tokens?: number; total_thought_tokens?: number; total_cached_tokens?: number }
+      status?: string
     }
     const steps = body.steps ?? []
     const content = steps
@@ -1316,6 +1317,10 @@ export class GeminiProvider implements LlmProvider {
     return {
       content,
       ...(reasoning ? { reasoning } : {}),
+      // B3-1: an interaction cut at max_output_tokens reports status
+      // "incomplete" (measured: 12 thought tokens, 0 output tokens at a limit
+      // of 16). Without this the empty or partial reply passed as complete.
+      ...(body.status === 'incomplete' ? { outputLimited: true as const } : {}),
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
       ...(body.id && toolCalls.every((call) => call.id)
         ? { gemini: { id: body.id, prefix: prefix(turns), callIds: toolCalls.map((call) => call.id!) } } : {}),
@@ -1452,6 +1457,102 @@ export function anthropicMessages(
   return out
 }
 
+/**
+ * B3-1: the JSON payload of each `data:` line of a server-sent-event stream.
+ * Lines that are not JSON (`[DONE]`, keep-alives) are skipped.
+ */
+async function* sseData(response: Response): AsyncGenerator<Record<string, unknown>> {
+  const reader = response.body?.getReader()
+  if (!reader) throw new LlmError('the streaming response has no body')
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let newline: number
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline).trim()
+        buffer = buffer.slice(newline + 1)
+        if (!line.startsWith('data:')) continue
+        const payload = line.slice(5).trim()
+        if (!payload || payload === '[DONE]') continue
+        try {
+          const parsed: unknown = JSON.parse(payload)
+          if (parsed && typeof parsed === 'object') yield parsed as Record<string, unknown>
+        } catch {
+          // Not JSON: skip it.
+        }
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+}
+
+/**
+ * B3-1: watches streamed text for a runaway repetition (the same check the
+ * OpenAI-compatible stream uses), every 1,000 new characters.
+ */
+class RepetitionWatch {
+  content = ''
+  reasoning = ''
+  private checkedContent = 0
+  private checkedReasoning = 0
+
+  /** Adds text; true once either stream has fallen into a loop (then trimmed to where it began). */
+  add(kind: 'content' | 'reasoning', text: string): boolean {
+    this[kind] += text
+    const checked = kind === 'content' ? this.checkedContent : this.checkedReasoning
+    if (this[kind].length - checked < 1_000) return false
+    if (kind === 'content') this.checkedContent = this[kind].length
+    else this.checkedReasoning = this[kind].length
+    const start = repetitionStart(this[kind])
+    if (start === undefined) return false
+    this[kind] = this[kind].slice(0, start)
+    return true
+  }
+
+  /** The completion for a cut stream: the provider's usage never arrived. */
+  degenerate(inputTokens: number): Completion {
+    return {
+      content: this.content,
+      ...(this.reasoning ? { reasoning: this.reasoning } : {}),
+      usage: { inputTokens, outputTokens: estimateTokens(this.content + this.reasoning) },
+      degenerate: 'repetition',
+    }
+  }
+}
+
+/**
+ * B3-1: opens a stream with the same retry and timeout as a plain request, and
+ * one retry after a 400 that taught the endpoint's limits.
+ */
+async function openNegotiatedStream(
+  label: string,
+  url: string,
+  headers: Record<string, string>,
+  body: () => unknown,
+  state: ProviderNegotiationState,
+  options: CompleteOptions,
+  role: RoleConfig,
+  retry: RetryOptions,
+): Promise<Response> {
+  const open = () => openStreamWithRetry(
+    label,
+    url,
+    { headers: { ...headers, Accept: 'text/event-stream' }, body: JSON.stringify(body()), signal: requestSignal(options.signal, role.requestTimeoutMs ?? 600_000) },
+    retry,
+  )
+  try {
+    return await open()
+  } catch (error) {
+    if (!learnFromError(state, error)) throw error
+    return await open()
+  }
+}
+
 export class AnthropicProvider implements LlmProvider {
   readonly name: string
   private readonly baseUrl: string
@@ -1473,6 +1574,7 @@ export class AnthropicProvider implements LlmProvider {
   private readonly state: ProviderNegotiationState
 
   async complete(messages: ChatMessage[], options: CompleteOptions): Promise<Completion> {
+    if (options.onDelta && this.role.streaming === true) return this.completeStreaming(messages, options)
     const send = () => postWithRetry(
       this.name,
       `${this.baseUrl}${this.role.apiPath ?? '/v1/messages'}`,
@@ -1498,6 +1600,25 @@ export class AnthropicProvider implements LlmProvider {
     return parseAnthropicResponse(text)
   }
 
+  /**
+   * B3-1: the Messages API stream, rebuilt into the non-streaming response
+   * body and parsed by `parseAnthropicResponse`, so both paths agree. Off by
+   * default (`role.streaming`) until verified against the live API.
+   */
+  private async completeStreaming(messages: ChatMessage[], options: CompleteOptions): Promise<Completion> {
+    const response = await openNegotiatedStream(
+      this.name,
+      `${this.baseUrl}${this.role.apiPath ?? '/v1/messages'}`,
+      requestHeaders(this.role, this.apiKey, { 'Content-Type': 'application/json', 'x-api-key': this.apiKey, 'anthropic-version': ANTHROPIC_VERSION }),
+      () => ({ ...this.body(messages, options), stream: true }),
+      this.state,
+      options,
+      this.role,
+      this.retry,
+    )
+    return assembleAnthropicStream(sseData(response), options)
+  }
+
   private body(messages: ChatMessage[], options: CompleteOptions) {
     const system = messages.find((message) => message.role === 'system')?.content ?? ''
     const maxTokens = negotiatedMaxTokens(this.state, options.maxTokens)
@@ -1521,6 +1642,88 @@ export class AnthropicProvider implements LlmProvider {
       ...(this.role.extraBody ?? {}),
     }
   }
+}
+
+/**
+ * B3-1: rebuilds a Messages API response from its stream events and parses it
+ * like a non-streaming reply. Emits text and thinking deltas, and stops early
+ * on a runaway repetition. A stream that ends before `message_stop` is an error.
+ */
+export async function assembleAnthropicStream(events: AsyncIterable<Record<string, unknown>>, options: Pick<CompleteOptions, 'onDelta'>): Promise<Completion> {
+  type Block = { type?: string; text?: string; thinking?: string; signature?: string; data?: string; id?: string; name?: string; input?: unknown; json?: string }
+  const blocks: Block[] = []
+  let usage: Record<string, unknown> = {}
+  let stopReason: string | undefined
+  let finished = false
+  const watch = new RepetitionWatch()
+  for await (const event of events) {
+    const type = event.type
+    if (type === 'error') throw new LlmError(`Anthropic: ${String((event.error as { message?: unknown } | undefined)?.message ?? 'stream error')}`)
+    if (type === 'message_start') usage = { ...((event.message as { usage?: Record<string, unknown> } | undefined)?.usage ?? {}) }
+    else if (type === 'content_block_start') {
+      const index = Number(event.index)
+      blocks[index] = { ...(event.content_block as Block) }
+    } else if (type === 'content_block_delta') {
+      const block = blocks[Number(event.index)]
+      const delta = (event.delta ?? {}) as { type?: string; text?: string; thinking?: string; signature?: string; partial_json?: string }
+      if (!block) continue
+      if (delta.type === 'text_delta' && typeof delta.text === 'string') {
+        block.text = (block.text ?? '') + delta.text
+        options.onDelta?.({ content: delta.text })
+        if (watch.add('content', delta.text)) return watch.degenerate(Number(usage.input_tokens ?? 0))
+      } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+        block.thinking = (block.thinking ?? '') + delta.thinking
+        options.onDelta?.({ reasoning: delta.thinking })
+        if (watch.add('reasoning', delta.thinking)) return watch.degenerate(Number(usage.input_tokens ?? 0))
+      } else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') {
+        block.signature = (block.signature ?? '') + delta.signature
+      } else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+        block.json = (block.json ?? '') + delta.partial_json
+      }
+    } else if (type === 'message_delta') {
+      const delta = (event.delta ?? {}) as { stop_reason?: string }
+      if (delta.stop_reason) stopReason = delta.stop_reason
+      usage = { ...usage, ...((event.usage as Record<string, unknown> | undefined) ?? {}) }
+    } else if (type === 'message_stop') finished = true
+  }
+  if (!finished) throw new LlmError('Anthropic: the stream ended before the response was complete')
+  const content = blocks.filter(Boolean).map(({ json, ...block }) => {
+    if (block.type !== 'tool_use') return block
+    let input: unknown = {}
+    try {
+      input = json ? JSON.parse(json) : (block.input ?? {})
+    } catch {
+      input = undefined
+    }
+    return { ...block, input }
+  })
+  return parseAnthropicResponse(JSON.stringify({ content, ...(stopReason ? { stop_reason: stopReason } : {}), usage }))
+}
+
+/**
+ * B3-1: a Responses API stream. Text and reasoning-summary deltas are emitted
+ * live; the final `response.completed` / `response.incomplete` event carries
+ * the whole response, which `parseOpenAiResponses` reads as in the
+ * non-streaming path.
+ */
+export async function assembleResponsesStream(events: AsyncIterable<Record<string, unknown>>, options: Pick<CompleteOptions, 'onDelta'>): Promise<Completion> {
+  const watch = new RepetitionWatch()
+  for await (const event of events) {
+    const type = String(event.type ?? '')
+    if (type === 'error') throw new LlmError(`OpenAI Responses: ${String(event.message ?? 'stream error')}`)
+    if (type === 'response.output_text.delta' && typeof event.delta === 'string') {
+      options.onDelta?.({ content: event.delta })
+      if (watch.add('content', event.delta)) return watch.degenerate(0)
+    } else if ((type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') && typeof event.delta === 'string') {
+      options.onDelta?.({ reasoning: event.delta })
+      if (watch.add('reasoning', event.delta)) return watch.degenerate(0)
+    } else if (type === 'response.completed' || type === 'response.incomplete' || type === 'response.failed') {
+      const response = event.response as { error?: { message?: unknown } } | undefined
+      if (type === 'response.failed') throw new LlmError(`OpenAI Responses: ${String(response?.error?.message ?? 'the response failed')}`)
+      return parseOpenAiResponses(JSON.stringify(response ?? {}))
+    }
+  }
+  throw new LlmError('OpenAI Responses: the stream ended before the response was complete')
 }
 
 /** Parses one Messages API response (exported for the contract test). */
@@ -1655,6 +1858,20 @@ export class OpenAiResponsesProvider implements LlmProvider {
           }
         : {}),
       }
+    }
+    // B3-1: stream when the caller wants live deltas (role.streaming: false turns it off).
+    if (options.onDelta && this.role.streaming !== false) {
+      const response = await openNegotiatedStream(
+        this.name,
+        `${this.baseUrl}${this.role.apiPath ?? '/responses'}`,
+        requestHeaders(this.role, this.apiKey, { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` }),
+        () => ({ ...body(), stream: true }),
+        this.state,
+        options,
+        this.role,
+        this.retry,
+      )
+      return assembleResponsesStream(sseData(response), options)
     }
     const send = () => postWithRetry(
       this.name,

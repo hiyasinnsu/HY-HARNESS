@@ -39,6 +39,10 @@ const roleConfig = {
       enum: ['auto', 'concise', 'detailed', 'none'],
       description: 'Responses API reasoning.summary (openai-responses only).',
     },
+    streaming: {
+      type: 'boolean',
+      description: 'Stream replies for live display (openai-responses: default true; anthropic: default false until verified).',
+    },
     serviceTier: {
       type: 'string',
       enum: ['auto', 'default', 'flex', 'priority'],

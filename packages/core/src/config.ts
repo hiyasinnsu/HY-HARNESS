@@ -64,6 +64,14 @@ export interface RoleConfig {
   verbosity?: 'low' | 'medium' | 'high'
   /** Responses API `reasoning.summary` (CP-24). */
   reasoningSummary?: 'auto' | 'concise' | 'detailed' | 'none'
+  /**
+   * B3-1: stream replies (live text in the GUI, an early stop on a runaway
+   * repetition) when the caller wants live deltas. openai-responses streams by
+   * default; anthropic only when this is true, until its stream is verified
+   * against the live API. OpenAI-compatible and Ollama follow the
+   * `streaming` feature flag as before.
+   */
+  streaming?: boolean
   /** Responses API `service_tier` (CP-24). */
   serviceTier?: 'auto' | 'default' | 'flex' | 'priority'
   /** USD per million tokens; required for every role in use when a USD budget is set. */
