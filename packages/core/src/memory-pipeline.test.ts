@@ -84,3 +84,19 @@ test('CP-20: a full store skips new notes and a provider failure changes nothing
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+test('the extraction sends the given effort, and none when none is given', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-mem-effort-'))
+  try {
+    const seen: Array<string | undefined> = []
+    const provider = {
+      name: 'fake',
+      complete: async (_messages: unknown, options: { effort?: string }) => (seen.push(options.effort), { content: '{"memories":[]}', usage: { inputTokens: 0, outputTokens: 0 } }),
+    }
+    const digest = { objective: 'o', final: 'f', tools: [], files: [], runId: 'run-e' }
+    await new MemoryPipeline({ store: MemoryStore.forStateDir(dir), provider: provider as never, effort: 'none' }).run(digest)
+    await new MemoryPipeline({ store: MemoryStore.forStateDir(dir), provider: provider as never }).run(digest)
+    assert.deepEqual(seen, ['none', undefined])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

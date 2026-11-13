@@ -1254,6 +1254,9 @@ export class Conversation {
     const pipeline = new MemoryPipeline({
       store: MemoryStore.forStateDir(this.config.stateDir),
       provider: createProvider(this.config.summarizerRole, this.config.workspaceRoot, this.runId),
+      // A short structured extraction, like the thinking summaries: no
+      // reasoning unless the summarizer role asks for it.
+      effort: this.config.summarizerRole.effort ?? 'none',
       log: (line) => console.error(`[hy] ${line}`),
     })
     await pipeline.run({ objective, final, tools, files: [], runId: this.runId })

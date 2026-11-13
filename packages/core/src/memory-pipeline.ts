@@ -74,6 +74,8 @@ export class MemoryPipeline {
       store: MemoryStore
       provider: LlmProvider
       maxTokens?: number
+      /** Reasoning effort for the extraction (the summarizer role's; omitted: the provider default). */
+      effort?: string
       log?: (line: string) => void
     },
   ) {}
@@ -100,7 +102,7 @@ export class MemoryPipeline {
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: MemoryPipeline.prompt(digest) },
         ],
-        { maxTokens: this.options.maxTokens ?? 400, temperature: 0, json: true },
+        { maxTokens: this.options.maxTokens ?? 400, temperature: 0, json: true, ...(this.options.effort ? { effort: this.options.effort } : {}) },
       )
       const parsed = parseMemoryCandidates(completion.content)
       if (parsed.error) return { applied: 0, skipped: 0, error: parsed.error }
