@@ -9,7 +9,7 @@ import type { SkillInfo } from './skills.js'
 import type { MemoryStore } from './memory.js'
 import { validate, type Schema, type ToolSpec } from './tool-registry.js'
 import { discoverProjectChecks, renderProjectChecks } from './project-checks.js'
-import { TurnProgress, stallNote, verificationNudge, verificationNoticeText } from './progress.js'
+import { TurnProgress, failedCheckNudge, stallNote, verificationNudge, verificationNoticeText } from './progress.js'
 import { announcesNextStep, embedsCallInProse, hasCallsAfterFirstObject, looksLikeBrokenToolCall, recoverMalformedCall, recoverTemplateCall, recoverUnwrappedBatch, rememberToolNames } from './reply-guard.js'
 import { steerMessage, type SteerInbox } from './steering.js'
 import { classifyDenial, type DenialInfo } from './denial.js'
@@ -1210,13 +1210,19 @@ export class Agent {
       // A final answer right after a code edit that nothing has checked: send it
       // back once. The model either runs a check or says what is unverified; a
       // second final is accepted either way (the summary below records which).
-      const unchecked = !calls && action && typeof action.final === 'string' && !objectiveMode ? progress.uncheckedEdits() : []
-      if (unchecked.length > 0 && this.options.verifyGate !== false && !verifyNudged && !lastStepDelegated && !this.options.allowWaitingReply?.()) {
+      // B8: a final after a failed check is sent back the same way. One nudge
+      // per turn in total, so a check that fails for reasons outside the change
+      // costs one round trip, never a loop.
+      const finalCandidate = !calls && action && typeof action.final === 'string' && !objectiveMode
+      const unchecked = finalCandidate ? progress.uncheckedEdits() : []
+      const failedCheck = finalCandidate && unchecked.length === 0 ? progress.failedCheckAfterEdit() : undefined
+      if ((unchecked.length > 0 || failedCheck) && this.options.verifyGate !== false && !verifyNudged && !lastStepDelegated && !this.options.allowWaitingReply?.()) {
         verifyNudged = true
+        const reason = failedCheck ? 'final-after-failed-check' : 'final-without-verification'
         messages.push(reply(content))
-        messages.push({ role: 'user', content: verificationNudge(unchecked) })
-        this.options.sessionLog.append('turn/nudge', { step, reason: 'final-without-verification', files: unchecked.slice(0, 20), ...replay(messages, false) })
-        this.options.onEvent?.({ type: 'retry', step, reason: 'final-without-verification', content: truncate(String(action!.final), 2_000) })
+        messages.push({ role: 'user', content: failedCheck ? failedCheckNudge(failedCheck) : verificationNudge(unchecked) })
+        this.options.sessionLog.append('turn/nudge', { step, reason, ...(failedCheck ? { check: failedCheck.target } : { files: unchecked.slice(0, 20) }), ...replay(messages, false) })
+        this.options.onEvent?.({ type: 'retry', step, reason, content: truncate(String(action!.final), 2_000) })
         continue
       }
 
@@ -1419,7 +1425,8 @@ export class Agent {
         }
         const view = this.options.context?.toolOutput(callId, raw) ?? { visible: truncate(raw) }
         if (shellFailed) {
-          return { call, callId, ok: false as const, output: view.visible }
+          // The result rides along so the turn's progress records the exit code.
+          return { call, callId, ok: false as const, result, output: view.visible }
         }
         return { call, callId, ok: true as const, result, output: view.visible, ...(view.spillRef ? { spillRef: view.spillRef } : {}) }
       } catch (error) {

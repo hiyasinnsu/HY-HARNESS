@@ -167,6 +167,17 @@ export class TurnProgress {
     return code
   }
 
+  /**
+   * B8: the last check after the last code edit, when it failed. A failed check
+   * still counts as a check (`uncheckedEdits` is empty), so this is asked
+   * separately; prose-only edits are ignored as there.
+   */
+  failedCheckAfterEdit(): CheckRecord | undefined {
+    if (this.lastEditStep === 0 || this.lastCheckStep < this.lastEditStep || this.lastCheckPassed !== false) return undefined
+    const code = [...this.edited].some((file) => !PROSE_EXTENSIONS.has(path.extname(file).toLowerCase()))
+    return code ? this.checks.at(-1) : undefined
+  }
+
   summary(): VerificationSummary {
     const verifiedAfterLastEdit = this.lastEditStep > 0 && this.lastCheckStep >= this.lastEditStep
     return {
@@ -184,6 +195,13 @@ export function verificationNudge(files: readonly string[]): string {
   return `You changed ${list} after your last check, and no build, test, lint or run has confirmed the change. ` +
     'Before finishing, run the narrowest relevant check with a tool (build, test, type check, lint, or run the changed code). ' +
     'If no check applies or one cannot run here, reply with your final answer and say plainly what was not verified.'
+}
+
+/** B8: the note sent back when a final answer follows a failed check. */
+export function failedCheckNudge(check: CheckRecord): string {
+  return `Your last check after the edit failed: ${check.target}${check.exitCode !== undefined ? ` (exit ${check.exitCode})` : ''}. ` +
+    'Fix the failure and check again. If it is unrelated to your change (it failed before, or needs something unavailable here), ' +
+    'reply with your final answer and say plainly that it fails and why.'
 }
 
 /** The escalating note for a stall (levels 1 and 2). */

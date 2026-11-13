@@ -179,3 +179,29 @@ test('B5: step/end says how much of the previous request was repeated and what c
   const last = pruned.log.filter((e) => e.type === 'step/end').at(-1)!.payload as { prefix: { keptMessages: number; changed?: string } }
   assert.deepEqual(last.prefix, { keptMessages: 2, changed: 'history' })
 })
+
+test('B8: a final after a failed check is sent back once; the next final is accepted', async () => {
+  const { result, seen, log } = await runAgent([
+    { toolCalls: [{ name: 'apply_patch', args: { file: 'a.ts', content: 'x' } }] },
+    { toolCalls: [{ name: 'shell', args: { command: 'npm test' } }] },
+    { content: 'Done.' },
+    { content: 'Done. npm test still fails in b.test.ts, which this change does not touch.' },
+  ], async (tool) => tool === 'shell' ? { exitCode: 1, stdout: '', stderr: 'fail' } : { appliedFiles: ['a.ts'], created: [], deleted: [], warnings: [] })
+  assert.equal(result.final, 'Done. npm test still fails in b.test.ts, which this change does not touch.')
+  assert.match(seen[3]!, /Your last check after the edit failed: npm test \(exit 1\)/)
+  assert.deepEqual(log.filter((e) => e.type === 'turn/nudge').map((e) => (e.payload as { reason: string }).reason), ['final-after-failed-check'])
+})
+
+test('B8: a failed check on prose-only edits, or before any edit, is not sent back', () => {
+  const prose = new TurnProgress()
+  prose.record(1, [ok('write_file', { file: 'README.md' }, '{}')])
+  prose.record(2, [failed('shell', { command: 'markdownlint' }, 'exit 1')])
+  assert.equal(prose.failedCheckAfterEdit(), undefined)
+  const noEdit = new TurnProgress()
+  noEdit.record(1, [failed('shell', { command: 'npm test' }, 'exit 1')])
+  assert.equal(noEdit.failedCheckAfterEdit(), undefined)
+  const passed = new TurnProgress()
+  passed.record(1, [ok('edit_file', { file: 'a.ts' }, '{}')])
+  passed.record(2, [ok('shell', { command: 'npm test' }, 'ok', { exitCode: 0 })])
+  assert.equal(passed.failedCheckAfterEdit(), undefined)
+})
