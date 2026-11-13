@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { stripVTControlCharacters } from 'node:util'
+import { StringDecoder } from 'node:string_decoder'
 import type { ExecResult, PatchApplyResult, SandboxMode } from './protocol.js'
 import { ExecRpcClient, ExecRpcError } from './exec-rpc.js'
 import { TOOLS_BY_NAME, TOOLS_BY_SDK, deferredTools, jsonSchemaToTs, validate, type ToolSpec } from './tool-registry.js'
@@ -1940,26 +1941,9 @@ export class ToolRuntime {
     const full = spilled ?? resolved!.full
     const stat = fs.statSync(full)
     if (!stat.isFile()) throw new Error(`not a file: ${input}`)
-    const bytes = fs.readFileSync(full)
-    const text = decodeTextBuffer(bytes)
-    if (text === undefined) throw new Error(`binary file: ${input}`)
-    const allLines = text.split(/\r?\n/)
-    if (text.endsWith('\n')) allLines.pop()
-    const totalLines = allLines.length
-    const start = Math.max(1, Number(args.startLine ?? 1))
-    const end = Math.min(totalLines, Number(args.endLine ?? totalLines))
-    const selected = allLines.slice(start - 1, Math.max(start - 1, end))
-    let content = selected.join('\n')
-    let truncated = false
-    if (selected.length > 400) {
-      content = selected.slice(0, 400).join('\n')
-      truncated = true
-    }
-    if (content.length > 50_000) {
-      content = content.slice(0, 50_000)
-      truncated = true
-    }
-    const hash = sha256(bytes)
+    const read = readTextLines(full, stat.size, args.startLine, args.endLine)
+    if (!read) throw new Error(`binary file: ${input}`)
+    const { content, totalLines, truncated, sha256: hash } = read
     const normalized = spilled ? input : this.qualified(resolved!.root, resolved!.rel)
     if (!spilled) this.readHashes.set(normalized, hash)
     return {
@@ -2358,6 +2342,124 @@ export type TextEncoding = 'utf8' | 'utf8bom' | 'utf16le' | 'utf16be'
 export interface DecodedText {
   text: string
   encoding: TextEncoding
+}
+
+/** Files above this size are read in chunks instead of whole (B4-1). */
+export const STREAM_READ_BYTES = 8 * 1024 * 1024
+const READ_MAX_LINES = 400
+const READ_MAX_CHARS = 50_000
+
+/** The `read_file` page: the selected lines (capped), the file's line count and hash. */
+function pageOf(lines: readonly string[], start: number, end: number): { content: string; truncated: boolean } {
+  const selected = lines.slice(start - 1, Math.max(start - 1, end))
+  let content = selected.join('\n')
+  let truncated = false
+  if (selected.length > READ_MAX_LINES) {
+    content = selected.slice(0, READ_MAX_LINES).join('\n')
+    truncated = true
+  }
+  if (content.length > READ_MAX_CHARS) {
+    content = content.slice(0, READ_MAX_CHARS)
+    truncated = true
+  }
+  return { content, truncated }
+}
+
+/**
+ * B4-1: `read_file`'s text, line count and hash. A small file is read whole,
+ * as before. A large one (a multi-hundred-MB log) is read in chunks: the hash
+ * and the line count still cover the whole file (the read-before-edit check
+ * compares the hash), but only the lines of the requested page are kept.
+ * Both paths decode and split identically; `undefined` means binary.
+ */
+export function readTextLines(
+  full: string,
+  size: number,
+  startLine: unknown,
+  endLine: unknown,
+  options: { streamAbove?: number; chunkBytes?: number } = {},
+): { content: string; totalLines: number; truncated: boolean; sha256: string } | undefined {
+  const start = Math.max(1, Number(startLine ?? 1))
+  if (size <= (options.streamAbove ?? STREAM_READ_BYTES)) {
+    const bytes = fs.readFileSync(full)
+    const text = decodeTextBuffer(bytes)
+    if (text === undefined) return undefined
+    const lines = text.split(/\r?\n/)
+    if (text.endsWith('\n')) lines.pop()
+    const end = Math.min(lines.length, Number(endLine ?? lines.length))
+    return { ...pageOf(lines, start, end), totalLines: lines.length, sha256: sha256(bytes) }
+  }
+  const fd = fs.openSync(full, 'r')
+  try {
+    // The encoding is decided on a sample whose length has the file's parity,
+    // because `decodeTextFile` also checks the length's parity.
+    const sampleLength = Math.min(size, 65_536 + (size % 2))
+    const sample = Buffer.alloc(sampleLength)
+    fs.readSync(fd, sample, 0, sampleLength, 0)
+    const detected = decodeTextFile(sample)
+    if (!detected) return undefined
+    const utf16 = detected.encoding === 'utf16le' || detected.encoding === 'utf16be'
+    const decoder = new StringDecoder(utf16 ? 'utf16le' : 'utf8')
+    const hash = createHash('sha256')
+    // Collect a few lines past the page, enough to know whether it is cut.
+    const wantEnd = endLine === undefined ? start + READ_MAX_LINES : Math.min(Number(endLine), start + READ_MAX_LINES)
+    const kept: string[] = []
+    let lineNo = 0
+    let pending = ''
+    let skipBom = utf16
+    const take = (line: string) => {
+      lineNo += 1
+      if (lineNo >= start && lineNo <= wantEnd) kept.push(line)
+    }
+    const chunkBytes = Math.max(2, (options.chunkBytes ?? 1024 * 1024) & ~1)
+    const buffer = Buffer.alloc(chunkBytes)
+    let carry: Buffer | undefined
+    for (let position = 0; position < size;) {
+      const n = fs.readSync(fd, buffer, 0, Math.min(chunkBytes, size - position), position)
+      if (n <= 0) break
+      position += n
+      const raw = buffer.subarray(0, n)
+      hash.update(raw)
+      let bytes: Buffer = carry ? Buffer.concat([carry, raw]) : Buffer.from(raw)
+      carry = undefined
+      if (detected.encoding === 'utf16be') {
+        if (bytes.length % 2 === 1) {
+          carry = bytes.subarray(bytes.length - 1)
+          bytes = bytes.subarray(0, bytes.length - 1)
+        }
+        bytes = Buffer.from(bytes)
+        bytes.swap16()
+      }
+      let text = decoder.write(bytes)
+      // The UTF-16 BOM is not part of the text (`decodeTextFile` drops it); a UTF-8 BOM is.
+      if (skipBom && text.length > 0) {
+        if (text.startsWith('\uFEFF')) text = text.slice(1)
+        skipBom = false
+      }
+      if (text.includes('\0')) return undefined
+      pending += text
+      let newline = pending.indexOf('\n')
+      while (newline >= 0) {
+        const line = pending.slice(0, newline)
+        take(line.endsWith('\r') ? line.slice(0, -1) : line)
+        pending = pending.slice(newline + 1)
+        newline = pending.indexOf('\n')
+      }
+    }
+    const rest = decoder.end()
+    if (rest.includes('\0')) return undefined
+    pending += rest
+    // As `split(/\r?\n/)` with a trailing newline popped: a last line without
+    // a newline is a line; nothing after a final newline is not.
+    if (pending !== '') take(pending)
+    const totalLines = lineNo === 0 ? 1 : lineNo
+    const end = Math.min(totalLines, Number(endLine ?? totalLines))
+    // `kept` holds one line past a full page, so pageOf sees a cut page as in the whole-file path.
+    const page = pageOf(kept, 1, Math.max(0, Math.min(end, wantEnd) - start + 1))
+    return { content: page.content, totalLines, truncated: page.truncated, sha256: hash.digest('hex') }
+  } finally {
+    fs.closeSync(fd)
+  }
 }
 
 /**

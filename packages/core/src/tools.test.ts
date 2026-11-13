@@ -962,3 +962,44 @@ test('B14: the reason the persistent shell is unavailable is reported once, not 
   assert.equal(second.gap, undefined)
   assert.deepEqual(calls, ['open'], 'not reopened on every call')
 })
+
+test('B4-1: a large file read in chunks gives exactly what the whole-file read gives', async () => {
+  const { readTextLines } = await import('./tools.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hy-read-'))
+  try {
+    const body = Array.from({ length: 900 }, (_, i) => `line ${i + 1} äöü 漢字 ${'x'.repeat(i % 7)}`).join('\r\n')
+    const utf16be = (text: string) => {
+      const le = Buffer.from(text, 'utf16le')
+      le.swap16()
+      return Buffer.concat([Buffer.from([0xfe, 0xff]), le])
+    }
+    const files: Record<string, Buffer> = {
+      'crlf-trailing.txt': Buffer.from(`${body}\r\n`),
+      'lf-no-trailing.txt': Buffer.from(body.replace(/\r\n/g, '\n')),
+      'bom.txt': Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(`${body}\n`)]),
+      'utf16le-bom.txt': Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${body}\r\n`, 'utf16le')]),
+      'utf16le-plain.txt': Buffer.from('plain ascii\r\nsecond\r\n'.repeat(50), 'utf16le'),
+      'utf16be.txt': utf16be(`${body}\n`),
+      'lone-cr.txt': Buffer.from('a\rb\nc\r'),
+      'empty.txt': Buffer.alloc(0),
+      'long-line.txt': Buffer.from(`${'y'.repeat(60_000)}\nz\n`),
+    }
+    const ranges: Array<[unknown, unknown]> = [[undefined, undefined], [1, 5], [395, 420], [850, undefined], [899, 2000], [3, 2]]
+    for (const [name, bytes] of Object.entries(files)) {
+      const file = path.join(dir, name)
+      fs.writeFileSync(file, bytes)
+      for (const [start, end] of ranges) {
+        const whole = readTextLines(file, bytes.length, start, end)
+        for (const chunkBytes of [2, 6, 7, 4096]) {
+          const chunked = readTextLines(file, bytes.length, start, end, { streamAbove: -1, chunkBytes })
+          assert.deepEqual(chunked, whole, `${name} ${String(start)}-${String(end)} chunk ${chunkBytes}`)
+        }
+      }
+    }
+    const binary = path.join(dir, 'binary.bin')
+    fs.writeFileSync(binary, Buffer.from([0x41, 0x00, 0x42, 0x43, 0x44]))
+    assert.equal(readTextLines(binary, 5, undefined, undefined, { streamAbove: -1, chunkBytes: 2 }), undefined)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
