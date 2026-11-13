@@ -32,6 +32,8 @@ export interface GuardianOptions {
   approveBelow?: number
   maxConsecutiveDenials?: number
   maxTokens?: number
+  /** The guardian role's reasoning effort (B3-2: was ignored; omitted means the provider default). */
+  effort?: string
   /** CP-44: recent activity (tool calls, files touched) supplied by the caller. */
   context?: () => string
   /** CP-44: character budget for the review prompt (default 8,000). */
@@ -186,6 +188,7 @@ export class Guardian {
       const completion = await this.options.provider.complete(this.messages(request), {
         maxTokens: this.options.maxTokens ?? 256,
         temperature: 0,
+        ...(this.options.effort ? { effort: this.options.effort } : {}),
         ...(signal ? { signal } : {}),
       })
       verdict = parseVerdict(completion.content)

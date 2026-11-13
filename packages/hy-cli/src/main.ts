@@ -1031,7 +1031,7 @@ async function ralph(p: Parsed): Promise<number> {
         budget,
         protectedPaths: config.protectedPaths,
         allowProtectedEdits: allowProtected,
-        ...(grader ? { grader } : {}),
+        ...(grader ? { grader, ...(config.graderRole.effort ? { graderEffort: config.graderRole.effort } : {}) } : {}),
         pinned: discoverPinned(config.workspaceRoot, config.rules),
         workerNotes: () => deriveNotes(readEvents(logFile), runId),
         ...(roundTimeout !== undefined ? { roundTimeoutMs: Number(roundTimeout) } : {}),

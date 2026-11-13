@@ -63,6 +63,8 @@ export interface RalphOptions {
   allowProtectedEdits: boolean
   /** Gate 2; undefined skips it (`--no-grader`). Should be metered by `budget`. */
   grader?: LlmProvider
+  /** The grader role's reasoning effort (B3-2: was ignored; omitted means the provider default). */
+  graderEffort?: string
   pinned: readonly PinnedConstraint[]
   /** The run's agent notes, shown to the grader only as untrusted data. */
   workerNotes: () => readonly LedgerNote[]
@@ -326,7 +328,7 @@ export async function runVerifierRalph(o: RalphOptions): Promise<RalphResult> {
                 .join('\n\n'),
             },
           ],
-          { maxTokens: 800, temperature: 0, ...(o.signal ? { signal: o.signal } : {}) },
+          { maxTokens: 800, temperature: 0, ...(o.graderEffort ? { effort: o.graderEffort } : {}), ...(o.signal ? { signal: o.signal } : {}) },
         )
         const verdict = parseGraderVerdict(completion.content) ?? {
           pass: false,

@@ -212,3 +212,11 @@ test('CP-05: approval policies (never, on-request, untrusted)', async () => {
   assert.equal(approvedOf(await untrusted({ command: 'npm test', sandbox: 'workspace-write' })), false)
   assert.deepEqual(asked, ['curl x'], 'Guardian still reviews confined commands under untrusted')
 })
+test('B3-2: the guardian role\'s effort reaches the provider; none set sends none', async () => {
+  const withEffort = new FakeProvider([verdict('approve', 10)])
+  await new Guardian({ provider: withEffort, objective: 'o', cache: false, effort: 'none' }).review({ command: 'npm test' })
+  assert.equal(withEffort.options[0]?.effort, 'none')
+  const without = new FakeProvider([verdict('approve', 10)])
+  await new Guardian({ provider: without, objective: 'o', cache: false }).review({ command: 'npm test' })
+  assert.equal(without.options[0]?.effort, undefined)
+})

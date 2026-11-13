@@ -156,3 +156,14 @@ test('the failure digest is capped at about 2,000 tokens', () => {
     'falls back to the outcome alone when nothing else fits',
   )
 })
+
+test('B3-2: the grader role\'s effort reaches the grader request', async () => {
+  const seen: Array<string | undefined> = []
+  const grader: LlmProvider = {
+    name: 'g',
+    complete: async (_messages, options) => (seen.push(options.effort), { content: '{"pass":true,"unmetCriteria":[],"rollbackRecommended":false,"reasoning":"ok"}', usage: { inputTokens: 0, outputTokens: 0 } }),
+  }
+  const r = await runVerifierRalph(base([], { grader, graderEffort: 'low' }))
+  assert.equal(r.outcome, 'succeeded')
+  assert.deepEqual(seen, ['low'])
+})

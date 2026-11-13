@@ -739,6 +739,7 @@ export function approvals(
           ),
           objective,
           approveBelow: config.guardianApproveBelow,
+          ...(config.guardianRole.effort ? { effort: config.guardianRole.effort } : {}),
         })
   const approve = createApprover({
     autoApprove: config.autoApprove,
@@ -2169,7 +2170,7 @@ export class Conversation {
           ].join('\n\n'),
         },
       ],
-      { maxTokens: role.maxOutputTokens, ...(role.temperature !== undefined ? { temperature: role.temperature } : {}) },
+      { maxTokens: role.maxOutputTokens, ...(role.temperature !== undefined ? { temperature: role.temperature } : {}), ...(role.effort ? { effort: role.effort } : {}) },
     )
     this.log.append('goal/grade/usage', { usage: completion.usage })
     const text = completion.content.trim().replace(/^```[a-zA-Z]*\s*/, '').replace(/```$/, '').trim()
