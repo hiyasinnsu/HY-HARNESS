@@ -338,6 +338,9 @@ export function projectChat(events: readonly SessionEvent[], runId: string): Cha
         const action = parseModelAction(content)
         const calls = parseCalls(action)
         if (calls.length > 0) {
+          // B7: text the model wrote beside native calls, shown before their cards.
+          const prose = typeof p.prose === 'string' ? p.prose.trim() : ''
+          if (prose) entries.push({ id: `msg-${e.seq}`, kind: 'assistant', runId, text: prose, ts })
           pendingCalls.push(...calls)
           break
         }

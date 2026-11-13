@@ -157,7 +157,8 @@ function repliesOf(slice: RunSlice): { replies: Completion[]; missingAt?: number
       const content = String(p.content ?? '')
       const calls = nativeCallsOf(content, p.toolCallIds)
       if (calls) native = true
-      current = calls ? { content: '', toolCalls: calls, usage } : { content, usage }
+      // B7: text logged beside native calls is served with them, as it arrived.
+      current = calls ? { content: typeof p.prose === 'string' ? p.prose : '', toolCalls: calls, usage } : { content, usage }
     } else if ((e.type === 'turn/retry' || e.type === 'turn/failure') && typeof p.assistant === 'string') {
       current = { content: p.assistant, usage }
     } else if (e.type === 'turn/retry' && typeof p.rejected === 'string') {

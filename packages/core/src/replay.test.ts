@@ -78,3 +78,15 @@ test('F1: a rejected reply is logged and replayed; a log without it stops as unr
   assert.equal(result.status, 'unreplayable', JSON.stringify(result))
   assert.match(result.note ?? '', /not recorded/)
 })
+
+test('B7: text beside native calls is logged and replayed, while history keeps only the calls', async () => {
+  const seen: string[] = []
+  const events = await record([
+    { content: 'Reading the file first.', toolCalls: [{ id: 'c1', name: 'read_file', args: { path: 'a.ts' } }] },
+    { content: 'It says old.' },
+  ], async (tool, args) => (seen.push(JSON.stringify(args)), execute(tool)))
+  const message = events.find((e) => e.type === 'assistant/message')!.payload as { content: string; prose?: string }
+  assert.equal(message.prose, 'Reading the file first.')
+  assert.equal(message.content, '{"tool":"read_file","args":{"path":"a.ts"}}', 'history and the request are unchanged')
+  assert.equal((await replayRun(agentRuns(events)[0]!)).status, 'same')
+})

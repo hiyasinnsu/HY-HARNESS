@@ -1158,11 +1158,15 @@ export class Agent {
       // Native call ids are logged so a resumed session replays the steps in
       // the same structured form (`rebuildHistory`).
       const loggedCallIds = calls && historyCalls && content === wireReply ? historyCalls.map((call) => call.id) : undefined
-      this.options.sessionLog.append('assistant/message', { content, ...(kept ? { withReasoning: true } : {}), ...(loggedCallIds ? { toolCallIds: loggedCallIds } : {}) })
+      // B7: text a native reply carried beside its calls. History and the
+      // request keep only the calls (`content`), as before, so the cached
+      // prefix is unchanged; the text is kept for the log, the chat and replay.
+      const prose = calls && nativeCalls?.length ? completion.content.trim() : ''
+      this.options.sessionLog.append('assistant/message', { content, ...(kept ? { withReasoning: true } : {}), ...(loggedCallIds ? { toolCallIds: loggedCallIds } : {}), ...(prose ? { prose } : {}) })
       // Tool calls are rendered from the structured tool-start/tool events.
       // Sending the serialized call here as well lets a 4K truncation cut the
       // JSON in half, which the UI then shows as a broken tool call.
-      this.options.onEvent?.({ type: 'assistant', step, content: calls ? '' : truncate(content, 4_000) })
+      this.options.onEvent?.({ type: 'assistant', step, content: calls ? truncate(prose, 4_000) : truncate(content, 4_000) })
 
       if (!calls && action && this.options.finalSchema && action.final !== undefined && !objectiveMode) {
         // Structured output: the final value must match the schema; a mismatch

@@ -300,3 +300,16 @@ test('dialogue remains in the parent transcript and worker steering is a notice,
     ['user', 'Unrelated small talk'], ['assistant', 'A natural reply'], ['notice', 'A worker result'], ['notice', 'The task is incomplete.'],
   ])
 })
+
+test('B7: text written beside native calls is shown before their cards, live and after a reload', () => {
+  const entries = projectChat([
+    ev(1, 'turn/start', { turn: 1 }),
+    ev(2, 'user/message', { content: 'fix it' }),
+    ev(3, 'assistant/message', { content: '{"tool":"read_file","args":{"path":"a.ts"}}', toolCallIds: ['c1'], prose: 'Let me look at a.ts first.' }),
+    ev(4, 'tool/result', { callId: 'step-1', name: 'read_file', output: '{"content":"x"}', isError: false }),
+  ], 'run-test')
+  assert.deepEqual(entries.filter((e) => e.kind !== 'user').map((e) => e.kind === 'assistant' ? `assistant:${e.text}` : e.kind), ['assistant:Let me look at a.ts first.', 'tool'])
+  const live: Parameters<typeof applyAgentEvent>[0] = []
+  applyAgentEvent(live, 'run-test', { type: 'assistant', step: 1, content: 'Let me look at a.ts first.' } as AgentEvent)
+  assert.equal(live.length, 1)
+})
