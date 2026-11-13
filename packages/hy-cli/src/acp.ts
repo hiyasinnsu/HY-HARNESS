@@ -192,7 +192,9 @@ export function createAcpServer(options: AcpServerOptions): AcpServer {
       runId,
       false,
       (approval) => askPermission(runId, approval.command, approval.justification),
-      (question) => Promise.resolve(question),
+      // B17: no question channel to the client yet, so ask_user is not offered.
+      // An echo answer here returned the model's own question as the user's reply.
+      undefined,
       (event) => stream(runId, event),
       { checkpoints: false },
     )

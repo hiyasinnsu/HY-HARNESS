@@ -74,7 +74,9 @@ export function createSdkServer(options: SdkServerOptions): SdkServer {
       runId,
       false,
       async () => options.config.autoApprove || options.config.fullAuto,
-      (question) => Promise.resolve(question),
+      // B17: no question channel to the client yet, so ask_user is not offered.
+      // An echo answer here returned the model's own question as the user's reply.
+      undefined,
       (event) => notify('session/event', { sessionId: runId, event }),
       { checkpoints: false },
     )
