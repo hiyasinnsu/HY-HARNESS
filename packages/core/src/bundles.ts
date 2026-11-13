@@ -81,8 +81,11 @@ export const BUNDLES: Record<string, Bundle> = {
   },
   worker: {
     name: 'worker',
-    description: 'The default worker tools, without delegation (workers do not spawn workers).',
-    allowTools: CORE_TOOLS,
+    // B5: the core tools plus `lsp` (offered only when a language server is
+    // configured), so a worker can read diagnostics after an edit. The rest of
+    // the default set (run_code, web, MCP) stays out to keep the worker small.
+    description: 'The core tools plus lsp, without delegation (workers do not spawn workers).',
+    allowTools: [...CORE_TOOLS, 'lsp'],
     panels: ['files', 'diff', 'plan'],
   },
 }

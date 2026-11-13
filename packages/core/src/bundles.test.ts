@@ -28,6 +28,9 @@ test('bundles only ever take tools away', () => {
   const worker = resolveBundles(['worker'])
   assert.ok(worker.tools!.has('apply_patch'))
   assert.equal(worker.tools!.has('run_code'), false)
+  // B5: a worker can read language-server diagnostics.
+  assert.ok(worker.tools!.has('lsp'))
+  assert.equal(worker.tools!.has('web_fetch'), false)
 })
 
 test('an unknown bundle is an error instead of a silent widening', () => {
