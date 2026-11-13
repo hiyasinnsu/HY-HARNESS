@@ -672,6 +672,8 @@ export function sessionContext(
   budget?: Budget4D,
   hooks?: Hooks,
   onResult?: (event: SessionEvent) => void,
+  /** The window of the model this context serves (default: the worker role's). */
+  contextWindowTokens: number = config.role.contextWindowTokens,
 ) {
   const ledger = Ledger.forRun(log, runId, discoverPinned(config.workspaceRoot, config.rules), {
     maxEntries: config.limits.rationaleMaxEntries,
@@ -681,7 +683,7 @@ export function sessionContext(
   const context = new SpillCompaction({
     spillDir,
     sessionId: log.sessionId,
-    contextWindowTokens: config.role.contextWindowTokens,
+    contextWindowTokens,
     thresholdBytes: config.limits.spillThresholdBytes,
     triggerRatio: config.limits.compactionTriggerRatio,
     keepRecentTurns: config.limits.keepRecentTurns,
@@ -1041,8 +1043,14 @@ async function runSubagent(
   const subagentRole = config.subagentRole
   // 6-4: see READ_ONLY_SUBAGENT_INSTRUCTION.
   const roleInstruction = o.readOnly ? READ_ONLY_SUBAGENT_INSTRUCTION : o.roleInstruction
+  // B12: the same spill and compaction as a top-level session, sized for the
+  // subagent's model. Without it a long delegated task overflowed the window
+  // and failed instead of compacting.
+  const { context, ledger } = sessionContext(config, log, runId, undefined, hooks, undefined, subagentRole.contextWindowTokens)
   const agent = new Agent({
     ...(hooks ? { hooks } : {}),
+    context,
+    ledger,
     provider: createProvider(subagentRole, config.workspaceRoot, runId),
     tools,
     sessionLog: log,
