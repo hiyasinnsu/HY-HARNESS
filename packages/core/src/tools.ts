@@ -756,7 +756,7 @@ export class ToolRuntime {
   /** Session working directory, workspace-relative (`''` = the root), WP-30. */
   private cwd = ''
   /** The session's persistent shell (WP-31), opened on first use. */
-  private shellHandle: { id?: string; gap?: string; mode?: string } | undefined
+  private shellHandle: { id?: string; gap?: string; mode?: string; gapReported?: boolean } | undefined
   /** Why the persistent shell was unavailable, reported once on the one-shot path. */
   private persistentGap: string | undefined
   /** Command shapes already offered the low-integrity token (asked at most once each). */
@@ -1092,7 +1092,13 @@ export class ToolRuntime {
     }
     const shellId = this.shellHandle?.id
     if (!shellId) {
-      this.persistentGap = this.shellHandle?.gap ?? 'the persistent shell is unavailable'
+      // B14: the handle that failed to open is kept (so the shell is not
+      // reopened on every call), and its reason is reported once. It was
+      // re-attached to every later one-shot result before.
+      if (this.shellHandle && !this.shellHandle.gapReported) {
+        this.persistentGap = this.shellHandle.gap ?? 'the persistent shell is unavailable'
+        this.shellHandle.gapReported = true
+      }
       return undefined
     }
     // The shell itself was started without evaluating this command, so the
@@ -1101,6 +1107,11 @@ export class ToolRuntime {
     if (evaluation.decision === 'deny') {
       throw new Error(`command denied by policy${evaluation.justification ? `: ${evaluation.justification}` : ''}`)
     }
+    // B14: a policy rule that names a sandbox for this command must decide
+    // where it runs. The shell holds the token of the mode it was opened in,
+    // so a different mode goes to the one-shot path, which applies the rule.
+    // Checked before any approval prompt, or the one-shot path would ask again.
+    if (evaluation.sandbox && evaluation.sandbox !== mode) return undefined
     if (evaluation.decision === 'prompt') {
       if (!this.approve) throw new Error('command requires approval')
       const answer = await this.approve({
@@ -1131,6 +1142,16 @@ export class ToolRuntime {
     try {
       await this.exec.shellWrite(shellId, command)
       read = await this.exec.shellRead(shellId, timeout)
+    } catch (error) {
+      // B14: a failed write or read (the client-side timeout, a dropped
+      // connection) leaves the daemon's synchronous `shell/read` running:
+      // `$/cancelRequest` does not stop it. Only closing the shell ends it, and
+      // a shell in that state must not take the next command.
+      if (!stopped && this.shellHandle?.id === shellId) {
+        this.shellHandle = undefined
+        await this.exec.shellClose(shellId).catch(() => undefined)
+      }
+      throw error
     } finally {
       signal?.removeEventListener('abort', onAbort)
     }

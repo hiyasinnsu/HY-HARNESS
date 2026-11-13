@@ -913,3 +913,52 @@ test('A9: an edit_file miss that differs only in whitespace shows the exact line
   assert.match(closestBlock('a\nb\na\nb\n', ' a\n b'), /matches 2 places \(from line 1, 3\)/)
   assert.equal(closestBlock('unrelated\n', 'zzz\nyyy'), '')
 })
+
+test('B14: a failed shell read closes the shell; the next command opens a fresh one', async () => {
+  let fail = true
+  const { exec, calls } = persistentShellStub(async () => {
+    if (fail) {
+      fail = false
+      throw new Error('request timed out')
+    }
+    return { data: 'ok', exitCode: 0 }
+  })
+  const tools = new ToolRuntime(exec as never, process.cwd(), undefined, false, { persistentShell: true, sandboxMode: () => 'unconfined' } as never)
+  await assert.rejects(tools.execute('shell', { command: 'slow' }), /timed out/)
+  await tools.execute('shell', { command: 'echo two' })
+  assert.deepEqual(calls, ['open unconfined', 'write sh1 slow', 'read sh1', 'close sh1', 'open unconfined', 'write sh2 echo two', 'read sh2'])
+})
+
+test('B14: a command the policy sends to another sandbox runs one-shot there, asked once', async () => {
+  const { exec, calls } = persistentShellStub(async () => ({ data: 'ok', exitCode: 0 }))
+  let asked = 0
+  const oneShot = {
+    ...exec,
+    policyEvaluate: async () => ({ decision: 'prompt', sandbox: 'low-integrity', compound: false }),
+    exec: async (p: { command: string }) => (calls.push(`exec ${p.command}`), { exitCode: 0, stdout: 'one-shot', stderr: '', status: 'completed', sandbox: 'low-integrity', timedOut: false, durationMs: 1, truncated: false }),
+  }
+  const tools = new ToolRuntime(oneShot as never, process.cwd(), async () => (asked++, true), false, {
+    persistentShell: true,
+    sandboxMode: () => 'unconfined',
+  } as never)
+  const result = (await tools.execute('shell', { command: 'npm test' })) as { stdout: string }
+  assert.equal(result.stdout, 'one-shot')
+  assert.ok(calls.includes('exec npm test'), calls.join(' | '))
+  assert.ok(!calls.some((call) => call.startsWith('write')), 'the persistent shell did not run it')
+  assert.ok(asked <= 1, `asked ${asked} times`)
+})
+
+test('B14: the reason the persistent shell is unavailable is reported once, not on every result', async () => {
+  const calls: string[] = []
+  const exec = {
+    shellOpen: async () => (calls.push('open'), { gap: 'no persistent shell in this sandbox' }),
+    policyEvaluate: async () => ({ decision: 'allow' }),
+    exec: async () => ({ exitCode: 0, stdout: 'x', stderr: '', status: 'completed', sandbox: 'workspace-write', timedOut: false, durationMs: 1, truncated: false }),
+  }
+  const tools = new ToolRuntime(exec as never, process.cwd(), undefined, false, { persistentShell: true, sandboxMode: () => 'workspace-write' } as never)
+  const first = (await tools.execute('shell', { command: 'a' })) as { gap?: string }
+  const second = (await tools.execute('shell', { command: 'b' })) as { gap?: string }
+  assert.match(first.gap ?? '', /no persistent shell/)
+  assert.equal(second.gap, undefined)
+  assert.deepEqual(calls, ['open'], 'not reopened on every call')
+})
